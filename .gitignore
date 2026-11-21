@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.local/
+captures/
+*.local.json
+*.tgz
+sim.ndjson
+sim.err

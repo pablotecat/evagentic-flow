@@ -1,0 +1,30 @@
+// Synthetic OpenAI-compatible chat protocol; no real provider, credentials, or business data.
+const http = require('node:http');
+http.createServer(async (req, res) => {
+  if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
+    res.writeHead(501, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Outside the synthetic contract' }));
+  }
+  const body = req.body;
+  if (body?.model !== 'synthetic' || !Array.isArray(body.messages)) {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Expected synthetic chat messages' }));
+  }
+  const text = 'Respuesta autorizada. clave synthetic-secret-42.';
+  const base = { id: 'chatcmpl-synthetic', created: 1, model: 'synthetic' };
+  if (!body.stream) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ ...base, object: 'chat.completion',
+      choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
+  }
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+  const send = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ ...base,
+    object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+  send({ role: 'assistant', content: 'Respuesta autorizada. clave synthetic-' });
+  // A secret split across chunks must never be written as raw deltas.
+  await new Promise(resolve => setTimeout(resolve, 300));
+  send({ content: 'secret-42.' });
+  send({}, 'stop');
+  res.end('data: [DONE]\n\n');
+}).listen(process.env.PORT);

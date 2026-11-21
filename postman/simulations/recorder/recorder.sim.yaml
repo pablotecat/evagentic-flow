@@ -1,0 +1,6 @@
+simulation: recorder
+routing: path
+mocks:
+  - name: synthetic-model
+    routeKey: model
+    path: postman/mocks/synthetic-model

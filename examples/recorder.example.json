@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "projectDirectory": "C:/synthetic/project-a",
+  "captureDirectory": "C:/synthetic/captures",
+  "secrets": ["synthetic-secret-42"]
+}

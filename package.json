@@ -1,0 +1,16 @@
+{
+  "name": "@evagentic/recorder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./dist/index.js" },
+  "files": ["dist", "docs/capture-v1.md", "scripts/inspect.mjs"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "dependencies": { "@opencode/plugin": "2.1.2" },
+  "devDependencies": { "@types/node": "^26.0.0", "typescript": "^6.0.0" }
+}
