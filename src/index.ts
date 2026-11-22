@@ -596,8 +596,10 @@ function redact(input: string, secrets: string[]) {
   }
   const patterns = [
     /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+    // Cookie values span semicolons, spaces and commas; include folded header continuations.
+    /(?:\b|[_-])(?:set-cookie|cookie)["']?[ \t]*[=:][^\r\n]*(?:(?:\r\n|[\r\n])[ \t]+[^\r\n]*)*/gi,
     /\b(?:Bearer|Basic)\s+[A-Za-z0-9+/_=.\-]+/gi,
-    /(?:\b|[_-])(?:authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|private[_-]?key|passphrase|password|secret)["']?\s*[=:]\s*(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;]+)/gi,
+    /(?:\b|[_-])(?:authorization|proxy-authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|private[_-]?key|passphrase|password|secret)["']?\s*[=:]\s*(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;]+)/gi,
   ];
   for (const pattern of patterns) {
     text = text.replace(pattern, () => { reasons.push('credential-pattern'); return '[REDACTED]'; });

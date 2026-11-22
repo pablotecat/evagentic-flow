@@ -276,6 +276,8 @@ y consumo desconocidos, `evidence`, `horizons`, `omissions` e `incident`.
 `evidence` referencia `captureID`, `arrival`, `eventID` y tipo de las fases;
 `horizons` identifica la última fila leída de cada diario. Los tiempos ausentes
 quedan en `null`. No se mezclan identidades incompletas por exclusión de seguridad.
+`omissions` conserva sin duplicar las omisiones de todas las fases del intento,
+también las de payloads no reconocidos y resultados de archivo sin texto capturado.
 
 Un fallo conserva `incident: {kind: "tool-error", cause: null}` y su error
 observado aunque un intento posterior termine bien. No se deduce la causa raíz
@@ -351,7 +353,9 @@ Los valores literales de `secrets` se reemplazan por `[REDACTED]` antes de escri
 texto (`configured-literal`). También se filtran patrones reconocibles de
 Bearer/Basic, asignaciones de autorización/cookies/claves/tokens/contraseñas y bloques PEM privados
 (`credential-pattern`). Se trabaja sobre el bloque completo, no sobre fragmentos
-que podrían dividir una credencial. Solo entran campos explícitamente permitidos;
+que podrían dividir una credencial. Cookie y Set-Cookie se filtran hasta el final
+de la línea, incluidas continuaciones indentadas: no se conservan cookies posteriores
+ni atributos separados por espacios, comas o punto y coma. Solo entran campos explícitamente permitidos;
 no se serializan metadata arbitraria, cabeceras de transporte, configuración global ni errores
 con contenido original. En JSON se filtran también claves sensibles anidadas
 (incluidas autorización y cookies) antes de persistir argumentos o decisiones.

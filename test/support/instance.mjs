@@ -82,13 +82,16 @@ export async function fixture(t, options = {}) {
             input: { type: 'object', properties: { mode: { type: 'string' }, payload: { type: 'object' } },
               required: ['mode', 'payload'], additionalProperties: false },
             execute: async (input, context) => {
-              if (input.mode === 'failure') throw new Error('Synthetic failure synthetic-secret-42 Bearer synthetic-error-token');
+              const cookieText = input.payload.cookieText ? '\\n' + input.payload.cookieText : '';
+              if (input.mode === 'file') return { content: [{ type: 'file', uri: 'data:text/plain,synthetic-file-secret',
+                mime: 'text/plain', name: 'synthetic-file-name' }] };
+              if (input.mode === 'failure') throw new Error('Synthetic failure synthetic-secret-42 Bearer synthetic-error-token' + cookieText);
               if (input.mode === 'hold') await new Promise(resolve => context.signal.addEventListener('abort', resolve, { once: true }));
               if (input.mode === 'approval') await ctx.permission.assert({ sessionID: context.sessionID,
                 source: { type: 'tool', messageID: context.messageID, id: context.id },
                 action: 'synthetic.approval', resources: ['Synthetic resource synthetic-secret-42'],
                 metadata: { ignored: 'synthetic-permission-metadata-secret' } });
-              return { content: [{ type: 'text', text: 'Synthetic result synthetic-secret-42 Bearer synthetic-output-token' }] };
+              return { content: [{ type: 'text', text: 'Synthetic result synthetic-secret-42 Bearer synthetic-output-token' + cookieText }] };
             } });
           editor.add({ name: 'unused', description: 'Never invoked', options: { codemode: false },
             input: { type: 'object', properties: {} }, execute: async () => ({ content: 'Unused' }) });

@@ -1,12 +1,56 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eventually, fixture, records } from './support/instance.mjs';
 
 const inspect = (instance, sessionID, mode) => execFileSync(process.execPath,
   [fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url)), instance.captureDirectory, sessionID,
     ...(mode ? [mode] : [])], { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+
+test('Cookie y Set-Cookie completos se filtran en argumentos, salidas, errores e interacciones',
+  { timeout: 90000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true });
+    const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+    const interactionText = 'Cookie: session=synthetic-interaction-first; auth=synthetic-interaction-second\n'
+      + 'Set-Cookie: id=synthetic-interaction-set; Path=/synthetic-interaction-path; HttpOnly\nWork after cookies.';
+    await instance.api(`/api/session/${session.id}/prompt`, {
+      text: 'SYNTHETIC_ACTION_RECOVERY SYNTHETIC_COOKIE_HEADERS\n' + interactionText });
+    await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+    const form = (await instance.api(`/api/session/${session.id}/form`, { title: interactionText,
+      fields: [{ key: 'answer', type: 'string' }] })).data;
+    await instance.api(`/api/session/${session.id}/form/${form.id}/reply`, { answer: { answer: interactionText } });
+    await instance.api(`/api/session/${session.id}/prompt`, { text: 'Barrera de cookies.', resume: false });
+    const evidence = await eventually(async () => {
+      const all = await records(instance.captureDirectory);
+      return all.some(row => row.content?.text === 'Barrera de cookies.') && all;
+    }, 'cookie evidence was not persisted');
+    const filtered = '[REDACTED]\n[REDACTED]\nWork after cookies.';
+    assert.equal(evidence.find(row => row.type === 'session.inbox.enqueued').content.text,
+      'SYNTHETIC_ACTION_RECOVERY SYNTHETIC_COOKIE_HEADERS\n' + filtered);
+    assert.equal(evidence.find(row => row.type === 'form.created').interaction.request.title, filtered);
+    assert.equal(evidence.find(row => row.type === 'form.replied').interaction.response.answer, filtered);
+    const filteredTool = '[REDACTED]\r\n[REDACTED]\r\n[REDACTED]\r\nWork after cookies.';
+    assert.equal(evidence.find(row => row.type === 'session.tool.called').tool.input.payload.cookieText, filteredTool);
+    assert.equal(JSON.parse(evidence.find(row => row.type === 'session.tool.input.ended').tool.inputText)
+      .payload.cookieText, filteredTool);
+    assert.ok(evidence.find(row => row.type === 'session.tool.failed').tool.error.message.endsWith(filteredTool));
+    assert.ok(evidence.find(row => row.type === 'session.tool.success').tool.output[0].text.endsWith(filteredTool));
+    assert.ok(evidence.find(row => row.type === 'session.text.ended').content.text.endsWith(filteredTool));
+    await instance.stop();
+    const persisted = (await Promise.all((await readdir(instance.captureDirectory))
+      .map(name => readFile(join(instance.captureDirectory, name), 'utf8')))).join('\n');
+    for (const secret of ['synthetic-first-cookie', 'synthetic-second-cookie', 'synthetic-set-cookie',
+      'synthetic-next-cookie', 'synthetic-cookie-path', 'synthetic-fold-first', 'synthetic-fold-second',
+      'synthetic-interaction-first', 'synthetic-interaction-second', 'synthetic-interaction-set', 'synthetic-interaction-path']) {
+      assert.ok(!persisted.includes(secret), `cookie leaked: ${secret}`);
+    }
+    assert.ok(!evidence.some(row => row.type === 'recorder.failed'));
+    assert.deepEqual(inspect(instance, session.id, '--tools').map(attempt => attempt.outcome), ['error', 'success']);
+    inspect(instance, session.id);
+  });
 
 test('una herramienta efectiva conserva argumentos, resultado e identidad sin contar el catálogo como llamadas',
   { timeout: 90000 }, async t => {
@@ -118,6 +162,33 @@ test('formularios excluyen campos ocultos, formatos no admitidos y contenido de 
     inspect(instance, session.id);
   });
 
+test('el diagnóstico conserva sin duplicar las omisiones de una salida exclusivamente de archivo',
+  { timeout: 90000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true });
+    const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+    await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_ACTION_FILE' });
+    await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+    const evidence = await eventually(async () => {
+      const all = await records(instance.captureDirectory);
+      return all.some(row => row.type === 'session.tool.success') && all;
+    }, 'file-only tool result was not persisted');
+    const result = evidence.find(row => row.type === 'session.tool.success');
+    assert.equal(result.tool.outcome, 'success');
+    assert.deepEqual(result.tool.output, []);
+    assert.ok(result.omissions.includes('tool-file-content-not-captured'));
+    assert.ok(!JSON.stringify(evidence).includes('synthetic-file-secret'));
+    assert.ok(!JSON.stringify(evidence).includes('synthetic-file-name'));
+    await instance.stop();
+    const [attempt] = inspect(instance, session.id, '--tools');
+    assert.equal(attempt.outcome, 'success');
+    assert.equal(attempt.incident, null);
+    assert.deepEqual(attempt.output, []);
+    assert.deepEqual(attempt.omissions, [
+      'tool-native-and-metadata-not-captured', 'tool-retry-relation-not-exposed', 'tool-consumption-not-exposed',
+      'tool-input-text-normalized-json', 'tool-file-content-not-captured',
+    ]);
+  });
+
 test('un intento sin desenlace observado queda como incidente desconocido, no como éxito ni consumo cero',
   { timeout: 90000 }, async t => {
     const instance = await fixture(t, { simulation: true, syntheticTools: true,
@@ -134,7 +205,48 @@ test('un intento sin desenlace observado queda como incidente desconocido, no co
     assert.equal(attempt.error, null);
     assert.equal(attempt.output, null);
     assert.equal(attempt.consumption, null);
+    assert.deepEqual(attempt.omissions, [
+      'tool-native-and-metadata-not-captured', 'tool-retry-relation-not-exposed', 'tool-consumption-not-exposed',
+      'tool-input-text-normalized-json',
+    ]);
     assert.ok(attempt.horizons[0].arrival >= attempt.evidence.at(-1).arrival);
+  });
+
+test('un payload de profundidad no admitida conserva su omisión aunque otra fase aporte un desenlace',
+  { timeout: 90000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true });
+    const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+    await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_ACTION_UNKNOWN' });
+    await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+    const evidence = await eventually(async () => {
+      const all = await records(instance.captureDirectory);
+      return all.some(row => row.type === 'session.tool.success') && all;
+    }, 'unrecognized input evidence was not persisted');
+    const called = evidence.find(row => row.type === 'session.tool.called');
+    assert.equal(called.status, 'unrecognized');
+    assert.equal(called.tool, null);
+    assert.deepEqual(called.omissions, ['unrecognized-tool-format']);
+    const input = evidence.find(row => row.type === 'session.tool.input.ended');
+    assert.equal(input.tool, null);
+    assert.deepEqual(input.omissions, ['unrecognized-tool-format']);
+    assert.ok(!JSON.stringify(evidence).includes('synthetic-unknown-payload-secret'));
+    const result = evidence.find(row => row.type === 'session.tool.success');
+    assert.equal(result.tool.outcome, 'success');
+    await instance.stop();
+    const [attempt] = inspect(instance, session.id, '--tools');
+    assert.equal(attempt.outcome, 'success');
+    assert.equal(attempt.incident, null);
+    assert.equal(attempt.endedAt, result.sourceTime);
+    assert.equal(attempt.input, null);
+    assert.equal(attempt.error, null);
+    assert.equal(attempt.inputText, null);
+    assert.deepEqual(attempt.output, [{ type: 'text', text: 'Synthetic result synthetic-secret-42 [REDACTED]' }]);
+    assert.deepEqual(attempt.omissions, [
+      'tool-native-and-metadata-not-captured', 'tool-retry-relation-not-exposed', 'tool-consumption-not-exposed',
+      'unrecognized-tool-format',
+    ]);
+    assert.ok(attempt.evidence.some(row => row.eventID === result.eventID));
+    assert.ok(!evidence.some(row => row.type === 'recorder.failed'));
   });
 
 test('preguntas y aprobaciones conservan solicitudes y respuestas externas sin atribuirlas al agente',

@@ -146,6 +146,7 @@ if (!directory) {
           attempts.set(key, attempt);
         }
         attempt.evidence.push({ captureID: row.captureID, arrival: row.arrival, eventID: row.eventID, type: row.type });
+        attempt.omissions.push(...row.omissions);
         if (row.toolName !== null) attempt.toolName = row.toolName;
         if (row.type === 'session.tool.input.started') attempt.startedAt = row.sourceTime;
         if (row.type === 'session.tool.called') attempt.calledAt = row.sourceTime;
@@ -163,6 +164,7 @@ if (!directory) {
         if (attempt.outcome !== 'success') attempt.incident = {
           kind: attempt.outcome === 'error' ? 'tool-error' : 'outcome-not-observed', cause: null };
         if (attempt.startedAt === null) attempt.omissions.push('call-start-not-observed');
+        attempt.omissions = [...new Set(attempt.omissions)];
         console.log(JSON.stringify(attempt));
       }
     }
