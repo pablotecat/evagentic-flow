@@ -71,6 +71,31 @@ export async function fixture(t, options = {}) {
   await mkdir(join(root, 'config/opencode/plugins'));
   await writeFile(join(root, 'config/opencode/plugins/recorder.ts'),
     `export { default } from ${JSON.stringify(pathToFileURL(join(plugin, 'dist/index.js')).href)};\n`);
+  if (options.syntheticTools) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-tools.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      export default Plugin.define({ id: 'synthetic.tools', async setup(ctx) {
+        await ctx.tool.transform(editor => {
+          editor.namespace({ name: 'synthetic.actions', description: 'Synthetic actions' });
+          editor.add({ name: 'inspect', description: 'Synthetic inspection',
+            options: { namespace: 'synthetic.actions', codemode: false },
+            input: { type: 'object', properties: { mode: { type: 'string' }, payload: { type: 'object' } },
+              required: ['mode', 'payload'], additionalProperties: false },
+            execute: async (input, context) => {
+              if (input.mode === 'failure') throw new Error('Synthetic failure synthetic-secret-42 Bearer synthetic-error-token');
+              if (input.mode === 'hold') await new Promise(resolve => context.signal.addEventListener('abort', resolve, { once: true }));
+              if (input.mode === 'approval') await ctx.permission.assert({ sessionID: context.sessionID,
+                source: { type: 'tool', messageID: context.messageID, id: context.id },
+                action: 'synthetic.approval', resources: ['Synthetic resource synthetic-secret-42'],
+                metadata: { ignored: 'synthetic-permission-metadata-secret' } });
+              return { content: [{ type: 'text', text: 'Synthetic result synthetic-secret-42 Bearer synthetic-output-token' }] };
+            } });
+          editor.add({ name: 'unused', description: 'Never invoked', options: { codemode: false },
+            input: { type: 'object', properties: {} }, execute: async () => ({ content: 'Unused' }) });
+        });
+      } });
+    `);
+  }
   if (options.admissionGate) {
     // A second real plugin delays admission AFTER the recorder hook, without replacing it.
     await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-admission.ts'), `

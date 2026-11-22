@@ -3,15 +3,16 @@
 Plugin de servidor **independiente** para OpenCode **V2 2.1.2**, con SDK
 `@opencode/plugin` fijado a `2.1.2`. Implementa los cortes
 [#2](https://github.com/pablotecat/evagentic-flow/issues/2),
-[#3](https://github.com/pablotecat/evagentic-flow/issues/3) y
-[#4](https://github.com/pablotecat/evagentic-flow/issues/4): encargo admitido,
-texto final y relaciones de delegación de las sesiones del proyecto autorizado,
+[#3](https://github.com/pablotecat/evagentic-flow/issues/3),
+[#4](https://github.com/pablotecat/evagentic-flow/issues/4) y
+[#5](https://github.com/pablotecat/evagentic-flow/issues/5): encargo admitido,
+texto final, delegación, herramientas e interacciones humanas observables del proyecto autorizado,
 con aviso e interrupción del conjunto observado ante fallos del registrador. No modifica
 agentes, permisos de las sesiones observadas, delegación ni otros plugins.
 
 **No se ha instalado ni activado en el proyecto consumidor.** La parada ante
 fallos se comprueba también con delegación anidada, ramas concurrentes y
-descendientes nuevos; contenido de herramientas, entregables y cobertura del piloto
+descendientes nuevos; entregables y cobertura del piloto
 siguen pendientes. No utilizar este corte como
 autorización para el piloto.
 
@@ -84,6 +85,7 @@ Worktrees, subdirectorios y clones no se incorporan implícitamente.
 node scripts/inspect.mjs C:/synthetic/captures
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tree
+node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tools
 ```
 
 También basta un lector de JSON por línea. El lector incluido no importa el
@@ -96,6 +98,28 @@ activación por flujo. Las filas conservan padre, agente, llamada y sesión hija
 cuando se observan; `null` significa relación desconocida o excluida, no una
 asociación deducida. Los intervalos `session.execution.*` permiten reconocer
 solapamientos: no sumar las duraciones de ramas concurrentes como duración global.
+
+`--tools` produce un diagnóstico independiente por identidad compuesta de llamada
+(sesión, mensaje y llamada), sin alterar la captura. Conserva cada intento, su
+entrada, resultado/error filtrado, tiempos y referencias a las filas originales.
+Una llamada abierta queda como `outcome-not-observed`, con causa y consumo
+desconocidos: no acredita fallo, éxito ni consumo cero. El diagnóstico vale hasta
+los horizontes de los diarios leídos; no declara una avería por consultar trabajo
+todavía en curso. Se puede redirigir a un archivo **fuera de Git** para conservarlo.
+
+El catálogo `recorder.tools.available` distingue herramientas registradas y nombres
+vistos en el hook de contexto de las invocadas. No demuestra que un hook posterior
+no cambie la selección. Un evento de herramienta no es una petición HTTP ni revela
+sus servicios internos. No se agrupan reintentos por nombre, argumentos u orden:
+cuando el runtime no expone el enlace, `retryOf` y `operationID` quedan en `null`.
+Los reintentos de modelo expuestos en `session.retry.scheduled` se conservan aparte;
+los reintentos HTTP internos del proveedor pueden no producir ese evento.
+
+Las preguntas nativas usan formularios y las aprobaciones usan `permission.*`.
+Se conservan solicitudes y respuestas, con enlaces públicos cuando existen, pero
+la procedencia de una respuesta es **cliente externo no identificado**, no agente
+ni persona autenticada. No se capturan formularios globales, metadata arbitraria,
+campos ocultos, adjuntos ni respuestas sin un formulario autorizado observado.
 
 Contrato y límites: [captura v1](docs/capture-v1.md).
 
@@ -149,7 +173,9 @@ si se movió el destino para diagnosticar un fallo, usar su ubicación conservad
   No se sube ni publica captura, configuración local o simulación automáticamente.
 - Las exclusiones conocidas y patrones de credenciales se aplican antes de
   escribir. **No es anonimización universal** de texto libre. No se vuelcan
-  cabeceras, configuración global, adjuntos ni payloads de herramientas.
+  cabeceras de transporte, configuración global, adjuntos ni metadata arbitraria.
+  Los argumentos JSON autorizados y resultados textuales de herramientas pasan el
+  mismo filtrado; claves sensibles también se excluyen en estructuras anidadas.
 - Una respuesta parcial sin `session.text.ended` queda sin texto; sus eventos
   solo dejan metadatos y omisiones explícitas. No se hace backfill ni replay.
 - Un fallo posterior deja `recorder.failed` si el diario sigue operativo. El aviso,

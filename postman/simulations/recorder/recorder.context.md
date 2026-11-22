@@ -36,10 +36,32 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 - Los avisos automáticos de subagentes pueden iniciar otra ronda en el padre:
   contar bloques de respuesta no cuenta sesiones ni invocaciones de delegación.
   (Observado 2026-11-22 en `test/delegation.test.mjs`.)
+- Las herramientas sintéticas se registran mediante la API pública de plugins;
+  el proveedor solo decide sus llamadas, sin sustituir su ejecución. El nombre
+  efectivo del namespace `synthetic.actions` fue `synthetic_actions_inspect`.
+  `executed` fue `false` incluso con resultado local observado. (Observado 2026-11-22.)
+- Un primer 429 se recuperó dentro del proveedor sin `session.retry.scheduled`.
+  Tres 429 seguidos expusieron ese evento, con intento `2`, antes de recuperar.
+  No se equipara ese intento con cada petición HTTP interna. (Observado 2026-11-22.)
+- La pregunta nativa produjo `form.*`, no `question.*`, con enlace en
+  `metadata.kind: question` y `metadata.tool.id/messageID`; sus respuestas no
+  exponen actor autenticado. Las aprobaciones produjeron `permission.*` con
+  `source` de herramienta. (Observado 2026-11-22 mediante APIs públicas aisladas.)
 
 ## Observations
 
 <!-- begin:observations -->
+2026-11-22: suite final de #5, 23/23 pruebas aprobadas tras incluir claves sensibles
+prefijadas y secretos escapados en JSON completo. `synthetic-model`, único miembro,
+sirvió 200, 400 y 429 controlados; ningún miembro quedó sin ejercitar en el conjunto.
+Las pruebas utilizaron el paquete instalado, APIs públicas y lector independiente.
+Sin activar el plugin en el consumidor ni tocar el servicio compartido.
+2026-11-22: seis pruebas focales de #5 aprobadas: herramienta local satisfactoria,
+fallo y recuperación, intento sin desenlace tras terminar el proceso aislado,
+pregunta/aprobación controladas, reintento de proveedor y exclusiones de formularios.
+El único miembro, `synthetic-model`, sirvió chat con 200 y los 429 controlados;
+no quedó ningún miembro sin tráfico en el conjunto. El caso de formularios por
+API pública no requirió simulación. Sin consumidor real ni servicio compartido.
 2026-11-22: suite completa de #4, 17 pruebas aprobadas; `synthetic-model` fue el
 único miembro y sirvió chat con 200 y el fallo deliberado con 400. La preparación
 rechazada no despachó modelos; ningún miembro quedó sin tráfico en el conjunto.

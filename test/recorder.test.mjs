@@ -222,6 +222,10 @@ test('un error real de herramienta se registra sin solicitar la parada del flujo
     const all = await records(instance.captureDirectory);
     return all.some(row => row.type === 'session.tool.success') && all;
   }, 'real tool failure was not captured');
+  const result = evidence.find(row => row.type === 'session.tool.success');
+  assert.equal(result.tool.reportedError, true);
+  assert.equal(result.tool.outcome, 'error');
+  assert.deepEqual(result.tool.output, [{ type: 'text', text: 'Error: Synthetic tool failure' }]);
   assert.ok(!evidence.some(row => row.type === 'recorder.failed'));
   assert.equal((await instance.api(`/api/session/${session.id}`)).data.metadata?.evagenticRecorder, undefined);
   await instance.api(`/api/session/${session.id}/prompt`, { text: 'Barrera tras fallo de herramienta.', resume: false });

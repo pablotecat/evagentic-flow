@@ -34,7 +34,7 @@ Cada fila es un objeto JSON con estos campos obligatorios:
 | `captureID` | UUID del diario/activación; **no** un identificador de ejecución. |
 | `arrival` | Entero creciente desde `1`, local al diario; orden de escritura/observación, no causalidad. |
 | `observedAt` | Milisegundos Unix del reloj local al registrar. |
-| `type` | `recorder.ready`, `recorder.failed`, `recorder.gap` o el tipo público `session.*`. |
+| `type` | `recorder.ready`, `recorder.failed`, `recorder.gap`, `recorder.tools.available` o tipo público `session.*`, `permission.*` o `form.*` admitido. |
 
 Versiones desconocidas requieren otro lector; no reinterpretarlas como v1.
 Una línea truncada o JSON inválido es evidencia incompleta, nunca una fila válida
@@ -145,7 +145,7 @@ verificar. Una ubicación explícita ajena se excluye antes de este diagnóstico
 
 ## Evidencia de eventos
 
-Además del sobre, todas las filas `session.*` incluyen:
+Además del sobre, todas las filas de eventos públicos admitidos incluyen:
 
 | Campo | Tipo / significado |
 | --- | --- |
@@ -161,7 +161,7 @@ Además del sobre, todas las filas `session.*` incluyen:
 | `messageID` | `assistantMessageID`, `inboxID` o `messageID` observados, o `null`. No se inventa una asociación. |
 | `ordinal` | Entero de bloque de contenido cuando existe, o `null`. |
 | `content` | `null` o `{ "role": "user" \| "assistant", "text": "…" }`, ya filtrado. |
-| `status` | `captured`, `omitted` o `unrecognized`. |
+| `status` | `captured`, `omitted` o `unrecognized`; `captured` puede referirse a `content`, `tool`, `interaction` o `retry`. |
 | `omissions` | Array de códigos de omisión, sin datos originales. |
 | `redactions` | Array de códigos de filtrado, sin los valores eliminados. |
 
@@ -175,7 +175,7 @@ por inferencia. Todos los identificadores nuevos pasan las mismas exclusiones:
 | `agentID` | Agente seleccionado que expone la sesión, o `null`; no se supone `build` si falta. |
 | `sessionObservedAt` | Momento local de la lectura de sesión/padre; no fecha causal del evento ni snapshot histórico de su agente. |
 | `callID` | `data.id` de un evento `session.tool.*`, o `null`. Identidad compuesta: **sesión + mensaje + llamada**, no nombre del componente. |
-| `toolName` | Nombre expuesto por `session.tool.input.started`, o `null`. |
+| `toolName` | Nombre efectivo expuesto por `session.tool.input.started`, conservado para las fases de esa misma llamada; `null` si no se observó o fue excluido. |
 | `childSessionID` | Sesión hija expuesta en `session.tool.success` v2 de una llamada previamente observada como `subagent`, comprobando proyecto, ubicación y padre; en otro caso `null`. |
 
 La procedencia de estas relaciones es el evento público salvo padre y agente,
@@ -195,7 +195,7 @@ distinguir ramas solapadas; no hay suma de duraciones ni orden causal global.
 El ID causal de ejecución sigue sin exponerse: `executionID` permanece `null`,
 también cuando un aviso de subagente inicia otra ronda en la misma sesión.
 
-Solo se captura texto de `session.inbox.enqueued` con item `user` (encargo ya
+El campo `content` solo conserva texto de `session.inbox.enqueued` con item `user` (encargo ya
 admitido, versión durable `1`) y `session.text.ended` (bloque final de respuesta,
 versión durable `1`). Un encargo admitido con `resume: false` **no** demuestra
 ejecución. Un bloque final no demuestra por sí solo éxito global del encargo.
@@ -203,7 +203,7 @@ Los eventos `session.execution.*` conservan sus identidades/tiempos como
 metadatos; su ID de evento identifica ese hecho, no se reutiliza como ID causal
 de otros eventos. No se asocian respuestas al último encargo por orden de llegada.
 
-Los demás eventos de sesión observables conservan sobre y metadatos permitidos,
+Salvo los formatos de #5 descritos a continuación, los demás eventos de sesión observables conservan sobre y metadatos permitidos,
 pero **no payload** (`status: omitted`, `event-payload-not-captured`). Los campos
 no textuales del encargo/respuesta quedan excluidos (`non-text-fields-not-captured`).
 Un texto reconocido con forma o versión no admitida queda sin contenido y con
@@ -212,6 +212,119 @@ inbox desconocido lleva `unrecognized-inbox-format`. Los identificadores con
 formato no permitido o con secretos configurados se sustituyen por `null` y se
 señalan con `unsafe-identifier`. Nunca se conserva un payload desconocido como
 fallback. No se afirma que el SDK entregue eventos que él mismo no reconoce.
+
+## Herramientas, intentos e interacciones (#5)
+
+Se añaden `tool`, `interaction` y `retry`, objetos o `null`, a las nuevas filas de
+eventos. El lector admite filas v1 anteriores sin esos campos; no las completa
+por inferencia. `recorder.ready.coverage.content` declara las categorías nuevas.
+`executionID` sigue en `null`: ni el orden de llegada ni el último encargo permiten
+inventar el ID causal de ejecución que no expone este runtime.
+
+### Llamadas e inventario
+
+Cada **intento de herramienta** se identifica por proyecto + sesión + mensaje de
+asistente + llamada. `input.started`, `input.ended`, `called` y el desenlace son
+fases de ese intento, no llamadas adicionales. Se usa cualquier nombre efectivo
+observado, no una lista de nombres heredados. Los tiempos disponibles son los
+`sourceTime` de cada fase; `observedAt` no se presenta como inicio de ejecución.
+
+Los eventos `session.tool.input.started`, `session.tool.input.ended` y
+`session.tool.called` v1, y `session.tool.success` / `session.tool.failed` v2,
+conservan en `tool`:
+
+| Campo | Significado |
+| --- | --- |
+| `input` | Argumentos JSON filtrados de `called`, o `null` si no disponibles. |
+| `inputText` | Entrada completa filtrada de `input.ended`, o `null`; nunca deltas. JSON válido se decodifica y normaliza antes de filtrar (incluidos secretos escapados); no conserva bytes ni claves duplicadas. Texto no JSON usa el filtrado textual y puede quedar sintácticamente incompleto. |
+| `output` | Partes `{type: "text", text: "…"}` filtradas del resultado o progreso parcial terminal; `null` si no observadas. |
+| `error` | Solo `type`, `message` y, si existe, `status` HTTP válido del error terminal; no cuerpo de respuesta, stack ni error original. |
+| `outcome` | `not-observed` antes de un desenlace reconocido; `success` o `error` en el desenlace. No es aceptación global. |
+| `executed` | Booleano público, sin reinterpretarlo: en las herramientas locales ejercitadas fue `false` incluso con resultado observado. `null` si no existe. |
+| `reportedError` | Únicamente el booleano `metadata.error` cuando existe. Code Mode puede emitir `success` con este valor `true`; entonces `outcome` es `error`, conservando el tipo de evento original. |
+| `retryOf`, `operationID` | `null`: este contrato no expone esos enlaces para herramientas. No se agrupan llamadas por nombre, argumentos ni proximidad. |
+| `consumption` | `null`: desconocido, no cero. Una llamada no acredita una petición HTTP ni visibilidad de sus servicios internos. |
+
+Las partes `file` no conservan URI, MIME, nombre ni bytes; se señala
+`tool-file-content-not-captured`. Una forma o versión no admitida queda sin `tool`,
+con `unrecognized-tool-format`. Los deltas y progreso efímero quedan omitidos;
+`native` y metadata arbitraria tampoco se conservan. Un error registrado de una
+herramienta no activa la política de fallo del registrador.
+
+`recorder.tools.available` es un snapshot de lectura, **no una invocación**:
+`source: "opencode.tool.list"`, `projectID`, `sessionID`, `toolNames` registrados,
+`modelToolNames` vistos en el hook `context` y `omissions`. No copia descripciones,
+esquemas ni ejecutores. Los nombres excluidos se señalan con `unsafe-identifier`.
+Es disponibilidad en ese punto del hook, no garantía de selección final tras
+hooks posteriores, de permisos concedidos ni de herramientas realmente usadas.
+
+`session.retry.scheduled` v1 conserva `retry: {kind: "model", attempt, at, error}`:
+número y próximo tiempo declarados por el runtime, mensaje asociado y error filtrado
+con el mismo esquema anterior. No son intentos de herramienta ni una medición de
+tráfico HTTP. En la prueba se necesitaron tres respuestas 429 para que el runtime
+expusiera el reintento de sesión: el primer 429 pudo recuperarse internamente sin
+ese evento. No se inventan las llamadas internas no observadas. Las formas no
+admitidas se marcan `unrecognized-retry-format`; el cuerpo del error se excluye.
+
+### Diagnóstico independiente de intentos
+
+`inspect.mjs <directorio> <sesión> --tools` emite JSONL de diagnóstico, sin
+modificar el diario ni ejecutar OpenCode. Cada fila `diagnostic.tool-attempt` tiene
+`diagnosticVersion: 1`, identidad compuesta, nombre, argumentos/texto y
+resultado/error filtrados, `startedAt`, `calledAt`, `endedAt`, `outcome`, relaciones
+y consumo desconocidos, `evidence`, `horizons`, `omissions` e `incident`.
+`evidence` referencia `captureID`, `arrival`, `eventID` y tipo de las fases;
+`horizons` identifica la última fila leída de cada diario. Los tiempos ausentes
+quedan en `null`. No se mezclan identidades incompletas por exclusión de seguridad.
+
+Un fallo conserva `incident: {kind: "tool-error", cause: null}` y su error
+observado aunque un intento posterior termine bien. No se deduce la causa raíz
+del mero mensaje de error. Sin desenlace reconocido, el incidente es
+`{kind: "outcome-not-observed", cause: null}`: describe el límite de evidencia
+leída, no prueba timeout, interrupción de herramienta, fallo ni consumo cero.
+Puede ser trabajo todavía en curso. Una fila terminal con payload no reconocido
+tampoco acredita éxito. Los diagnósticos se pueden guardar por redirección en
+una ubicación local fuera de Git; siguen separados de captura y evaluación.
+
+### Solicitudes y decisiones externas
+
+Se admiten `permission.asked`, `permission.replied`, `form.created`, `form.replied`
+y `form.cancelled` del stream público de 2.1.2. Son eventos efímeros sin versión
+durable; se comprueba proyecto y ubicación de su sesión igual que para `session.*`.
+`form.created` atribuye la sesión desde `data.form.sessionID`. Se excluye el dueño
+`global` de formularios de autenticación/MCP, que no es una sesión del proyecto.
+
+`interaction` contiene:
+
+| Campo | Significado |
+| --- | --- |
+| `kind`, `requestID`, `phase` | `permission` o `form`, ID seguro de solicitud, fase `requested`, `replied` o `cancelled`. |
+| `origin` | `runtime-request`, `external-reply-unattributed` o `runtime-cancellation`. No identifica persona ni atribuye respuestas al agente. |
+| `request` | Aprobación: `action`, `resources`, `save` y `message` disponibles. Formulario: título y campos permitidos. Siempre filtrados. |
+| `response` | Aprobación: `{decision: "once" \| "always" \| "reject"}`. Formulario: respuestas a campos autorizados de una solicitud observada. `null` si ausentes o no autorizadas. |
+| `relationSource` | `permission-source` / `form-question-metadata` en solicitudes con enlace expuesto; `permission-request-event` / `form-request-event` para respuestas vinculadas a aquella solicitud; `null` sin evidencia. |
+
+Los enlaces rellenan `callID` y `messageID` únicamente desde `Permission.Source`
+de tipo `tool`, o `form.metadata` con `kind: "question"` y `tool.id/messageID`
+observados en la pregunta nativa. Se conserva su procedencia, no metadata
+arbitraria ni una garantía independiente de autenticidad del cliente que creó
+la solicitud. Una respuesta sin solicitud observada no hereda enlaces por orden.
+El actor que llamó a la API no se expone: una decisión destinada a una persona
+no demuestra que la tomara una persona autenticada ni un agente concreto.
+
+Los formularios admiten campos `string`, `number`, `integer`, `boolean` y
+`multiselect`; conservan clave, tipo, título, descripción, opciones, condición,
+obligatoriedad y selección personalizada disponibles. Se excluyen campos ocultos
+y sus respuestas; también defaults y otras restricciones. Los formatos no
+admitidos (por ejemplo `external`) quedan sin contenido con
+`unrecognized-interaction-format`, sin volcar el formato desconocido.
+Las respuestas sin solicitud reconocida no guardan valores; se señala
+`form-request-not-observed-or-unrecognized`. Las claves no autorizadas se omiten
+con `form-answer-fields-not-authorized`. No se captura metadata arbitraria.
+
+Se señalan además actor no expuesto, enlace de llamada no observado y mensajes
+de réplica de permiso/cancelación no expuestos cuando corresponde. No se consulta
+estado privado ni se reconstruye contenido ausente mediante historial o replay.
 
 ## Alcance y cobertura real
 
@@ -224,7 +337,7 @@ falla visiblemente en vez de atribuirle contenido por inferencia.
 
 El stream es **en vivo**: no se recupera lo anterior al arranque y puede faltar
 `session.created` cuando la carga del plugin se difiere hasta el primer prompt.
-No se capturan eventos globales, texto de deltas, razonamiento, payloads de herramientas,
+No se capturan eventos globales, texto de deltas, razonamiento, contenido no admitido de herramientas,
 adjuntos, instrucciones, definiciones, skills ni entregables en este corte.
 Si una respuesta se interrumpe antes del bloque final, no se recupera su texto
 parcial. Las pruebas sintéticas ejercitan subejecuciones anidadas, llamadas
@@ -236,15 +349,22 @@ cobertura completa de sesiones movidas ni de otros tipos de trabajo.
 
 Los valores literales de `secrets` se reemplazan por `[REDACTED]` antes de escribir
 texto (`configured-literal`). También se filtran patrones reconocibles de
-Bearer/Basic, asignaciones de claves/tokens/contraseñas y bloques PEM privados
+Bearer/Basic, asignaciones de autorización/cookies/claves/tokens/contraseñas y bloques PEM privados
 (`credential-pattern`). Se trabaja sobre el bloque completo, no sobre fragmentos
 que podrían dividir una credencial. Solo entran campos explícitamente permitidos;
-no se serializan metadata arbitraria, cabeceras, configuración global ni errores
-con contenido original. No se promete detectar cualquier secreto en texto libre,
+no se serializan metadata arbitraria, cabeceras de transporte, configuración global ni errores
+con contenido original. En JSON se filtran también claves sensibles anidadas
+(incluidas autorización y cookies) antes de persistir argumentos o decisiones.
+Solo se admiten valores JSON finitos, de objetos ordinarios y profundidad máxima
+32; formatos no admitidos se señalan sin serializarlos como fallback.
+No se promete detectar cualquier secreto en texto libre,
 codificado u ofuscado. Revisar la configuración local antes de activar cada caso.
 
-Los diarios no contienen rutas del consumidor. Tanto capturas como configuración
-local quedan fuera de control de versiones y no se publican automáticamente.
+No se copian las rutas de configuración al diario. El contenido de trabajo
+autorizado (por ejemplo argumentos de una herramienta) puede contener rutas;
+no es anonimización. Tanto capturas como configuración local quedan fuera de
+control de versiones y no se publican automáticamente. Los ejemplos versionados
+solo usan rutas y datos sintéticos.
 
 Referencias públicas comprobadas: [plugins de servidor V2](https://opencode.ai/v2/docs/build/plugins/server),
 [API V2](https://opencode.ai/v2/docs/api), [cliente V2](https://opencode.ai/v2/docs/build/client).

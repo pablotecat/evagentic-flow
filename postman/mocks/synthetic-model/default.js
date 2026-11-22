@@ -1,6 +1,7 @@
 // Synthetic OpenAI-compatible chat protocol; no real provider, credentials, or business data.
 const http = require('node:http');
 let heldAdmissions = 0;
+let retryServed = 0;
 http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/control/held-admissions') {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -17,6 +18,11 @@ http.createServer(async (req, res) => {
   }
   const input = JSON.stringify(body.messages);
   if (input.includes('SYNTHETIC_HELD_ADMISSION')) heldAdmissions++;
+  if (body.stream && input.includes('SYNTHETIC_PROVIDER_RETRY') && retryServed < 3) {
+    retryServed++;
+    res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0' });
+    return res.end(JSON.stringify({ error: { message: 'Synthetic retry synthetic-secret-42 Bearer synthetic-retry-token', type: 'rate_limit' } }));
+  }
   if (input.includes('SYNTHETIC_AGENT_FAILURE')) {
     res.writeHead(400, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({ error: { message: 'Synthetic agent failure', type: 'invalid_request_error' } }));
@@ -33,6 +39,30 @@ http.createServer(async (req, res) => {
   const send = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ ...base,
     object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
   const delegate = body.tools?.find(tool => tool.function?.name === 'subagent');
+  const action = body.tools?.find(tool => tool.function?.name === 'synthetic_actions_inspect');
+  const actionResults = body.messages.filter(message => message.role === 'tool').length;
+  const recovering = input.includes('SYNTHETIC_ACTION_RECOVERY');
+  const human = input.includes('SYNTHETIC_HUMAN');
+  const question = body.tools?.find(tool => tool.function?.name === 'question');
+  if (human && question && actionResults === 0) {
+    send({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_synthetic_question', type: 'function',
+      function: { name: question.function.name, arguments: JSON.stringify({ questions: [{
+        question: 'Choose synthetic-secret-42', header: 'Synthetic question',
+        options: [{ label: 'Proceed synthetic-secret-42', description: 'Authorized option' }] }] }) } }] });
+    send({}, 'tool_calls');
+    return res.end('data: [DONE]\n\n');
+  }
+  if ((input.includes('SYNTHETIC_ACTION_SUCCESS') || input.includes('SYNTHETIC_ACTION_HOLD') || recovering || human)
+    && action && actionResults < (recovering || human ? 2 : 1)) {
+    send({ role: 'assistant', tool_calls: [{ index: 0,
+      id: recovering ? `call_synthetic_action_${actionResults + 1}` : 'call_synthetic_action', type: 'function',
+      function: { name: action.function.name, arguments: JSON.stringify({ mode: human ? 'approval'
+        : input.includes('SYNTHETIC_ACTION_HOLD') ? 'hold' : recovering && actionResults === 0 ? 'failure' : 'success', payload: {
+        work: 'Authorized synthetic-secret-42', escaped: 'synthetic-escaped-"credential"', nested: { password: 'synthetic-input-password',
+          authorization: 'synthetic-input-authorization', headers: { 'X-Api-Key': 'synthetic-x-api-key' } } } }) } }] });
+    send({}, 'tool_calls');
+    return res.end('data: [DONE]\n\n');
+  }
   if (delegate && !body.messages.some(message => message.role === 'tool')) {
     const prompts = input.includes('SYNTHETIC_TREE_ROOT')
       ? ['SYNTHETIC_TREE_BRANCH nested', 'SYNTHETIC_TREE_LEAF sibling']

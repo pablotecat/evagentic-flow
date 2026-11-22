@@ -24,9 +24,34 @@ type CapturedEvent = {
   messageID: string | null;
   ordinal: number | null;
   content: { role: 'user' | 'assistant'; text: string } | null;
+  tool: ToolEvidence | null;
+  interaction: {
+    kind: 'permission' | 'form';
+    requestID: string | null;
+    phase: 'requested' | 'replied' | 'cancelled';
+    origin: 'runtime-request' | 'external-reply-unattributed' | 'runtime-cancellation';
+    relationSource: 'permission-source' | 'permission-request-event' | 'form-question-metadata' | 'form-request-event' | null;
+    request: Json;
+    response: Json;
+  } | null;
+  retry: { kind: 'model'; attempt: number; at: number; error: NonNullable<ToolEvidence['error']> } | null;
   status: 'captured' | 'omitted' | 'unrecognized';
   omissions: string[];
   redactions: string[];
+};
+
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+type ToolEvidence = {
+  input: Json;
+  inputText: string | null;
+  output: { type: 'text'; text: string }[] | null;
+  error: { type: string; message: string; status?: number } | null;
+  outcome: 'not-observed' | 'success' | 'error';
+  executed: boolean | null;
+  reportedError: boolean | null;
+  retryOf: null;
+  operationID: null;
+  consumption: null;
 };
 
 type Interruption = {
@@ -201,20 +226,25 @@ export default Plugin.define({
         } finally { await file.close(); }
       });
       const controller = new AbortController();
-      const delegationCalls = new Set<string>();
+      const toolNames = new Map<string, string>();
+      const interactionCalls = new Map<string, { callID: string; messageID: string }>();
+      const formFields = new Map<string, Set<string>>();
       const task = (async () => {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           try {
-            if (!event.type.startsWith('session.')) continue;
+            if (!event.type.startsWith('session.') && !['permission.asked', 'permission.replied',
+              'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) continue;
             // Context location alone is NOT an authorization boundary: this stream can cross projects.
             if (event.location && await realpath(event.location.directory) !== project) continue;
             const data = object(event.data);
-            if (typeof data.sessionID !== 'string'
+            const sessionID = event.type === 'form.created' ? object(data.form).sessionID : data.sessionID;
+            if (event.type.startsWith('form.') && sessionID === 'global') continue; // Authentication/MCP sentinel, not a session.
+            if (typeof sessionID !== 'string'
               || !('created' in event) || !Number.isFinite(event.created)) {
               await append({ type: 'recorder.gap', reason: 'unrecognized-session-envelope' });
               continue;
             }
-            const session = await ctx.session.get({ sessionID: data.sessionID });
+            const session = await ctx.session.get({ sessionID });
             if (!await inScope(session)) continue;
             observed.set(session.id, session.location.directory);
             if (failed) { void stopOnce(session.id); continue; }
@@ -226,18 +256,17 @@ export default Plugin.define({
             const sessionObservedAt = Date.now();
             const durable = 'durable' in event ? event.durable : undefined;
             const callKey = JSON.stringify([session.id, data.assistantMessageID, data.id]);
-            if (event.type === 'session.tool.input.started' && durable?.version === 1 && data.name === 'subagent') {
-              delegationCalls.add(callKey);
+            if (event.type === 'session.tool.input.started' && durable?.version === 1 && typeof data.name === 'string') {
+              toolNames.set(callKey, data.name);
             }
             let childSessionID: string | null = null;
-            if (event.type === 'session.tool.success' && durable?.version === 2 && delegationCalls.has(callKey)) {
+            if (event.type === 'session.tool.success' && durable?.version === 2 && toolNames.get(callKey) === 'subagent') {
               const childID = object(data.metadata).sessionID;
               if (typeof childID === 'string') {
                 const child = await ctx.session.get({ sessionID: childID });
                 if (await inScope(child) && child.parentID === session.id) childSessionID = child.id;
               }
             }
-            if (event.type === 'session.tool.success' || event.type === 'session.tool.failed') delegationCalls.delete(callKey);
             const record: CapturedEvent = {
               type: event.type, source: 'opencode.event', eventID: event.id,
               sourceTime: event.created, sourceSequence: durable?.seq ?? null,
@@ -245,15 +274,56 @@ export default Plugin.define({
               projectID: session.projectID, sessionID: session.id, executionID: null,
               parentSessionID, agentID: session.agent ?? null, sessionObservedAt,
               callID: event.type.startsWith('session.tool.') && typeof data.id === 'string' ? data.id : null,
-              toolName: event.type === 'session.tool.input.started' && typeof data.name === 'string' ? data.name : null,
+              toolName: event.type.startsWith('session.tool.') ? toolNames.get(callKey) ?? null : null,
               childSessionID,
               messageID: [data.assistantMessageID, data.inboxID, data.messageID]
                 .find((value): value is string => typeof value === 'string') ?? null,
               ordinal: typeof data.ordinal === 'number' && Number.isSafeInteger(data.ordinal) && data.ordinal >= 0
                 ? data.ordinal : null,
-              content: null, status: 'omitted',
+              content: null, tool: null, interaction: null, retry: null, status: 'omitted',
               omissions: ['event-payload-not-captured'], redactions: [],
             };
+            captureTool(record, data, config.secrets);
+            if (event.type === 'session.retry.scheduled') {
+              const error = object(data.error);
+              if (durable?.version !== 1 || !Number.isSafeInteger(data.attempt) || Number(data.attempt) < 1
+                || !Number.isSafeInteger(data.at) || Number(data.at) < 0
+                || typeof error.type !== 'string' || typeof error.message !== 'string') {
+                record.status = 'unrecognized'; record.omissions = ['unrecognized-retry-format'];
+              } else {
+                const type = redact(error.type, config.secrets);
+                const message = redact(error.message, config.secrets);
+                record.retry = { kind: 'model', attempt: Number(data.attempt), at: Number(data.at),
+                  error: { type: type.text, message: message.text } };
+                if (Number.isSafeInteger(error.status) && Number(error.status) >= 100 && Number(error.status) <= 599) {
+                  record.retry.error.status = Number(error.status);
+                }
+                record.redactions.push(...type.reasons, ...message.reasons);
+                record.status = 'captured'; record.omissions = ['retry-error-response-not-captured', 'provider-internal-attempts-not-exposed'];
+              }
+            }
+            captureInteraction(record, data, config.secrets, formFields);
+            if (record.interaction && record.interaction.requestID !== null) {
+              const permission = record.interaction.kind === 'permission';
+              const requestKey = JSON.stringify([session.id, record.interaction.kind, record.interaction.requestID]);
+              const metadata = object(object(data.form).metadata);
+              const source = permission ? object(data.source) : metadata.kind === 'question' ? object(metadata.tool) : {};
+              if (((event.type === 'permission.asked' && source.type === 'tool') || event.type === 'form.created')
+                && typeof source.id === 'string' && typeof source.messageID === 'string') {
+                interactionCalls.set(requestKey, { callID: source.id, messageID: source.messageID });
+                record.interaction.relationSource = permission ? 'permission-source' : 'form-question-metadata';
+              }
+              const related = interactionCalls.get(requestKey);
+              if (related) {
+                record.callID = related.callID; record.messageID = related.messageID;
+                if (record.interaction.phase !== 'requested') {
+                  record.interaction.relationSource = permission ? 'permission-request-event' : 'form-request-event';
+                }
+              }
+              if (!related) record.omissions.push('interaction-call-link-not-observed');
+              if (record.interaction.phase !== 'requested') interactionCalls.delete(requestKey);
+            }
+            if (event.type === 'session.tool.success' || event.type === 'session.tool.failed') toolNames.delete(callKey);
             let text: unknown;
             let role: 'user' | 'assistant' | undefined;
             if (event.type === 'session.inbox.enqueued') {
@@ -279,13 +349,13 @@ export default Plugin.define({
             for (const key of ['eventID', 'sourceAggregateID', 'projectID', 'sessionID', 'messageID',
               'parentSessionID', 'agentID', 'callID', 'toolName', 'childSessionID'] as const) {
               const value = record[key];
-              if (value !== null && (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(value)
-                || config.secrets.some((secret: string) => value.includes(secret)))) {
+              if (value !== null && !safeIdentifier(value, config.secrets, key === 'toolName')) {
                 record[key] = null;
                 record.omissions.push('unsafe-identifier');
               }
             }
             record.omissions = [...new Set(record.omissions)];
+            record.redactions = [...new Set(record.redactions)];
             await append(record);
           } catch {
             void fail('event-stream-or-persistence-failure');
@@ -305,9 +375,28 @@ export default Plugin.define({
       let promoted = false;
       try {
         if (failed) throw new Error('Subscription failed.');
+        await ctx.session.hook('context', async ({ sessionID, tools }) => {
+          if (failed) return rejectFailedWork({ sessionID });
+          try {
+            const session = await ctx.session.get({ sessionID });
+            if (!await inScope(session)) return;
+            const names = (await ctx.tool.list()).map(tool => tool.id);
+            const modelNames = Object.keys(tools);
+            const safe = (name: string) => safeIdentifier(name, config.secrets, true);
+            await append({ type: 'recorder.tools.available', source: 'opencode.tool.list',
+              projectID: safeIdentifier(session.projectID, config.secrets) ? session.projectID : null,
+              sessionID: safeIdentifier(session.id, config.secrets) ? session.id : null,
+              toolNames: names.filter(safe).sort(), modelToolNames: modelNames.filter(safe).sort(),
+              omissions: [...names, ...modelNames].every(safe) ? [] : ['unsafe-identifier'] });
+          } catch {
+            void fail('event-stream-or-persistence-failure');
+            throw new Error('Recorder: tool inventory capture failed; pilot blocked.');
+          }
+        });
         await append({ type: 'recorder.ready', runtimeVersion: ctx.app.version, sdkVersion: '2.1.2',
-          coverage: { replay: false, content: ['admitted-user-text', 'completed-assistant-text'],
-            excluded: ['attachments', 'tools', 'reasoning', 'definitions', 'headers', 'global-config'],
+          coverage: { replay: false, content: ['admitted-user-text', 'completed-assistant-text', 'tool-input', 'tool-text-result',
+            'session-permission-interactions', 'session-form-interactions'],
+            excluded: ['attachments', 'tool-internal-http', 'reasoning', 'definitions', 'headers', 'global-config'],
             executionID: 'not-exposed', ordering: 'arrival-is-not-causality' } });
         // Subscription failure can race the durable write: check again before publishing readiness.
         if (failed) throw new Error('Subscription failed during preparation.');
@@ -346,6 +435,159 @@ function object(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown> : {};
 }
 
+function safeIdentifier(value: string, secrets: string[], toolName = false) {
+  return (toolName ? /^[A-Za-z0-9_.:-]{1,256}$/ : /^[A-Za-z0-9_-]{1,256}$/).test(value)
+    && !secrets.some(secret => value.includes(secret));
+}
+
+function captureTool(record: CapturedEvent, data: Record<string, unknown>, secrets: string[]) {
+  const version = record.sourceVersion;
+  if (!['session.tool.input.started', 'session.tool.input.ended', 'session.tool.called',
+    'session.tool.success', 'session.tool.failed'].includes(record.type)) return;
+  const terminal = ['session.tool.success', 'session.tool.failed'].includes(record.type);
+  if (version !== (terminal ? 2 : 1)) {
+    record.status = 'unrecognized'; record.omissions = ['unrecognized-tool-format']; return;
+  }
+  const tool: ToolEvidence = { input: null, inputText: null, output: null, error: null,
+    outcome: 'not-observed', executed: null, reportedError: null, retryOf: null, operationID: null, consumption: null };
+  const text = (value: string) => {
+    const result = redact(value, secrets);
+    record.redactions.push(...result.reasons);
+    return result.text;
+  };
+  try {
+    if (record.type === 'session.tool.input.ended') {
+      if (typeof data.text !== 'string') throw new Error('Unrecognized tool input');
+      let parsed: unknown;
+      let isJson = true;
+      try { parsed = JSON.parse(data.text); } catch { isJson = false; }
+      // Decode complete JSON before filtering: escaped literals must not bypass configured secrets.
+      tool.inputText = isJson ? JSON.stringify(sanitizeJson(parsed, secrets, record.redactions)) : text(data.text);
+      record.omissions.push(isJson ? 'tool-input-text-normalized-json' : 'tool-input-text-unparsed');
+    }
+    if (record.type === 'session.tool.called') {
+      if (data.input === null || typeof data.input !== 'object' || Array.isArray(data.input)) throw new Error('Unrecognized input');
+      tool.input = sanitizeJson(data.input, secrets, record.redactions);
+    }
+    if (record.type === 'session.tool.called' || terminal) {
+      if (typeof data.executed !== 'boolean') throw new Error('Unrecognized executed flag');
+      tool.executed = data.executed;
+    }
+    if (terminal) {
+      const reportedError = object(data.metadata).error;
+      tool.reportedError = typeof reportedError === 'boolean' ? reportedError : null;
+      tool.outcome = record.type === 'session.tool.failed' || reportedError === true ? 'error' : 'success';
+      if (data.content !== undefined) {
+        if (!Array.isArray(data.content) || !data.content.length) throw new Error('Unrecognized content');
+        tool.output = [];
+        for (const item of data.content) {
+          const part = object(item);
+          if (part.type === 'text' && typeof part.text === 'string') tool.output.push({ type: 'text', text: text(part.text) });
+          else if (part.type === 'file') record.omissions.push('tool-file-content-not-captured');
+          else throw new Error('Unrecognized tool content');
+        }
+      } else if (record.type === 'session.tool.success') throw new Error('Missing result');
+      if (record.type === 'session.tool.failed') {
+        const error = object(data.error);
+        if (typeof error.type !== 'string' || typeof error.message !== 'string') throw new Error('Unrecognized error');
+        tool.error = { type: text(error.type), message: text(error.message) };
+        if (Number.isSafeInteger(error.status) && Number(error.status) >= 100 && Number(error.status) <= 599) {
+          tool.error.status = Number(error.status);
+        }
+      }
+    }
+    record.tool = tool;
+    record.status = 'captured';
+    record.omissions = record.omissions.filter(reason => reason !== 'event-payload-not-captured');
+    record.omissions.push('tool-native-and-metadata-not-captured', 'tool-retry-relation-not-exposed', 'tool-consumption-not-exposed');
+    record.redactions = [...new Set(record.redactions)];
+  } catch {
+    record.tool = null; record.status = 'unrecognized'; record.omissions = ['unrecognized-tool-format'];
+  }
+}
+
+function captureInteraction(record: CapturedEvent, data: Record<string, unknown>, secrets: string[], formFields: Map<string, Set<string>>) {
+  const permission = record.type.startsWith('permission.');
+  if (!permission && !record.type.startsWith('form.')) return;
+  const requested = ['permission.asked', 'form.created'].includes(record.type);
+  const cancelled = record.type === 'form.cancelled';
+  const form = object(data.form);
+  const id = permission ? (requested ? data.id : data.requestID) : (requested ? form.id : data.id);
+  const formKey = JSON.stringify([record.sessionID, id]);
+  const interaction: NonNullable<CapturedEvent['interaction']> = {
+    kind: permission ? 'permission' : 'form', requestID: null,
+    phase: requested ? 'requested' : cancelled ? 'cancelled' : 'replied',
+    origin: requested ? 'runtime-request' : cancelled ? 'runtime-cancellation' : 'external-reply-unattributed',
+    relationSource: null, request: null, response: null,
+  };
+  try {
+    if (record.sourceVersion !== null || typeof id !== 'string') throw new Error('Unsupported interaction format');
+    if (safeIdentifier(id, secrets)) interaction.requestID = id;
+    else record.omissions.push('unsafe-identifier');
+    if (permission && requested) {
+      if (typeof data.action !== 'string' || !Array.isArray(data.resources)
+        || !data.resources.every(item => typeof item === 'string')) throw new Error('Unsupported permission');
+      interaction.request = sanitizeJson({ action: data.action, resources: data.resources,
+        ...(typeof data.message === 'string' ? { message: data.message } : {}),
+        ...(Array.isArray(data.save) && data.save.every(item => typeof item === 'string') ? { save: data.save } : {}) },
+      secrets, record.redactions);
+    } else if (permission) {
+      if (!['once', 'always', 'reject'].includes(String(data.reply))) throw new Error('Unsupported decision');
+      interaction.response = sanitizeJson({ decision: data.reply }, secrets, record.redactions);
+      record.omissions.push('permission-reply-message-not-exposed');
+    } else if (requested) {
+      if (typeof form.title !== 'string' || !Array.isArray(form.fields) || !form.fields.length) throw new Error('Unsupported form');
+      const fields = form.fields.filter(item => {
+        if (object(item).hidden !== true) return true;
+        record.omissions.push('form-hidden-field-not-captured'); return false;
+      }).map(item => {
+        const field = object(item);
+        if (!['string', 'number', 'integer', 'boolean', 'multiselect'].includes(String(field.type))
+          || typeof field.key !== 'string') throw new Error('Unsupported field');
+        return Object.fromEntries(['key', 'type', 'title', 'description', 'required', 'options', 'custom', 'when']
+          .filter(key => Object.hasOwn(field, key)).map(key => [key, field[key]]));
+      });
+      interaction.request = sanitizeJson({ title: form.title, fields }, secrets, record.redactions);
+      formFields.set(formKey, new Set(fields.map(field => String(field.key))));
+      record.omissions.push('form-defaults-and-constraints-not-captured');
+    } else if (!cancelled) {
+      if (!data.answer || typeof data.answer !== 'object' || Array.isArray(data.answer)) throw new Error('Unsupported answer');
+      const authorized = formFields.get(formKey);
+      if (!authorized) record.omissions.push('form-request-not-observed-or-unrecognized');
+      else {
+        const entries = Object.entries(data.answer).filter(([key]) => authorized.has(key));
+        if (entries.length !== Object.keys(data.answer).length) record.omissions.push('form-answer-fields-not-authorized');
+        interaction.response = sanitizeJson(Object.fromEntries(entries), secrets, record.redactions);
+      }
+    }
+    record.interaction = interaction;
+    record.status = 'captured';
+    record.omissions = record.omissions.filter(reason => reason !== 'event-payload-not-captured');
+    record.omissions.push('interaction-metadata-not-captured', 'interaction-actor-not-exposed');
+    if (cancelled) record.omissions.push('form-cancellation-message-not-exposed');
+    if (!permission && !requested) formFields.delete(formKey);
+  } catch {
+    record.interaction = null; record.status = 'unrecognized'; record.omissions = ['unrecognized-interaction-format'];
+  }
+}
+
+function sanitizeJson(value: unknown, secrets: string[], reasons: string[], depth = 0): Json {
+  if (depth > 32) throw new Error('Unsupported content depth');
+  if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
+  if (typeof value === 'string') {
+    const result = redact(value, secrets); reasons.push(...result.reasons); return result.text;
+  }
+  if (Array.isArray(value)) return value.map(item => sanitizeJson(item, secrets, reasons, depth + 1));
+  if (typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('Unsupported JSON');
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    const safeKey = sanitizeJson(key, secrets, reasons, depth + 1) as string;
+    if (/(?:^|[-_])(?:authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|private[_-]?key|passphrase|password|secret)$/i.test(key)) {
+      reasons.push('credential-pattern'); return [safeKey, '[REDACTED]'];
+    }
+    return [safeKey, sanitizeJson(item, secrets, reasons, depth + 1)];
+  }));
+}
+
 function redact(input: string, secrets: string[]) {
   let text = input;
   const reasons: string[] = [];
@@ -355,7 +597,7 @@ function redact(input: string, secrets: string[]) {
   const patterns = [
     /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
     /\b(?:Bearer|Basic)\s+[A-Za-z0-9+/_=.\-]+/gi,
-    /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[=:]\s*(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;]+)/gi,
+    /(?:\b|[_-])(?:authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|private[_-]?key|passphrase|password|secret)["']?\s*[=:]\s*(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;]+)/gi,
   ];
   for (const pattern of patterns) {
     text = text.replace(pattern, () => { reasons.push('credential-pattern'); return '[REDACTED]'; });
