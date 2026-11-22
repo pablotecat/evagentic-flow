@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -46,6 +46,11 @@ export async function fixture(t, options = {}) {
     execFileSync('git', ['-C', directory, '-c', 'user.name=Synthetic', '-c',
       'user.email=synthetic@example.invalid', 'commit', '--quiet', '-m', `project ${index}`]);
   }
+  if (options.projectAlias) {
+    const target = projects[0];
+    projects[0] = join(root, 'project-alias');
+    await symlink(target, projects[0], process.platform === 'win32' ? 'junction' : 'dir');
+  }
   const captureDirectory = join(root, 'capture');
   const configFile = join(root, 'recorder.local.json');
   const config = typeof options.config === 'function'
@@ -66,9 +71,28 @@ export async function fixture(t, options = {}) {
   await mkdir(join(root, 'config/opencode/plugins'));
   await writeFile(join(root, 'config/opencode/plugins/recorder.ts'),
     `export { default } from ${JSON.stringify(pathToFileURL(join(plugin, 'dist/index.js')).href)};\n`);
+  if (options.admissionGate) {
+    // A second real plugin delays admission AFTER the recorder hook, without replacing it.
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-admission.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      import { readFile, writeFile } from 'node:fs/promises';
+      import { setTimeout } from 'node:timers/promises';
+      export default Plugin.define({ id: 'synthetic.admission', async setup(ctx) {
+        await ctx.session.hook('prompt', async ({ prompt }) => {
+          if (prompt.text !== 'SYNTHETIC_HELD_ADMISSION') return;
+          await writeFile(${JSON.stringify(join(root, 'admission-entered'))}, 'entered');
+          while (true) {
+            try { await readFile(${JSON.stringify(join(root, 'admission-release'))}); return; }
+            catch { await setTimeout(20); }
+          }
+        });
+      } });
+    `);
+  }
   const serverConfig = { $schema: 'https://opencode.ai/config.json', update: 'disable',
     snapshots: false, ...options.serverConfig };
   let simulationLog = '';
+  let simulationURL;
   if (options.simulation) {
     const simulation = spawn('postman', ['simulation', 'run',
       join(repository, 'postman/simulations/recorder/recorder.sim.yaml'),
@@ -82,13 +106,17 @@ export async function fixture(t, options = {}) {
         const exited = once(simulation, 'exit'); simulation.kill(); await exited;
       }
       await writeFile(join(root, 'sim.ndjson'), simulationLog);
+      await writeFile(join(root, 'sim.err'), errors);
     });
     const listening = await eventually(() => {
       if (simulation.exitCode !== null) throw new Error(errors);
       return simulationLog.split('\n').filter(Boolean).map(line => JSON.parse(line))
         .find(event => event.event === 'listening' || event.type === 'listening');
-    }, 'synthetic model simulation did not listen');
-    const baseURL = `http://127.0.0.1:${listening.port}/model/v1`;
+    }, 'synthetic model simulation did not listen', 60000).catch(error => {
+      throw new Error(`${error.message}: ${errors}`);
+    });
+    simulationURL = `http://127.0.0.1:${listening.port}/model`;
+    const baseURL = `${simulationURL}/v1`;
     serverConfig.model = 'synthetic/synthetic';
     serverConfig.providers = { synthetic: { name: 'Synthetic',
       package: '@opencode/ai/providers/openai-compatible', settings: { baseURL, apiKey: 'synthetic-header-secret' },
@@ -102,24 +130,30 @@ export async function fixture(t, options = {}) {
     const actual = execFileSync(binary, ['debug', 'paths', name], { env, cwd: root, encoding: 'utf8' }).trim();
     assert.ok(resolve(actual).startsWith(resolve(root)), `${name} escaped the isolated instance`);
   }
-  const child = spawn(binary, ['serve', '--hostname', '127.0.0.1', '--port', '0'], { env, cwd: root });
+  let child;
   let output = '';
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { output += chunk; });
-  child.on('error', error => { output += error.message; });
+  let address;
+  const start = async () => {
+    output = '';
+    child = spawn(binary, ['serve', '--hostname', '127.0.0.1', '--port', '0'], { env, cwd: root });
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    child.on('error', error => { output += error.message; });
+    address = await eventually(() => {
+      if (child.exitCode !== null) throw new Error(output);
+      return output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+    }, 'isolated server did not listen');
+  };
   const stop = async () => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
     const exited = once(child, 'exit');
     child.kill();
     await exited;
   };
   t.after(stop);
-  const address = await eventually(() => {
-    if (child.exitCode !== null) throw new Error(output);
-    return output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-  }, 'isolated server did not listen');
-  async function api(path, body) {
-    const response = await fetch(`${address}${path}`, { method: body === undefined ? 'GET' : 'POST',
+  await start();
+  async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
+    const response = await fetch(`${address}${path}`, { method,
       headers: { 'content-type': 'application/json',
         authorization: `Basic ${Buffer.from('opencode:synthetic-instance-password').toString('base64')}` },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -128,8 +162,9 @@ export async function fixture(t, options = {}) {
     assert.ok(response.ok, `${response.status}: ${text}`);
     return text ? JSON.parse(text) : undefined;
   }
-  return { root, projects, captureDirectory, configFile, api, stop, output: () => output,
-    simulationLog: () => simulationLog,
+  return { root, projects, captureDirectory, configFile, api, stop,
+    restart: async () => { await stop(); await start(); }, output: () => output,
+    simulationURL, simulationLog: () => simulationLog,
     plugins: async (directory = projects[0]) => (await api(`/api/plugin?location[directory]=${encodeURIComponent(directory)}`)).data };
 }
 

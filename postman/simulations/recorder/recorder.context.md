@@ -25,13 +25,32 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 - Postman CLI 1.83.1 y OpenCode 2.1.2 funcionan juntos con este handler; el servidor
   puede solicitar también un título, por lo que no se asume un solo POST por
   encargo. (Observado 2026-11-21 en las pruebas de persistencia y selección.)
+- El bootstrap del motor de datasets puede superar 20 s con HOME nuevo. El
+  harness espera hasta 60 s y conserva `sim.err`. (Observado 2026-11-22.)
+- NDJSON notifica solicitudes al terminar la respuesta, no su inicio: no contar
+  SSE todavía abiertas para probar ausencia de despacho. La carrera usa un
+  contador HTTP en el miembro sintético. (Observado 2026-11-22 en la prueba de admisión.)
+- Code Mode representa el error provocado como herramienta completada con
+  `metadata.error: true`, no `session.tool.failed`; la prueba consulta también
+  sus mensajes públicos. (Observado 2026-11-22 en la prueba de herramienta.)
 
 ## Observations
 
 <!-- begin:observations -->
+2026-11-22: suite final, 15 pruebas aprobadas. El único miembro, `synthetic-model`,
+sirvió POST de chat con 200 y el fallo deliberado con 400. Los casos de preparación
+fallida no despacharon POST, intencionadamente; ningún miembro quedó sin ejercitar
+en el conjunto. La carrera confirmó cero despachos de la admisión retenida mediante
+el contador HTTP, no contando respuestas SSE aún abiertas en NDJSON.
 2026-11-21: suite final, 7 pruebas aprobadas. En los tres casos con simulación,
 `synthetic-model` sirvió POST de chat con 200; ningún miembro quedó sin tráfico.
 2026-11-21: pruebas de persistencia y selección de ambos proyectos: el único miembro
 `synthetic-model` recibió POST `/v1/chat/completions` con respuesta 200. Ningún
 miembro quedó sin tráfico; se comprobaron los eventos `request` del log local.
 <!-- end:observations -->
+
+## What didn't work
+
+- 2026-11-22: un arranque aislado falló antes de `listening` con `Permission denied
+  while accessing local dataset files`. El mismo test pasó en otra instancia
+  temporal; causa no confirmada. Ese intento no llegó a ejecutar el registrador.

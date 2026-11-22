@@ -1,14 +1,17 @@
 # Registrador local · Flujo en Proyecto
 
 Plugin de servidor **independiente** para OpenCode **V2 2.1.2**, con SDK
-`@opencode/plugin` fijado a `2.1.2`. Implementa el corte de
-[#2](https://github.com/pablotecat/evagentic-flow/issues/2): encargo admitido y
+`@opencode/plugin` fijado a `2.1.2`. Implementa los cortes
+[#2](https://github.com/pablotecat/evagentic-flow/issues/2) y
+[#3](https://github.com/pablotecat/evagentic-flow/issues/3): encargo admitido y
 texto final de respuesta, persistidos durante la ejecución de un único proyecto
-autorizado. No modifica agentes, permisos, delegación ni otros plugins.
+autorizado, con aviso e interrupción ante fallos del registrador. No modifica
+agentes, permisos de las sesiones observadas, delegación ni otros plugins.
 
 **No se ha instalado ni activado en el proyecto consumidor.** La parada ante
-fallos (#3), subejecuciones, herramientas, entregables y cobertura del piloto
-siguen pendientes. No utilizar este corte como autorización para el piloto.
+fallos se comprueba solo para una ejecución simple; subejecuciones, herramientas,
+entregables y cobertura del piloto siguen pendientes. No utilizar este corte como
+autorización para el piloto.
 
 ## Desarrollo y pruebas
 
@@ -63,7 +66,8 @@ node --test --test-name-pattern="el encargo" test/recorder.test.mjs
 5. Iniciar esa instancia y admitir un encargo desde la interfaz nativa. OpenCode
    carga plugins de forma diferida: consultar la lista antes de una admisión
    puede devolver una lista vacía. Comprobar el estado público del plugin **y**
-   el diario; `active` por sí solo no demuestra captura sana.
+   el diario y `metadata.evagenticRecorder` de la sesión; `active` por sí solo no
+   demuestra captura sana: también identifica un guardián activo con captura fallida.
 
 Para seleccionar el segundo proyecto solo cambian `projectDirectory` y, si se
 desea, `captureDirectory`; recargar o reiniciar **la instancia aislada** para
@@ -86,6 +90,44 @@ diarios como si hubiera un orden causal global.
 
 Contrato y límites: [captura v1](docs/capture-v1.md).
 
+## Si falla el registrador
+
+- El título nativo de la sesión muestra **«Fallo del registrador · Revisar antes
+  de volver a ejecutar»**. Su API pública `GET /api/session/{sessionID}` conserva
+  en `data.metadata.evagenticRecorder` el aviso, la solicitud de interrupción,
+  su resultado y si la parada quedó confirmada. También se informa en stderr.
+  No requiere navegador conectado ni escribir en el destino averiado.
+- Se solicita `session.interrupt` con `resume: false`; solo se declara parada
+  confirmada tras `wait` y un desenlace público `interrupted` posterior a la
+  solicitud. `not-running`, errores o comprobaciones que no concluyen se muestran
+  como **`unconfirmed`**, no como éxito. No se revierten ni se garantiza cancelar
+  inmediatamente efectos externos, herramientas no cooperativas o descendientes.
+- La admisión y el despacho de modelos quedan bloqueados, también si un encargo
+  estaba en preparación al fallar la captura. Se arma una marca durable **antes**
+  de declarar preparado el registrador; solo una limpieza sana puede retirarla.
+  Así, fallar al actualizar el diagnóstico o cerrar el proceso sin limpieza no
+  pierde el bloqueo. Reparar el destino, recargar o reiniciar **no**
+  elimina esa marca ni vuelve a emitir `recorder.ready`. Este corte no ofrece
+  desbloqueo automático: revisar antes de cualquier nueva ejecución.
+- En OpenCode 2.1.2, fallar `setup` no veta la admisión. Por eso el plugin mantiene
+  activo el hook de bloqueo cuando falla la configuración o preparación; el HTTP
+  de un encargo rechazado devuelve 500 sin cuerpo tipado, mientras el aviso queda
+  consultable en la sesión. Sin configuración válida, se rechaza la admisión en
+  la ubicación donde se cargó el plugin, sin autorizar captura ni interrupción
+  de otras sesiones. Con configuración válida ajena, se retira el guardián.
+- Si se pierde la ruta del proyecto, se sigue intentando interrumpir las sesiones
+  cuya identidad y ubicación ya habían sido verificadas. No se autoriza una sesión
+  nueva por inferencia ni se interrumpe una sesión trasladada fuera del alcance.
+- Un runtime sin las capacidades comprobadas queda **no compatible y bloquea la
+  preparación del piloto**: un estado público `failed` del cargador no demuestra
+  que impida ejecutar. No sustituir estas comprobaciones por esa suposición.
+  Si no se puede armar el estado durable inicial, tampoco existe garantía de
+  recordar ese fallo después de perder todo el estado del runtime: no autorizar
+  el piloto ni interpretar una base de datos nueva como una revisión.
+
+La evidencia anterior no se borra. Consultar el diario con el lector independiente;
+si se movió el destino para diagnosticar un fallo, usar su ubicación conservada.
+
 ## Seguridad y límites de esta entrega
 
 - `.local/`, `*.local.json` y `captures/` están ignorados. Elegir capturas fuera
@@ -96,9 +138,10 @@ Contrato y límites: [captura v1](docs/capture-v1.md).
   cabeceras, configuración global, adjuntos ni payloads de herramientas.
 - Una respuesta parcial sin `session.text.ended` queda sin texto; sus eventos
   solo dejan metadatos y omisiones explícitas. No se hace backfill ni replay.
-- Un fallo posterior se informa y deja `recorder.failed` si el disco permite
-  escribir. La interrupción efectiva de trabajo es la issue #3, no está resuelta
-  por este corte; no ejecutar el piloto todavía.
+- Un fallo posterior deja `recorder.failed` si el diario sigue operativo. El aviso,
+  la interrupción y el bloqueo no dependen de poder escribir esa fila. Los fallos
+  de agente/herramienta registrados y las omisiones de cobertura no disparan esta
+  política por sí solos. No ejecutar el piloto todavía.
 - Auditoría npm (2026-11-21): 24 avisos moderados transitivos del SDK fijado,
   ninguno alto/crítico. La mayoría no tiene corrección disponible para esta
   versión. No se han forzado actualizaciones que alteren el contrato comprobado.
