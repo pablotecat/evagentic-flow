@@ -1,5 +1,5 @@
 import { Plugin } from '@opencode/plugin';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, readFile, realpath, rename, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
@@ -35,6 +35,8 @@ type CapturedEvent = {
     response: Json;
   } | null;
   retry: { kind: 'model'; attempt: number; at: number; error: NonNullable<ToolEvidence['error']> } | null;
+  skill: { id: string | null; name: string | null; text: string; sha256: string; origin: string;
+    contextID: null; consumption: null } | null;
   status: 'captured' | 'omitted' | 'unrecognized';
   omissions: string[];
   redactions: string[];
@@ -61,12 +63,24 @@ type Interruption = {
 };
 
 type SessionScope = { id: string; projectID: string; location: { directory: string } };
+type Observation = {
+  stage: 'availability' | 'deployed-file' | 'runtime-definition' | 'context-hook' | 'environment' | 'admitted-skill';
+  source: string;
+  identity: string | null;
+  observationTime: number;
+  requestObservationID?: string | null;
+  messageID?: string | null;
+  eventID?: string | null;
+  omissions?: string[];
+};
 
 export default Plugin.define({
   id: 'evagentic.recorder',
   async setup(ctx) {
     if (ctx.app.version !== '2.1.2' || typeof ctx.event?.subscribe !== 'function'
       || typeof ctx.tool?.hook !== 'function' || typeof ctx.shell?.hook !== 'function'
+      || typeof ctx.tool?.list !== 'function' || typeof ctx.skill?.list !== 'function'
+      || typeof ctx.agent?.get !== 'function' || typeof ctx.plugin?.list !== 'function'
       || ['get', 'list', 'hook', 'update', 'interrupt', 'wait'].some(key =>
         typeof ctx.session?.[key as keyof typeof ctx.session] !== 'function')
       || ['get', 'set', 'remove'].some(key => typeof ctx.storage?.[key as keyof typeof ctx.storage] !== 'function')) {
@@ -227,8 +241,56 @@ export default Plugin.define({
       });
       const controller = new AbortController();
       const toolNames = new Map<string, string>();
+      const skillLoads = new Map<string, string>();
       const interactionCalls = new Map<string, { callID: string; messageID: string }>();
       const formFields = new Map<string, Set<string>>();
+      const observe = async (session: SessionScope, details: Observation, value: unknown) => {
+        const redactions: string[] = [];
+        const omissions = [...details.omissions ?? []];
+        const id = (value: string | null | undefined, name = false) => {
+          if (value == null) return null;
+          if (safeIdentifier(value, config.secrets, name)) return value;
+          omissions.push('unsafe-identifier'); return null;
+        };
+        let filtered: Json = null;
+        let status = 'captured';
+        try { filtered = sanitizeJson(value, config.secrets, redactions); }
+        catch { status = 'unrecognized'; omissions.push('unrecognized-observation-format'); }
+        const identity = details.identity === null ? null : redact(details.identity, config.secrets);
+        redactions.push(...identity?.reasons ?? []);
+        await append({ type: 'recorder.observation', observationVersion: 1, stage: details.stage,
+          source: details.source, identity: identity?.text ?? null,
+          observationTime: details.observationTime, requestObservationID: details.requestObservationID ?? null,
+          projectID: id(session.projectID), sessionID: id(session.id), executionID: null,
+          messageID: id(details.messageID), eventID: id(details.eventID), value: filtered,
+          sha256: status === 'captured' ? digest(JSON.stringify(filtered)) : null,
+          hashBasis: 'redacted-json-utf8', status, omissions: [...new Set(omissions)], redactions: [...new Set(redactions)] });
+      };
+      const observeSkill = async (session: SessionScope, skillID: string, eventID: string | null, messageID: string | null) => {
+        const { data: skills } = await ctx.skill.list();
+        const skill = skills.find(skill => skill.id === skillID);
+        await observe(session, { stage: 'runtime-definition', source: 'opencode.skill.list', identity: skillID,
+          eventID, messageID, observationTime: Date.now(),
+          omissions: ['registry-read-is-not-historical-activation', 'transform-attribution-not-exposed',
+            ...(skill ? [] : ['skill-definition-not-found'])] }, skill ? {
+          id: skill.id, name: skill.name, description: skill.description ?? null,
+          content: skill.content, path: skill.path, autoinvoke: skill.autoinvoke ?? null,
+        } : null);
+        if (!skill) return;
+        let content: string | null = null;
+        let path: string | null = null;
+        const omissions = ['file-read-is-not-runtime-context'];
+        try {
+          const resolved = await realpath(skill.path);
+          const rel = relative(project!, resolved);
+          if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
+            omissions.push('definition-file-outside-project-not-read');
+          } else if (!(await stat(resolved)).isFile()) omissions.push('definition-file-not-regular');
+          else { path = rel; content = await readFile(resolved, 'utf8'); }
+        } catch { omissions.push('definition-file-unavailable'); }
+        await observe(session, { stage: 'deployed-file', source: 'node.fs.readFile', identity: skillID,
+          eventID, messageID, observationTime: Date.now(), omissions }, { path, content });
+      };
       const task = (async () => {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           try {
@@ -280,10 +342,38 @@ export default Plugin.define({
                 .find((value): value is string => typeof value === 'string') ?? null,
               ordinal: typeof data.ordinal === 'number' && Number.isSafeInteger(data.ordinal) && data.ordinal >= 0
                 ? data.ordinal : null,
-              content: null, tool: null, interaction: null, retry: null, status: 'omitted',
+              content: null, tool: null, interaction: null, retry: null, skill: null, status: 'omitted',
               omissions: ['event-payload-not-captured'], redactions: [],
             };
             captureTool(record, data, config.secrets);
+            if (record.toolName === 'skill' && record.type === 'session.tool.called' && record.tool) {
+              const id = object(record.tool.input).id;
+              if (typeof id === 'string') skillLoads.set(callKey, id);
+            }
+            const loadedSkill = skillLoads.get(callKey);
+            if (loadedSkill && record.type === 'session.tool.success' && record.tool?.outcome === 'success'
+              && record.tool.output?.length) {
+              const text = record.tool.output.map(part => part.text).join('\n');
+              record.skill = { id: safeIdentifier(loadedSkill, config.secrets, true) ? loadedSkill : null,
+                name: null, text, sha256: digest(text), origin: 'successful-skill-tool-result', contextID: null, consumption: null };
+              record.omissions.push('skill-execution-context-link-not-exposed', 'skill-consumption-not-exposed');
+            }
+            if (event.type === 'session.skill.activated') {
+              if (durable?.version !== 1 || typeof data.id !== 'string'
+                || typeof data.name !== 'string' || typeof data.text !== 'string') {
+                record.status = 'unrecognized'; record.omissions = ['unrecognized-skill-format'];
+              } else {
+                const name = redact(data.name, config.secrets);
+                const text = redact(data.text, config.secrets);
+                record.skill = { id: safeIdentifier(data.id, config.secrets, true) ? data.id : null,
+                  name: name.text, text: text.text, sha256: digest(text.text), origin: 'runtime-activation-event',
+                  contextID: null, consumption: null };
+                record.status = 'captured';
+                record.redactions.push(...name.reasons, ...text.reasons);
+                record.omissions = ['skill-message-execution-context-link-not-exposed', 'skill-consumption-not-exposed'];
+                if (record.skill.id === null) record.omissions.push('unsafe-identifier');
+              }
+            }
             if (event.type === 'session.retry.scheduled') {
               const error = object(data.error);
               if (durable?.version !== 1 || !Number.isSafeInteger(data.attempt) || Number(data.attempt) < 1
@@ -323,7 +413,9 @@ export default Plugin.define({
               if (!related) record.omissions.push('interaction-call-link-not-observed');
               if (record.interaction.phase !== 'requested') interactionCalls.delete(requestKey);
             }
-            if (event.type === 'session.tool.success' || event.type === 'session.tool.failed') toolNames.delete(callKey);
+            if (event.type === 'session.tool.success' || event.type === 'session.tool.failed') {
+              toolNames.delete(callKey); skillLoads.delete(callKey);
+            }
             let text: unknown;
             let role: 'user' | 'assistant' | undefined;
             if (event.type === 'session.inbox.enqueued') {
@@ -357,6 +449,26 @@ export default Plugin.define({
             record.omissions = [...new Set(record.omissions)];
             record.redactions = [...new Set(record.redactions)];
             await append(record);
+            if (record.skill?.id) await observeSkill(session, record.skill.id, record.eventID, record.messageID);
+            if (event.type === 'session.inbox.enqueued' && durable?.version === 1 && object(data.item).type === 'user') {
+              const skills = object(object(data.item).payload).skills;
+              if (skills !== undefined) {
+                if (!Array.isArray(skills)) {
+                  await observe(session, { stage: 'admitted-skill', source: 'opencode.session.inbox.skills', identity: null,
+                    eventID: record.eventID, messageID: record.messageID, observationTime: Date.now(),
+                    omissions: ['unrecognized-admitted-skill-format'] }, null);
+                } else for (const attachment of skills) {
+                  const skill = object(attachment);
+                  const recognized = typeof skill.id === 'string' && typeof skill.name === 'string' && typeof skill.text === 'string';
+                  await observe(session, { stage: 'admitted-skill', source: 'opencode.session.inbox.skills',
+                    identity: recognized ? String(skill.id) : null, eventID: record.eventID, messageID: record.messageID,
+                    observationTime: Date.now(), omissions: recognized
+                      ? ['admission-is-not-model-dispatch', 'skill-consumption-not-exposed'] : ['unrecognized-admitted-skill-format'] },
+                  recognized ? { id: skill.id, name: skill.name, text: skill.text } : null);
+                  if (recognized) await observeSkill(session, String(skill.id), record.eventID, record.messageID);
+                }
+              }
+            }
           } catch {
             void fail('event-stream-or-persistence-failure');
             try { await append({ type: 'recorder.failed', reason: 'event-stream-or-persistence-failure' }); }
@@ -375,28 +487,88 @@ export default Plugin.define({
       let promoted = false;
       try {
         if (failed) throw new Error('Subscription failed.');
-        await ctx.session.hook('context', async ({ sessionID, tools }) => {
+        for (const hook of ['context', 'compaction', 'generate', 'title'] as const) await ctx.session.hook(hook, async event => {
+          const { sessionID } = event;
           if (failed) return rejectFailedWork({ sessionID });
           try {
             const session = await ctx.session.get({ sessionID });
             if (!await inScope(session)) return;
-            const names = (await ctx.tool.list()).map(tool => tool.id);
-            const modelNames = Object.keys(tools);
-            const safe = (name: string) => safeIdentifier(name, config.secrets, true);
-            await append({ type: 'recorder.tools.available', source: 'opencode.tool.list',
-              projectID: safeIdentifier(session.projectID, config.secrets) ? session.projectID : null,
-              sessionID: safeIdentifier(session.id, config.secrets) ? session.id : null,
-              toolNames: names.filter(safe).sort(), modelToolNames: modelNames.filter(safe).sort(),
-              omissions: [...names, ...modelNames].every(safe) ? [] : ['unsafe-identifier'] });
+            const observationTime = Date.now();
+            const requestObservationID = randomUUID();
+            const omissions = ['later-hooks-and-protocol-transforms-not-observed', 'request-execution-link-not-exposed',
+              'request-options-not-captured', 'context-metadata-not-captured'];
+            const system = event.system.map(part => {
+              const instructions = object(object(part.metadata).experimental).instructions;
+              if (!Array.isArray(instructions)) omissions.push('instruction-source-list-not-exposed');
+              return { text: part.text, instructions: Array.isArray(instructions) ? instructions.flatMap(item => {
+                const entry = object(item);
+                if (typeof entry.key === 'string' && typeof entry.text === 'string') return [{ key: entry.key, text: entry.text }];
+                omissions.push('unrecognized-instruction-source'); return [];
+              }) : null };
+            });
+            const messages = event.messages.map(message => ({
+              id: message.id && safeIdentifier(message.id, config.secrets) ? message.id : null,
+              role: message.role, text: message.content.flatMap(part => {
+                if (part.type === 'text') return [part.text];
+                // Do not serialize reasoning, encrypted checkpoints, media, native/provider metadata or arbitrary results.
+                omissions.push('non-text-context-part-not-captured'); return [];
+              }),
+            }));
+            const tools = 'tools' in event ? event.tools : null;
+            const agentID = 'agent' in event ? event.agent : null;
+            await observe(session, { stage: 'context-hook', source: `opencode.session.hook.${hook}`, identity: hook,
+              observationTime, requestObservationID, omissions }, {
+              kind: hook === 'context' ? 'primary' : hook, agentID, model: { providerID: event.model.providerID, id: event.model.id },
+              system, messages, tools, finalContext: false,
+            });
+            if (agentID) {
+              const { data: agent } = await ctx.agent.get({ agentID });
+              await observe(session, { stage: 'runtime-definition', source: 'opencode.agent.get', identity: agentID,
+                observationTime: Date.now(), requestObservationID,
+                omissions: ['agent-source-files-not-exposed', 'transform-attribution-not-exposed', 'agent-request-settings-not-captured'] },
+              { id: agent.id, name: agent.name, mode: agent.mode, description: agent.description ?? null, system: agent.system ?? null });
+            }
+            const { data: skills } = await ctx.skill.list();
+            await observe(session, { stage: 'availability', source: 'opencode.skill.list', identity: null,
+              observationTime: Date.now(), requestObservationID,
+              omissions: ['availability-is-not-activation-or-permission', 'unused-skill-content-not-captured'] },
+            skills.map(skill => ({ id: skill.id, name: skill.name, description: skill.description ?? null, autoinvoke: skill.autoinvoke ?? null })));
+            const { data: plugins } = await ctx.plugin.list();
+            await observe(session, { stage: 'environment', source: 'opencode.plugin.list', identity: null,
+              observationTime: Date.now(), requestObservationID,
+              omissions: ['plugin-registration-order-and-transform-attribution-not-exposed', 'plugin-local-versions-not-exposed',
+                'configuration-sources-not-exposed', 'plugin-locators-and-options-not-captured'] },
+            { plugins: plugins.map(plugin => ({ id: plugin.id ?? null, source: plugin.source.type,
+              version: plugin.source.type === 'package' ? plugin.source.version ?? null : null, status: plugin.state.status })),
+              configurationSources: null, transformations: null });
+            if (hook === 'context') {
+              const names = (await ctx.tool.list()).map(tool => tool.id);
+              const modelNames = Object.keys(tools ?? {});
+              const safe = (name: string) => safeIdentifier(name, config.secrets, true);
+              await append({ type: 'recorder.tools.available', source: 'opencode.tool.list',
+                projectID: safeIdentifier(session.projectID, config.secrets) ? session.projectID : null,
+                sessionID: safeIdentifier(session.id, config.secrets) ? session.id : null,
+                toolNames: names.filter(safe).sort(), modelToolNames: modelNames.filter(safe).sort(),
+                omissions: [...names, ...modelNames].every(safe) ? [] : ['unsafe-identifier'] });
+            }
           } catch {
             void fail('event-stream-or-persistence-failure');
-            throw new Error('Recorder: tool inventory capture failed; pilot blocked.');
+            throw new Error('Recorder: context observation failed; pilot blocked.');
           }
         });
-        await append({ type: 'recorder.ready', runtimeVersion: ctx.app.version, sdkVersion: '2.1.2',
+        const sdkVersion = await packageVersion(new URL('../../package.json', import.meta.resolve('@opencode/plugin')), '@opencode/plugin');
+        const recorderVersion = await packageVersion(new URL('../package.json', import.meta.url), '@evagentic/recorder');
+        await append({ type: 'recorder.ready', runtimeVersion: ctx.app.version, sdkVersion, recorderVersion,
+          observationVersion: 1,
+          versionSources: { runtime: 'ctx.app.version', sdk: sdkVersion ? 'resolved-package-manifest' : 'unknown',
+            recorder: recorderVersion ? 'recorder-package-manifest' : 'unknown', hostSdk: null },
           coverage: { replay: false, content: ['admitted-user-text', 'completed-assistant-text', 'tool-input', 'tool-text-result',
-            'session-permission-interactions', 'session-form-interactions'],
-            excluded: ['attachments', 'tool-internal-http', 'reasoning', 'definitions', 'headers', 'global-config'],
+            'session-permission-interactions', 'session-form-interactions', 'skill-load-results', 'admitted-skills',
+            'selected-runtime-definitions', 'selected-project-skill-files', 'context-hook-text-and-tool-definitions',
+            'session-hook.context.primary', 'session-hook.compaction', 'session-hook.generate', 'session-hook.title'],
+            excluded: ['attachments', 'tool-internal-http', 'reasoning', 'headers', 'global-config', 'final-wire-context',
+              'non-session-generation', 'websocket-frames', 'skill-lifecycle-compliance-and-cost',
+              'post-hook-http-and-protocol-transforms', 'request-options', 'non-text-context-parts'],
             executionID: 'not-exposed', ordering: 'arrival-is-not-causality' } });
         // Subscription failure can race the durable write: check again before publishing readiness.
         if (failed) throw new Error('Subscription failed during preparation.');
@@ -433,6 +605,18 @@ export default Plugin.define({
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : {};
+}
+
+function digest(text: string) {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+async function packageVersion(path: URL, name: string) {
+  try {
+    const manifest = JSON.parse(await readFile(path, 'utf8'));
+    return manifest.name === name && typeof manifest.version === 'string'
+      && /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$/.test(manifest.version) ? manifest.version as string : null;
+  } catch { return null; }
 }
 
 function safeIdentifier(value: string, secrets: string[], toolName = false) {

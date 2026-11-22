@@ -4,9 +4,10 @@ Plugin de servidor **independiente** para OpenCode **V2 2.1.2**, con SDK
 `@opencode/plugin` fijado a `2.1.2`. Implementa los cortes
 [#2](https://github.com/pablotecat/evagentic-flow/issues/2),
 [#3](https://github.com/pablotecat/evagentic-flow/issues/3),
-[#4](https://github.com/pablotecat/evagentic-flow/issues/4) y
-[#5](https://github.com/pablotecat/evagentic-flow/issues/5): encargo admitido,
-texto final, delegación, herramientas e interacciones humanas observables del proyecto autorizado,
+[#4](https://github.com/pablotecat/evagentic-flow/issues/4),
+[#5](https://github.com/pablotecat/evagentic-flow/issues/5) y
+[#6](https://github.com/pablotecat/evagentic-flow/issues/6): encargo admitido,
+texto final, delegación, herramientas, interacciones externas, skills y definiciones observables del proyecto autorizado,
 con aviso e interrupción del conjunto observado ante fallos del registrador. No modifica
 agentes, permisos de las sesiones observadas, delegación ni otros plugins.
 
@@ -33,6 +34,9 @@ en localhost con puerto aleatorio y contraseña sintética. Nunca llaman al serv
 compartido. Prueban APIs públicas y un lector JSONL independiente, no funciones
 privadas. Usan dos repositorios temporales y un proveedor HTTP sintético servido
 por Postman. No consumen créditos ni usan credenciales reales.
+También aíslan el home y desactivan el descubrimiento de configuración de ancestros
+(que V2 hace por encima de la raíz Git); las fuentes de skills/instrucciones de
+esas pruebas se declaran explícitamente y solo contienen datos sintéticos.
 
 En Windows se detecta la instalación npm habitual del ejecutable; para otra
 instalación, configurar `OPENCODE_TEST_BIN` con la ruta del binario. Se puede
@@ -120,6 +124,19 @@ Se conservan solicitudes y respuestas, con enlaces públicos cuando existen, per
 la procedencia de una respuesta es **cliente externo no identificado**, no agente
 ni persona autenticada. No se capturan formularios globales, metadata arbitraria,
 campos ocultos, adjuntos ni respuestas sin un formulario autorizado observado.
+
+`recorder.observation` distingue disponibilidad y admisión de skills, definiciones
+del registro transformado, archivos desplegados y texto/esquemas vistos en los
+hooks `context`, `compaction`, `generate` y `title`. Conserva contenido filtrado,
+fuente, momento y hash verificable, no solo rutas mutables. Las activaciones
+públicas y cargas satisfactorias conservan su procedencia y los enlaces expuestos;
+no prueban cumplimiento ni coste por skill. Una selección de sesión/árbol excluye
+observaciones de otras sesiones.
+
+**El contexto de un hook no es el contexto final del modelo.** Otros hooks y el
+protocolo pueden cambiarlo después. Las versiones del servidor, dependencia SDK
+y paquete registrador tienen fuentes declaradas; archivos fuente de agentes,
+configuración y autoría de transformaciones no expuestos quedan desconocidos.
 
 Contrato y límites: [captura v1](docs/capture-v1.md).
 

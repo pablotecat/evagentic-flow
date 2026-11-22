@@ -2,7 +2,12 @@
 const http = require('node:http');
 let heldAdmissions = 0;
 let retryServed = 0;
+let laterHookRequests = 0;
 http.createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/control/context-provenance') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ laterHookRequests }));
+  }
   if (req.method === 'GET' && req.url === '/control/held-admissions') {
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({ count: heldAdmissions }));
@@ -17,6 +22,7 @@ http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ error: 'Expected synthetic chat messages' }));
   }
   const input = JSON.stringify(body.messages);
+  if (input.includes('Synthetic later hook instructions.')) laterHookRequests++;
   const cookieText = input.includes('SYNTHETIC_COOKIE_HEADERS')
     ? 'Cookie: session=synthetic-first-cookie; auth=synthetic-second-cookie\r\n'
       + 'sEt-CoOkIe: id="synthetic-set-cookie"; Path=/synthetic-cookie-path; HttpOnly, next=synthetic-next-cookie\r\n'
@@ -50,6 +56,15 @@ http.createServer(async (req, res) => {
   const fileOnly = input.includes('SYNTHETIC_ACTION_FILE');
   const human = input.includes('SYNTHETIC_HUMAN');
   const question = body.tools?.find(tool => tool.function?.name === 'question');
+  const skill = body.tools?.find(tool => tool.function?.name === 'skill');
+  const execute = body.tools?.find(tool => tool.function?.name === 'execute' && tool.function.parameters?.properties?.code);
+  if (input.includes('SYNTHETIC_SKILL_LOAD') && actionResults === 0 && (skill || execute)) {
+    send({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_synthetic_skill', type: 'function',
+      function: { name: (skill || execute).function.name, arguments: JSON.stringify(skill ? { id: 'transformed' }
+        : { code: 'return await tools.skill({ id: "transformed" })' }) } }] });
+    send({}, 'tool_calls');
+    return res.end('data: [DONE]\n\n');
+  }
   if (human && question && actionResults === 0) {
     send({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_synthetic_question', type: 'function',
       function: { name: question.function.name, arguments: JSON.stringify({ questions: [{

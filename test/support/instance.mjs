@@ -12,6 +12,7 @@ const binary = process.env.OPENCODE_TEST_BIN ?? (process.platform === 'win32'
 const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
   ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : process.env.TMPDIR ?? '/tmp');
 let installed;
+let simulationHome;
 
 async function packagePlugin() {
   const root = await mkdtemp(join(temporary, 'recorder-package-'));
@@ -63,6 +64,9 @@ export async function fixture(t, options = {}) {
     HOME: root, USERPROFILE: root, APPDATA: join(root, 'appdata'), LOCALAPPDATA: join(root, 'localappdata'),
     XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'),
     XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache'),
+    OPENCODE_TEST_HOME: root,
+    // V2 discovers compatibility sources above Git roots too; TEMP lives below the real home.
+    OPENCODE_CONFIG_PROJECT_DISABLE: '1',
     PROGRAMDATA: join(root, 'system'), TEMP: root, TMP: root, GIT_CONFIG_NOSYSTEM: '1',
     OPENCODE_DB: join(root, 'data/opencode/test.db'), EVAGENTIC_CONFIG: configFile,
     OPENCODE_PASSWORD: 'synthetic-instance-password',
@@ -71,6 +75,36 @@ export async function fixture(t, options = {}) {
   await mkdir(join(root, 'config/opencode/plugins'));
   await writeFile(join(root, 'config/opencode/plugins/recorder.ts'),
     `export { default } from ${JSON.stringify(pathToFileURL(join(plugin, 'dist/index.js')).href)};\n`);
+  if (options.syntheticDefinitions) {
+    await writeFile(join(root, 'outside-definition.md'), 'synthetic-unrelated-file-content\n');
+    for (const directory of projects) {
+      for (const id of ['observed', 'unused']) {
+        await mkdir(join(directory, '.opencode/skills', id), { recursive: true });
+        await writeFile(join(directory, '.opencode/skills', id, 'SKILL.md'),
+          `---\nname: Synthetic ${id}\ndescription: Synthetic ${id} instructions\n---\nDeployed ${id} body.\n`);
+      }
+      await writeFile(join(directory, 'AGENTS.md'), 'Synthetic project instructions.\n');
+    }
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-definitions.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      export default Plugin.define({ id: 'synthetic.definitions', async setup(ctx) {
+        await ctx.skill.transform(editor => {
+          editor.add({ id: 'outside', name: 'Synthetic outside', description: 'Synthetic outside instructions',
+            path: ${JSON.stringify(join(root, 'outside-definition.md'))}, content: 'Synthetic authorized registry body.' });
+          editor.add({ id: 'transformed', name: 'Synthetic transformed',
+          description: 'Synthetic transformed instructions',
+          path: ctx.location.directory + '/.opencode/skills/observed/SKILL.md',
+          content: 'Transformed observed body. synthetic-definition-secret\\nCookie: first=synthetic-definition-cookie; second=synthetic-definition-cookie-two\\nEnd of instructions.' });
+        });
+        await ctx.agent.transform(editor => editor.update('build', agent => {
+          agent.system = 'Synthetic transformed agent instructions.';
+        }));
+        await ctx.session.hook('context', event => {
+          event.system.push({ type: 'text', text: 'Synthetic later hook instructions.' });
+        });
+      } });
+    `);
+  }
   if (options.syntheticTools) {
     await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-tools.ts'), `
       import { Plugin } from '@opencode/plugin';
@@ -140,12 +174,20 @@ export async function fixture(t, options = {}) {
   }
   const serverConfig = { $schema: 'https://opencode.ai/config.json', update: 'disable',
     snapshots: false, ...options.serverConfig };
+  if (options.syntheticDefinitions) {
+    serverConfig.skills = [join(projects[options.projectIndex ?? 0], '.opencode/skills')];
+    serverConfig.instructions = [join(projects[options.projectIndex ?? 0], 'AGENTS.md')];
+  }
   let simulationLog = '';
   let simulationURL;
   if (options.simulation) {
+    // Cache only CLI bootstrap in a temporary home; every mock still gets a fresh process/state.
+    simulationHome ??= mkdtemp(join(temporary, 'recorder-simulation-home-'));
+    const home = await simulationHome;
     const simulation = spawn('postman', ['simulation', 'run',
       join(repository, 'postman/simulations/recorder/recorder.sim.yaml'),
-      '--port', 'auto', '--output', 'ndjson', '--no-history'], { cwd: repository, env });
+      '--port', 'auto', '--output', 'ndjson', '--no-history'],
+    { cwd: repository, env: { ...env, HOME: home, USERPROFILE: home } });
     let errors = '';
     simulation.stdout.on('data', chunk => { simulationLog += chunk; });
     simulation.stderr.on('data', chunk => { errors += chunk; });
@@ -175,7 +217,7 @@ export async function fixture(t, options = {}) {
   }
   await writeFile(join(root, 'config/opencode/opencode.json'), JSON.stringify(serverConfig));
   // Prove path isolation before opening a database or starting a server.
-  for (const name of ['data', 'config', 'cache', 'state', 'db']) {
+  for (const name of ['home', 'data', 'config', 'cache', 'state', 'db']) {
     const actual = execFileSync(binary, ['debug', 'paths', name], { env, cwd: root, encoding: 'utf8' }).trim();
     assert.ok(resolve(actual).startsWith(resolve(root)), `${name} escaped the isolated instance`);
   }

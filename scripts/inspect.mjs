@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -38,6 +39,11 @@ const validRetry = retry => retry === null || (exactKeys(retry, ['kind', 'attemp
   && exactKeys(retry.error, ['type', 'message', ...(Object.hasOwn(retry.error, 'status') ? ['status'] : [])])
   && typeof retry.error.type === 'string' && typeof retry.error.message === 'string'
   && (!Object.hasOwn(retry.error, 'status') || (Number.isInteger(retry.error.status) && retry.error.status >= 100 && retry.error.status <= 599)));
+const validSkill = skill => skill === null || (exactKeys(skill, ['id', 'name', 'text', 'sha256', 'origin', 'contextID', 'consumption'])
+  && toolName(skill.id) && (skill.name === null || typeof skill.name === 'string') && typeof skill.text === 'string'
+  && ['successful-skill-tool-result', 'runtime-activation-event'].includes(skill.origin)
+  && skill.sha256 === digest(skill.text) && skill.contextID === null && skill.consumption === null);
+const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
 
 function validRecord(row) {
   if (row?.schemaVersion !== 1 || typeof row.captureID !== 'string'
@@ -45,11 +51,35 @@ function validRecord(row) {
     || !Number.isSafeInteger(row.arrival) || row.arrival < 1 || !Number.isFinite(row.observedAt)
     || typeof row.type !== 'string') return false;
   if (row.type === 'recorder.ready') {
-    return exactKeys(row, [...common, 'runtimeVersion', 'sdkVersion', 'coverage'])
-      && typeof row.runtimeVersion === 'string' && typeof row.sdkVersion === 'string'
+    const observation = Object.hasOwn(row, 'observationVersion');
+    return exactKeys(row, [...common, 'runtimeVersion', 'sdkVersion', 'coverage',
+      ...observation ? ['observationVersion', 'recorderVersion', 'versionSources'] : []])
+      && typeof row.runtimeVersion === 'string' && (typeof row.sdkVersion === 'string' || (observation && row.sdkVersion === null))
+      && (!observation || (row.observationVersion === 1 && (row.recorderVersion === null || typeof row.recorderVersion === 'string')
+        && exactKeys(row.versionSources, ['runtime', 'sdk', 'recorder', 'hostSdk'])
+        && row.versionSources.runtime === 'ctx.app.version' && row.versionSources.hostSdk === null
+        && ['resolved-package-manifest', 'unknown'].includes(row.versionSources.sdk)
+        && ['recorder-package-manifest', 'unknown'].includes(row.versionSources.recorder)))
       && exactKeys(row.coverage, ['replay', 'content', 'excluded', 'executionID', 'ordering'])
       && row.coverage.replay === false && strings(row.coverage.content) && strings(row.coverage.excluded)
       && row.coverage.executionID === 'not-exposed' && row.coverage.ordering === 'arrival-is-not-causality';
+  }
+  if (row.type === 'recorder.observation') {
+    const sources = {
+      availability: ['opencode.skill.list'], 'deployed-file': ['node.fs.readFile'],
+      'runtime-definition': ['opencode.skill.list', 'opencode.agent.get'],
+      'context-hook': ['context', 'compaction', 'generate', 'title'].map(name => `opencode.session.hook.${name}`),
+      environment: ['opencode.plugin.list'], 'admitted-skill': ['opencode.session.inbox.skills'],
+    };
+    return exactKeys(row, [...common, 'observationVersion', 'stage', 'source', 'identity', 'observationTime',
+      'requestObservationID', 'projectID', 'sessionID', 'executionID', 'messageID', 'eventID', 'value', 'sha256',
+      'hashBasis', 'status', 'omissions', 'redactions']) && row.observationVersion === 1
+      && sources[row.stage]?.includes(row.source) && (row.identity === null || typeof row.identity === 'string')
+      && Number.isFinite(row.observationTime) && ['requestObservationID', 'projectID', 'sessionID', 'messageID', 'eventID']
+        .every(key => identifier(row[key])) && row.executionID === null && row.hashBasis === 'redacted-json-utf8'
+      && json(row.value) && strings(row.omissions) && strings(row.redactions)
+      && (row.status === 'captured' ? row.sha256 === digest(JSON.stringify(row.value))
+        : row.status === 'unrecognized' && row.value === null && row.sha256 === null);
   }
   if (row.type === 'recorder.failed' || row.type === 'recorder.gap') {
     return exactKeys(row, [...common, 'reason']) && row.reason === (row.type === 'recorder.failed'
@@ -66,7 +96,7 @@ function validRecord(row) {
     'sourceAggregateID', 'projectID', 'sessionID', 'executionID', 'messageID', 'ordinal',
     'content', 'status', 'omissions', 'redactions', ...(Object.hasOwn(row, 'sessionObservedAt') ? relations : []),
     ...(Object.hasOwn(row, 'tool') ? ['tool'] : []), ...(Object.hasOwn(row, 'interaction') ? ['interaction'] : []),
-    ...(Object.hasOwn(row, 'retry') ? ['retry'] : [])])
+    ...(Object.hasOwn(row, 'retry') ? ['retry'] : []), ...(Object.hasOwn(row, 'skill') ? ['skill'] : [])])
     && (!Object.hasOwn(row, 'sessionObservedAt') || (Number.isFinite(row.sessionObservedAt)
       && relations.filter(key => key !== 'sessionObservedAt').every(key => (key === 'toolName' ? toolName : identifier)(row[key]))))
     && row.source === 'opencode.event' && Number.isFinite(row.sourceTime)
@@ -77,8 +107,9 @@ function validRecord(row) {
     && (!Object.hasOwn(row, 'tool') || validTool(row.tool))
     && (!Object.hasOwn(row, 'interaction') || validInteraction(row.interaction))
     && (!Object.hasOwn(row, 'retry') || validRetry(row.retry))
+    && (!Object.hasOwn(row, 'skill') || validSkill(row.skill))
     && (row.status === 'captured'
-      ? (row.content === null ? row.tool != null || row.interaction != null || row.retry != null : exactKeys(row.content, ['role', 'text'])
+      ? (row.content === null ? row.tool != null || row.interaction != null || row.retry != null || row.skill != null : exactKeys(row.content, ['role', 'text'])
         && ['user', 'assistant'].includes(row.content.role) && typeof row.content.text === 'string')
       : ['omitted', 'unrecognized'].includes(row.status) && row.content === null);
 }
@@ -103,7 +134,7 @@ if (!directory) {
           const row = JSON.parse(line);
           if (!validRecord(row)) throw new Error('Unsupported or malformed capture');
           if (mode) rows.push(row);
-          else if (!sessionID || row.sessionID === sessionID || row.type.startsWith('recorder.')) {
+          else if (!sessionID || row.sessionID === sessionID || (row.type.startsWith('recorder.') && !row.sessionID)) {
             console.log(JSON.stringify(row));
           }
         }
@@ -124,7 +155,7 @@ if (!directory) {
     }
     for (const row of rows) {
       if (mode === '--tools') continue;
-      if (!sessionID || selected.has(row.sessionID) || row.type.startsWith('recorder.')) console.log(JSON.stringify(row));
+      if (!sessionID || selected.has(row.sessionID) || (row.type.startsWith('recorder.') && !row.sessionID)) console.log(JSON.stringify(row));
     }
     if (mode === '--tools') {
       const attempts = new Map();

@@ -34,7 +34,7 @@ Cada fila es un objeto JSON con estos campos obligatorios:
 | `captureID` | UUID del diario/activación; **no** un identificador de ejecución. |
 | `arrival` | Entero creciente desde `1`, local al diario; orden de escritura/observación, no causalidad. |
 | `observedAt` | Milisegundos Unix del reloj local al registrar. |
-| `type` | `recorder.ready`, `recorder.failed`, `recorder.gap`, `recorder.tools.available` o tipo público `session.*`, `permission.*` o `form.*` admitido. |
+| `type` | `recorder.ready`, `recorder.failed`, `recorder.gap`, `recorder.tools.available`, `recorder.observation` o tipo público `session.*`, `permission.*` o `form.*` admitido. |
 
 Versiones desconocidas requieren otro lector; no reinterpretarlas como v1.
 Una línea truncada o JSON inválido es evidencia incompleta, nunca una fila válida
@@ -49,6 +49,18 @@ y `ordering: "arrival-is-not-causality"`). Registra la comprobación de versión
 exacta `2.1.2`, capacidades públicas necesarias y escritura durable, **no** salud
 perpetua ni cobertura completa. No confundir `@opencode/plugin` con los SDK V1
 `@opencode-ai/plugin` / `@opencode-ai/sdk`.
+
+Desde #6, `recorder.ready` añade `observationVersion: 1`, `recorderVersion` y
+`versionSources`. El servidor procede de `ctx.app.version`; `sdkVersion` es la
+versión del manifiesto resuelto de **la dependencia del registrador**, y
+`recorderVersion` la de su propio manifiesto instalado. Las fuentes se declaran
+como `runtime: "ctx.app.version"`, `sdk: "resolved-package-manifest"` y
+`recorder: "recorder-package-manifest"`. Si un manifiesto no puede comprobarse,
+su versión es `null` y su fuente `unknown`, nunca una constante supuesta.
+`hostSdk: null` declara desconocida la versión del SDK interno del servidor;
+no se iguala a la dependencia del registrador. Son versiones de paquete, no una
+atestación de sus bytes ni un SHA del repositorio de desarrollo. El lector sigue
+admitiendo las filas v1 anteriores sin este grupo de campos.
 
 Un fallo de preparación no constituye preparación satisfactoria. Si la propia confirmación de disco falla, cualquier
 archivo `.pending` creado debe considerarse incompleto aunque contenga una fila
@@ -161,7 +173,7 @@ Además del sobre, todas las filas de eventos públicos admitidos incluyen:
 | `messageID` | `assistantMessageID`, `inboxID` o `messageID` observados, o `null`. No se inventa una asociación. |
 | `ordinal` | Entero de bloque de contenido cuando existe, o `null`. |
 | `content` | `null` o `{ "role": "user" \| "assistant", "text": "…" }`, ya filtrado. |
-| `status` | `captured`, `omitted` o `unrecognized`; `captured` puede referirse a `content`, `tool`, `interaction` o `retry`. |
+| `status` | `captured`, `omitted` o `unrecognized`; `captured` puede referirse a `content`, `tool`, `interaction`, `retry` o `skill`. |
 | `omissions` | Array de códigos de omisión, sin datos originales. |
 | `redactions` | Array de códigos de filtrado, sin los valores eliminados. |
 
@@ -203,7 +215,7 @@ Los eventos `session.execution.*` conservan sus identidades/tiempos como
 metadatos; su ID de evento identifica ese hecho, no se reutiliza como ID causal
 de otros eventos. No se asocian respuestas al último encargo por orden de llegada.
 
-Salvo los formatos de #5 descritos a continuación, los demás eventos de sesión observables conservan sobre y metadatos permitidos,
+Salvo los formatos de #5 y #6 descritos a continuación, los demás eventos de sesión observables conservan sobre y metadatos permitidos,
 pero **no payload** (`status: omitted`, `event-payload-not-captured`). Los campos
 no textuales del encargo/respuesta quedan excluidos (`non-text-fields-not-captured`).
 Un texto reconocido con forma o versión no admitida queda sin contenido y con
@@ -328,6 +340,118 @@ Se señalan además actor no expuesto, enlace de llamada no observado y mensajes
 de réplica de permiso/cancelación no expuestos cuando corresponde. No se consulta
 estado privado ni se reconstruye contenido ausente mediante historial o replay.
 
+## Skills, definiciones e instrucciones observadas (#6)
+
+La captura separa **disponibilidad**, **admisión**, **carga/activación**,
+**definición del registro**, **archivo desplegado** y **contexto en un hook**.
+No se suman esas observaciones como invocaciones diferentes, ni se deriva de
+ellas cumplimiento, ciclo de vida, duración o coste por skill.
+
+### Carga y activación
+
+Las nuevas filas de eventos añaden `skill`, objeto o `null` (el lector admite
+filas anteriores sin él). Contiene `id`, `name`, `text`, `sha256`, `origin`,
+`contextID: null` y `consumption: null`:
+
+- Un `session.tool.success` v2, con resultado reconocido y no marcado como error,
+  de una llamada identificada públicamente como `skill`, conserva el ID de su
+  argumento `id` y el texto filtrado del resultado. `origin` es
+  `successful-skill-tool-result`; `name` queda `null`. Conserva sesión, mensaje y
+  llamada de ese intento, incluidos los eventos internos públicos de Code Mode.
+- `session.skill.activated` v1 conserva `id`, `name` y `text` del propio evento,
+  con `origin: "runtime-activation-event"`. Este evento no expone mensaje,
+  llamada ni ID causal de ejecución/contexto: no se rellenan por proximidad.
+- `sha256` es SHA-256 del **texto filtrado** en UTF-8; no del original secreto.
+  El lector comprueba su correspondencia. Formas/versiones no admitidas quedan
+  sin skill y con `unrecognized-skill-format`; las cargas fallidas no acreditan
+  activación. Los IDs excluidos quedan `null` con `unsafe-identifier`.
+
+Las skills adjuntas a un encargo se registran por separado desde el payload
+`skills` de `session.inbox.enqueued` v1. Es una **admisión**, incluso con
+`resume: false`, no prueba de despacho ni consumo por el modelo. Conserva el
+mensaje/evento admitido, nombre, ID y texto resuelto, no una lectura retrospectiva
+del archivo. Una forma desconocida produce `unrecognized-admitted-skill-format`.
+Los enlaces de ejecución y contexto no expuestos permanecen `null`; los códigos
+`skill-*-context-link-not-exposed` y `skill-consumption-not-exposed` lo explicitan.
+
+### Observaciones versionadas
+
+`recorder.observation` no es una invocación ni un evento inventado del runtime.
+Además del sobre común lleva:
+
+| Campo | Significado |
+| --- | --- |
+| `observationVersion` | `1`, contrato de observaciones dentro de captura v1. El lector rechaza versiones desconocidas. |
+| `stage`, `source`, `identity` | Etapa de la tabla siguiente, fuente pública/lectura de archivo e identidad de la definición/punto; `null` cuando no existe. |
+| `observationTime` | Momento local de la observación, distinto de la fecha del evento relacionado y de su escritura (`observedAt`). |
+| `requestObservationID` | UUID local que agrupa el hook y sus lecturas asociadas; **no** identifica un despacho, intento ni ejecución del runtime. |
+| `projectID`, `sessionID` | Alcance comprobado; identificadores inseguros quedan `null`. |
+| `executionID` | Siempre `null`, no expuesto. |
+| `messageID`, `eventID` | Solo los enlaces públicos disponibles; `null` en lecturas de hook sin esos enlaces. |
+| `value` | Contenido permitido y filtrado; formas admitidas en la tabla. |
+| `sha256`, `hashBasis` | SHA-256 de `JSON.stringify(value)` en UTF-8, con `hashBasis: "redacted-json-utf8"`. Incluye la proyección capturada, no el objeto/archivo original. |
+| `status`, `omissions`, `redactions` | `captured` o `unrecognized`, límites y códigos de filtrado. Una proyección no serializable queda con `value`/hash `null`, `unrecognized-observation-format`, sin fallback crudo. |
+
+El hash permite verificar la versión **conservada** sin volver a resolver una
+ruta mutable; no ofrece firma, autenticidad ni integridad frente a quien cambie
+contenido y hash juntos. Las redacciones pueden hacer indistinguibles versiones
+que solo difieren en secretos. El lector comprueba los hashes antes de imprimir
+la fila; no necesita OpenCode ni acceso al proyecto.
+
+| `stage` / `source` | `value` y alcance |
+| --- | --- |
+| `availability` / `opencode.skill.list` | Array de `{id, name, description, autoinvoke}` en cada hook. No copia el contenido de skills no usadas ni prueba permisos, selección o activación. |
+| `admitted-skill` / `opencode.session.inbox.skills` | `{id, name, text}` resueltos en la admisión, con sus enlaces de mensaje/evento. |
+| `runtime-definition` / `opencode.skill.list` | `{id, name, description, content, path, autoinvoke}` de la skill cargada/admitida, leída **después** del hecho. Es el registro transformado actual, no garantía de snapshot histórico de esa activación. |
+| `deployed-file` / `node.fs.readFile` | `{path, content}` del archivo apuntado por esa skill, solo si `realpath` queda dentro del proyecto autorizado y es regular. Ruta relativa y contenido UTF-8 filtrado; no se busca el repositorio de desarrollo. |
+| `runtime-definition` / `opencode.agent.get` | `{id, name, mode, description, system}` del agente del hook, leído en ese momento y ligado por `requestObservationID`. No copia settings, permisos ni configuración global. |
+| `context-hook` / `opencode.session.hook.<nombre>` | Proyección de la petición en el punto del registrador: `kind`, `agentID`, `model: {providerID, id}`, `system`, `messages`, `tools`, `finalContext: false`. |
+| `environment` / `opencode.plugin.list` | `{plugins: [{id, source, version, status}], configurationSources: null, transformations: null}`. Fuente `builtin`, `local` o `package`; versión solo si la fuente de paquete la expone. No captura locators, rutas de plugins, opciones ni configuración. |
+
+Los archivos no se leen fuera del proyecto, incluidos symlinks resueltos hacia
+fuera (`definition-file-outside-project-not-read`); archivos no regulares o
+ausentes producen omisiones y contenido `null`. Una lectura estática posterior
+no acredita el texto cargado anteriormente ni el contexto del modelo
+(`file-read-is-not-runtime-context`). La captura conserva por separado versiones
+estáticas y transformadas aunque apunten a la misma ruta.
+
+Las APIs de agentes no exponen sus archivos fuente; el registrador no los adivina.
+La lista de plugins no atribuye cada transformación a su autor, orden de registro,
+versión local o archivo de configuración. Esos datos quedan desconocidos y con
+omisiones explícitas, no se deducen de la posición del array ni del nombre del
+plugin. Las lecturas públicas de 2.1.2 tienen envoltura `{location, data}`;
+el registrador consume `data`, no interpreta la envoltura como definición/array.
+
+### Peticiones y punto de contexto
+
+En 2.1.2 se observan por separado los hooks `context` (bucle principal, incluidas
+continuaciones de herramientas; `kind: primary`), `compaction` (resumen),
+`generate` (generación transitoria de sesión) y `title` (título, sin agente ni
+herramientas). La cobertura de `recorder.ready` enumera esos puntos. Un hook puede
+ejecutarse aunque otro posterior aporte un resultado y no despache modelo.
+
+`system` conserva cada texto y, cuando se expone, su lista experimental
+`metadata.experimental.instructions` de `{key, text}`. Ausencia y formas
+desconocidas se señalan con `instruction-source-list-not-exposed` o
+`unrecognized-instruction-source`. Esa lista es metadata copiada por OpenCode:
+puede no coincidir con un texto editado después. `messages` conserva solo ID,
+rol y partes textuales, no razonamiento, tool-call/tool-result, media, metadata
+arbitraria ni checkpoints cifrados. `tools` conserva descripción y esquema de
+entrada vistos en el hook, no ejecutores. Todo pasa por el mismo filtrado.
+
+Se excluyen opciones de petición, cabeceras, hooks HTTP/protocolo posteriores,
+frames WebSocket, generaciones sin sesión y trabajo anterior al arranque. No se
+lee razonamiento privado. El servidor puede añadir instrucciones de compactación
+después del hook. Otros plugins y transformaciones del protocolo pueden modificar
+los datos después: `finalContext: false` y las omisiones se mantienen siempre.
+No se afirma que esta proyección sea el contexto final ni que se haya enviado.
+
+La prueba aislada contrasta una skill desplegada y su transformación pública,
+admisión sin ejecución, activaciones repetidas, versiones de contenido en una
+ruta mutable, los cuatro hooks y un hook posterior cuyo texto **sí** recibe el
+proveedor sintético pero **no** estaba en la observación anterior. Solo conserva
+evidencia sintética en temporales y no autoriza desplegar en Flujo en Proyecto.
+
 ## Alcance y cobertura real
 
 La instancia del plugin solo escribe si su ubicación coincide con el directorio
@@ -340,7 +464,8 @@ falla visiblemente en vez de atribuirle contenido por inferencia.
 El stream es **en vivo**: no se recupera lo anterior al arranque y puede faltar
 `session.created` cuando la carga del plugin se difiere hasta el primer prompt.
 No se capturan eventos globales, texto de deltas, razonamiento, contenido no admitido de herramientas,
-adjuntos, instrucciones, definiciones, skills ni entregables en este corte.
+adjuntos ni entregables. Instrucciones, definiciones y skills solo tienen la
+cobertura explícita de #6, no una copia universal del entorno ni contexto final.
 Si una respuesta se interrumpe antes del bloque final, no se recupera su texto
 parcial. Las pruebas sintéticas ejercitan subejecuciones anidadas, llamadas
 repetidas al mismo agente y ramas concurrentes, incluida su interrupción y el
