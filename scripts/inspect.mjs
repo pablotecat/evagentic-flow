@@ -136,6 +136,9 @@ function validProjection({ stage, source, value }) {
 
 // These are observation intervals, not invented causal execution IDs or billable totals.
 const elapsed = (start, end) => start !== null && end !== null && end >= start ? end - start : null;
+const sourceBefore = (a, b) => a.projectID && a.projectID === b.projectID && a.sessionID && a.sessionID === b.sessionID
+  && a.sourceAggregateID && a.sourceAggregateID === b.sourceAggregateID
+  && a.sourceSequence !== null && b.sourceSequence !== null && a.sourceSequence < b.sourceSequence;
 function printMetrics(rows, allRows) {
   const ref = row => ({ captureID: row.captureID, arrival: row.arrival, eventID: row.eventID ?? null, type: row.type });
   const base = (row, type) => ({ diagnosticVersion: 1, type, projectID: row.projectID, sessionID: row.sessionID,
@@ -182,6 +185,7 @@ function printMetrics(rows, allRows) {
           elapsedMs: null, providerBodyMs: null, outcome: 'not-observed', finish: null, error: null,
           durationSource: 'opencode.event.session.step.started.started-to-terminal.sourceTime',
           skillConsumption: null, dispatches: [], retries: [], results: [], evidence: [],
+          startRows: [], streamRows: [], endRows: [],
           omissions: complete ? [] : ['incomplete-step-identity'] };
         steps.set(key, step);
       }
@@ -192,14 +196,16 @@ function printMetrics(rows, allRows) {
       if (value) {
         if (value.phase === 'started') {
           const model = metric(value.model, `opencode.event.${row.type}.model`, 'model-step');
-          if (!step.dispatches.length) { step.startedAt = value.startedAt; step.model = model; }
+          if (!step.dispatches.length) step.model = model;
           else if (JSON.stringify(step.model.value) !== JSON.stringify(model.value)) {
             step.model = metric(null, null, 'model-step'); step.omissions.push('multiple-dispatch-models');
           }
           step.dispatches.push({ startedAt: value.startedAt, model, tokens: null, costUSD: null, evidence: ref(row) });
+          step.startRows.push(row);
         }
-        if (value.phase === 'streamed') step.streamedAt = row.sourceTime;
+        if (value.phase === 'streamed') step.streamRows.push(row);
         if (['ended', 'failed'].includes(value.phase)) {
+          step.endRows.push(row);
           step.results.push({ phase: value.phase, finish: value.finish, error: value.error, ...usage(row), evidence: ref(row) });
           if (step.results.length === 1) {
             Object.assign(step, usage(row), { endedAt: row.sourceTime, outcome: value.phase,
@@ -244,9 +250,23 @@ function printMetrics(rows, allRows) {
       else { wait.endedAt = row.sourceTime; wait.outcome = interaction.phase; }
     }
   }
-  for (const step of steps.values()) {
-    step.elapsedMs = elapsed(step.startedAt, step.endedAt);
-    step.providerBodyMs = step.dispatches.length === 1 ? elapsed(step.startedAt, step.streamedAt) : null;
+  for (const { startRows, streamRows, endRows, ...step } of steps.values()) {
+    // Compare only this public step identity, never filenames or local observation times.
+    let first = startRows.reduce((first, row) => sourceBefore(row, first) ? row : first, startRows[0]);
+    if (first && !startRows.every(row => row === first || (sourceBefore(first, row)
+      && first.measurement.startedAt <= row.measurement.startedAt))) first = undefined;
+    step.startedAt = first?.measurement.startedAt ?? null;
+    if (startRows.length && !first) step.omissions.push('dispatch-order-not-established');
+    const end = endRows.length === 1 ? endRows[0] : null;
+    const stream = streamRows.length === 1 ? streamRows[0] : null;
+    step.streamedAt = stream?.sourceTime ?? null;
+    step.elapsedMs = first && end && startRows.every(row => sourceBefore(row, end)
+      && row.measurement.startedAt <= end.sourceTime) ? elapsed(step.startedAt, step.endedAt) : null;
+    step.providerBodyMs = startRows.length === 1 && stream && sourceBefore(first, stream)
+      ? elapsed(step.startedAt, step.streamedAt) : null;
+    if (first && end && step.elapsedMs === null) step.omissions.push('step-duration-order-not-established');
+    if (startRows.length === 1 && stream && step.providerBodyMs === null) step.omissions.push('provider-body-order-not-established');
+    if (streamRows.length > 1) step.omissions.push('multiple-step-streams-not-collapsed');
     if (step.dispatches.length > 1) step.omissions.push('multiple-dispatches-body-duration-not-attributable');
     step.state = step.finish === 'content-filter' ? 'blocked' : step.outcome;
     step.omissions = [...new Set(step.omissions)]; emit(step);
@@ -278,12 +298,20 @@ function printMetrics(rows, allRows) {
   const inbox = new Map();
   for (const row of rows) {
     if (row.sourceVersion !== 1 || !row.projectID || !row.sessionID || !row.messageID) continue;
+    if (!['session.inbox.enqueued', 'session.inbox.delivered', 'session.inbox.cancelled'].includes(row.type)) continue;
     const key = JSON.stringify([row.projectID, row.sessionID, row.messageID]);
-    if (row.type === 'session.inbox.enqueued') inbox.set(key, row);
-    if (['session.inbox.delivered', 'session.inbox.cancelled'].includes(row.type)) inbox.delete(key);
+    if (!inbox.has(key)) inbox.set(key, { admissions: [], resolutions: [] });
+    const item = inbox.get(key);
+    (row.type === 'session.inbox.enqueued' ? item.admissions : item.resolutions).push(row);
   }
-  for (const row of inbox.values()) emit({ ...base(row, 'diagnostic.pending-inbox'), state: 'delivery-not-observed',
-    evidence: [ref(row)], omissions: ['execution-and-completion-not-implied', 'pending-at-read-horizon-not-causal-terminal-snapshot'] });
+  for (const { admissions, resolutions } of inbox.values()) {
+    if (admissions.every(row => resolutions.some(end => sourceBefore(row, end)))) continue;
+    emit({ ...base(admissions[0], 'diagnostic.pending-inbox'),
+      state: resolutions.length ? 'unknown' : 'delivery-not-observed',
+      evidence: [...admissions, ...resolutions].map(ref),
+      omissions: ['execution-and-completion-not-implied', 'pending-at-read-horizon-not-causal-terminal-snapshot',
+        ...resolutions.length ? ['inbox-resolution-order-not-established'] : []] });
+  }
 }
 
 function validRecord(row) {

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { copyFile, mkdtemp } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eventually, fixture, records } from './support/instance.mjs';
 
@@ -153,6 +155,44 @@ test('espera externa, inbox pendiente y bloqueo observado no equivalen a conclus
     assert.equal(report.find(row => row.type === 'diagnostic.wait').outcome, 'replied');
     assert.ok(report.find(row => row.type === 'diagnostic.wait').elapsedMs >= 0);
     assert.equal(report.find(row => row.type === 'diagnostic.model-step' && row.finish === 'content-filter').state, 'blocked');
+  });
+
+test('una recarga pública no vuelve pendiente un encargo entregado aunque se lean primero los diarios posteriores',
+  { timeout: 90000 }, async t => {
+    const instance = await fixture(t, { simulation: true });
+    const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+    const admitted = (await instance.api(`/api/session/${session.id}/prompt`,
+      { text: 'Synthetic admitted before reload', resume: false })).data;
+    await eventually(async () => (await records(instance.captureDirectory))
+      .some(row => row.type === 'session.inbox.enqueued' && row.messageID === admitted.id), 'admission was not persisted');
+    assert.equal(inspect(instance, session.id).find(row => row.type === 'diagnostic.pending-inbox').messageID, admitted.id);
+    await instance.api('/api/location/reload', {});
+    await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_USAGE_A' });
+    await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+    const evidence = await eventually(async () => {
+      const all = await records(instance.captureDirectory);
+      return all.some(row => row.type === 'session.execution.succeeded') && all;
+    }, 'post-reload run was not persisted');
+    const admission = evidence.find(row => row.type === 'session.inbox.enqueued' && row.messageID === admitted.id);
+    const delivery = evidence.find(row => row.type === 'session.inbox.delivered' && row.messageID === admitted.id);
+    assert.ok(delivery);
+    assert.notEqual(admission.captureID, delivery.captureID);
+    assert.ok(admission.sourceAggregateID);
+    assert.equal(admission.sourceAggregateID, delivery.sourceAggregateID);
+    assert.ok(Number.isSafeInteger(admission.sourceSequence) && Number.isSafeInteger(delivery.sourceSequence));
+    assert.ok(admission.sourceSequence < delivery.sourceSequence);
+    // Close the journals through the public lifecycle before copying their unchanged bytes.
+    await instance.api('/api/location/reload', {});
+    const reversed = await mkdtemp(join(instance.root, 'reversed-journals-'));
+    for (const [row, name] of [[delivery, '00000000-0000-4000-8000-000000000001'],
+      [admission, 'ffffffff-ffff-4fff-8fff-ffffffffffff']]) {
+      await copyFile(join(instance.captureDirectory, `${row.captureID}.jsonl`), join(reversed, `${name}.jsonl`));
+    }
+    const report = inspect({ captureDirectory: reversed }, session.id);
+    assert.ok(!report.some(row => row.type === 'diagnostic.pending-inbox'));
+    assert.ok(report.every(row => row.horizons.length === 2));
+    assert.equal(report.find(row => row.type === 'diagnostic.model-step').tokens.value.input, 11);
+    assert.equal(report.find(row => row.type === 'diagnostic.execution-interval').outcome, 'succeeded');
   });
 
 test('el uso auxiliar y los snapshots no se atribuyen al último mensaje ni se suman como consumo nuevo',

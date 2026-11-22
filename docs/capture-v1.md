@@ -560,7 +560,8 @@ la sesión seleccionada. Emite JSONL de diagnóstico sin alterar la captura:
 
 - `diagnostic.model-step`: modelo, métricas, tiempos, desenlaces y reintentos por
   identidad pública; `dispatches` conserva cada inicio observado y su modelo sin
-  atribuirle consumo/coste por proximidad. `results` conserva todos los resultados. Resultados múltiples
+  atribuirle consumo/coste por proximidad. El orden de esos arrays es de lectura,
+  no cronología entre diarios. `results` conserva todos los resultados. Resultados múltiples
   no se colapsan en éxito ni se suman: el resumen queda `ambiguous`.
 - `diagnostic.measurement`: observaciones individuales de compactación o snapshots
   de sesión, nunca filas de consumo aditivo.
@@ -572,7 +573,13 @@ la sesión seleccionada. Emite JSONL de diagnóstico sin alterar la captura:
 - `diagnostic.wait`: intervalo de solicitud/réplica por ID público; abierto queda
   `waiting-external-decision`, con duración total y desenlace desconocidos.
 - `diagnostic.pending-inbox`: admisión sin entrega/cancelación observada, no una
-  ejecución completada. `diagnostic.tool-attempt` reutiliza íntegramente #5.
+  ejecución completada. Agrupa proyecto + sesión + mensaje y resuelve la admisión
+  solo con una entrega/cancelación de secuencia posterior en el mismo agregado,
+  incluso si está en otro diario leído antes. Sin resolución conserva
+  `delivery-not-observed`; con resolución cuyo orden no se acredita conserva
+  `state: unknown`, ambas evidencias e `inbox-resolution-order-not-established`.
+  No usa tiempos de reloj para inventar ese orden. `diagnostic.tool-attempt`
+  reutiliza íntegramente #5.
 - `diagnostic.metric-coverage`: límites y referencias de diagnósticos globales.
 
 Cada métrica de modelo, tokens o coste indica `value`, `status`, `source` y
@@ -583,9 +590,20 @@ leídos, además de omisiones. No son evaluaciones, rúbricas ni puntuaciones.
 
 `elapsedMs` resta tiempos observados solo con ambos extremos no invertidos;
 `durationSource` declara su procedencia. En un paso va del primer despacho
-observado al terminal, incluidas esperas de reintento. `providerBodyMs` termina en
+observado al terminal, incluidas esperas de reintento. Los despachos de una misma
+identidad se comparan por secuencia pública dentro de su agregado, también entre
+diarios. Sin un primero comparable o con tiempos contradictorios con ese inicio,
+`startedAt` y duración quedan en `null` con `dispatch-order-not-established`.
+Para medir hasta el terminal se exige además que todos los despachos lo precedan
+en ese agregado y que sus tiempos fuente no sean posteriores al fin; si no,
+la duración es `null` con `step-duration-order-not-established`.
+No se comparan UUID, `arrival` ni `observedAt` entre activaciones.
+`providerBodyMs` termina en
 `streamed`, antes del asentamiento de herramientas; con varios despachos queda
-`null` porque no se expone el enlace causal a un despacho concreto.
+`null` porque no se expone el enlace causal a un despacho concreto. Con uno exige
+secuencia comparable y tiempos no invertidos; en otro caso declara
+`provider-body-order-not-established`. Varios límites `streamed` no se colapsan
+por orden de archivo (`multiple-step-streams-not-collapsed`).
 En herramientas va de `called` al terminal; en ejecución y espera usa sus
 eventos públicos. Son **intervalos transcurridos**, no tiempo de CPU, trabajo
 exclusivo ni intervalos a sumar: pueden solaparse e incluir esperas.

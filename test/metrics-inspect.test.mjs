@@ -13,11 +13,14 @@ const event = (type, extra = {}) => ({ ...common, type, source: 'opencode.event'
   sourceSequence: 1, sourceVersion: 1, sourceAggregateID: 'session_root', projectID: 'project_synthetic',
   sessionID: 'session_root', executionID: null, messageID: 'msg_synthetic', ordinal: null, content: null,
   status: 'captured', omissions: [], redactions: [], measurement: null, lifecycle: null, ...extra });
-async function capture(rows) {
+async function capture(...journals) {
   const directory = await mkdtemp(join(process.env.OPENCODE_TEST_TMP ??
     (process.platform === 'win32' ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : '/tmp'), 'recorder-metric-contract-'));
-  await writeFile(join(directory, 'synthetic.jsonl'), rows.map((row, index) =>
-    JSON.stringify({ ...row, arrival: index + 1 })).join('\n') + '\n');
+  for (const [index, rows] of journals.entries()) {
+    const captureID = `00000000-0000-4000-8000-${(index + 7).toString(16).padStart(12, '0')}`;
+    await writeFile(join(directory, `${captureID}.jsonl`), rows.map((row, index) =>
+      JSON.stringify({ ...row, captureID, arrival: index + 1 })).join('\n') + '\n');
+  }
   return directory;
 }
 const inspect = (directory, ...args) => execFileSync(process.execPath,
@@ -88,4 +91,128 @@ test('los despachos repetidos conservan el intervalo completo sin inventar durac
   assert.deepEqual(step.dispatches.map(row => row.startedAt), [100, 140]);
   assert.ok(step.dispatches.every(row => row.tokens === null && row.costUSD === null));
   assert.equal(step.tokens.value.input, 11);
+});
+
+test('el primer despacho usa evidencia del mismo agregado aunque los diarios se lean al revés', async () => {
+  const start = startedAt => ({ ...measurement, phase: 'started', startedAt,
+    model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null });
+  const directory = await capture([
+    event('session.step.started', { measurement: start(140), sourceTime: 140, sourceSequence: 3 }),
+    event('session.step.ended', { measurement, sourceTime: 160, sourceSequence: 4 }),
+  ], [
+    event('session.step.started', { measurement: start(100), sourceTime: 110 }),
+    event('session.retry.scheduled', { status: 'captured', sourceTime: 120, sourceSequence: 2,
+      retry: { kind: 'model', attempt: 2, at: 140, error: { type: 'Error', message: 'Synthetic retry' } } }),
+  ]);
+  const step = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse)
+    .find(row => row.type === 'diagnostic.model-step');
+  assert.equal(step.startedAt, 100);
+  assert.equal(step.elapsedMs, 60);
+  assert.equal(step.providerBodyMs, null);
+  assert.equal(step.retries[0].scheduledDelayMs, 20);
+  assert.equal(step.retries[0].tokens, null);
+  assert.equal(step.tokens.value.input, 11);
+  assert.equal(step.dispatches.length, 2);
+  assert.equal(step.evidence.length, 4);
+  assert.deepEqual(step.horizons.map(row => row.arrival), [2, 2]);
+});
+
+test('un reloj aparentemente ordenado no basta para precisar duración sin evidencia pública comparable', async () => {
+  const start = { ...measurement, phase: 'started', startedAt: 100,
+    model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null };
+  const stream = { ...measurement, phase: 'streamed', tokens: null, costUSD: null, finish: null };
+  for (const extra of [{ sourceAggregateID: null }, { sourceAggregateID: 'synthetic_other_aggregate' },
+    { sourceSequence: null }, { sourceSequence: 1 }]) {
+    const directory = await capture([
+      event('session.step.streamed', { measurement: stream, sourceTime: 150, sourceSequence: 3, ...extra }),
+      event('session.step.ended', { measurement, sourceTime: 160, sourceSequence: 4, ...extra }),
+    ], [event('session.step.started', { measurement: start, sourceTime: 110 })]);
+    const step = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse)
+      .find(row => row.type === 'diagnostic.model-step');
+    assert.equal(step.startedAt, 100);
+    assert.equal(step.elapsedMs, null);
+    assert.equal(step.providerBodyMs, null);
+    assert.equal(step.outcome, 'ended');
+    assert.equal(step.tokens.value.input, 11);
+    assert.ok(step.omissions.includes('step-duration-order-not-established'));
+    assert.ok(step.omissions.includes('provider-body-order-not-established'));
+  }
+});
+
+test('despachos incomparables o con tiempos contradictorios conservan evidencia sin inventar el inicio', async () => {
+  const start = startedAt => ({ ...measurement, phase: 'started', startedAt,
+    model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null });
+  for (const extra of [{ sourceAggregateID: null }, { sourceAggregateID: 'synthetic_other_aggregate' },
+    { sourceSequence: null }, { sourceSequence: 1 }, { measurement: start(90) }]) {
+    const directory = await capture([
+      event('session.step.started', { measurement: start(140), sourceTime: 140, sourceSequence: 2, ...extra }),
+      event('session.step.ended', { measurement, sourceTime: 160, sourceSequence: 4 }),
+    ], [event('session.step.started', { measurement: start(100), sourceTime: 110 })]);
+    const step = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse)
+      .find(row => row.type === 'diagnostic.model-step');
+    assert.equal(step.startedAt, null);
+    assert.equal(step.elapsedMs, null);
+    assert.equal(step.providerBodyMs, null);
+    assert.ok(step.omissions.includes('dispatch-order-not-established'));
+    assert.equal(step.dispatches.length, 2);
+    assert.equal(step.model.value.providerID, 'synthetic');
+    assert.equal(step.tokens.value.input, 11);
+  }
+});
+
+test('límites fuente invertidos o múltiples no fabrican una duración precisa', async () => {
+  for (const [starts, streams, end, duration, omission] of [
+    [[100, 180], [150], 160, null, 'step-duration-order-not-established'],
+    [[100], [150, 155], 160, 60, 'multiple-step-streams-not-collapsed'],
+    [[100], [90], 95, null, 'provider-body-order-not-established'],
+  ]) {
+    const rows = [
+      ...starts.map(startedAt => event('session.step.started', { measurement: { ...measurement, phase: 'started',
+        startedAt, model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null } })),
+      ...streams.map(sourceTime => event('session.step.streamed', { sourceTime,
+        measurement: { ...measurement, phase: 'streamed', tokens: null, costUSD: null, finish: null } })),
+      event('session.step.ended', { measurement, sourceTime: end }),
+    ].map((row, index) => ({ ...row, sourceSequence: index + 1 }));
+    const directory = await capture(rows);
+    const step = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse)
+      .find(row => row.type === 'diagnostic.model-step');
+    assert.equal(step.startedAt, 100);
+    assert.equal(step.elapsedMs, duration);
+    assert.equal(step.providerBodyMs, null);
+    assert.ok(step.omissions.includes(omission));
+    assert.equal(step.tokens.value.input, 11);
+  }
+});
+
+test('entrega y cancelación resuelven solo su identidad por secuencia aunque sus diarios se lean antes', async () => {
+  const admission = messageID => event('session.inbox.enqueued', { messageID,
+    content: { role: 'user', text: 'Synthetic pending work' } });
+  const terminal = (type, messageID, extra = {}) => event(type, { messageID, status: 'omitted',
+    sourceTime: 90, sourceSequence: 5, ...extra });
+  const directory = await capture([
+    terminal('session.inbox.delivered', 'msg_delivered'),
+    terminal('session.inbox.cancelled', 'msg_cancelled', { sourceSequence: 6 }),
+    terminal('session.inbox.delivered', 'msg_pending', { projectID: 'project_other' }),
+  ], [admission('msg_delivered'), admission('msg_cancelled'), admission('msg_pending')]);
+  const report = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse);
+  const pending = report.filter(row => row.type === 'diagnostic.pending-inbox');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].messageID, 'msg_pending');
+  assert.equal(pending[0].state, 'delivery-not-observed');
+  assert.deepEqual(pending[0].horizons.map(row => row.arrival), [3, 3]);
+});
+
+test('una resolución de inbox sin orden acreditado queda desconocida, no se oculta ni se declara ausente', async () => {
+  for (const extra of [{ sourceAggregateID: null }, { sourceAggregateID: 'synthetic_other_aggregate' },
+    { sourceSequence: null }, { sourceSequence: 1 }, { sourceSequence: 0 }]) {
+    const directory = await capture([
+      event('session.inbox.delivered', { status: 'omitted', sourceTime: 160, sourceSequence: 5, ...extra }),
+    ], [event('session.inbox.enqueued', { content: { role: 'user', text: 'Synthetic pending work' } })]);
+    const pending = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse)
+      .find(row => row.type === 'diagnostic.pending-inbox');
+    assert.equal(pending.state, 'unknown');
+    assert.ok(pending.omissions.includes('inbox-resolution-order-not-established'));
+    assert.deepEqual(pending.evidence.map(row => row.type), ['session.inbox.enqueued', 'session.inbox.delivered']);
+    assert.equal(pending.horizons.length, 2);
+  }
 });
