@@ -35,6 +35,18 @@ type CapturedEvent = {
     response: Json;
   } | null;
   retry: { kind: 'model'; attempt: number; at: number; error: NonNullable<ToolEvidence['error']> } | null;
+  measurement: {
+    kind: 'model-step' | 'compaction' | 'session-total';
+    phase: 'started' | 'streamed' | 'ended' | 'failed' | 'updated';
+    model: { providerID: string; id: string } | null;
+    startedAt: number | null;
+    tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } } | null;
+    costUSD: number | null;
+    finish: 'stop' | 'length' | 'tool-calls' | 'content-filter' | 'error' | 'unknown' | null;
+    error: ToolEvidence['error'];
+  } | null;
+  lifecycle: { phase: 'started' | 'succeeded' | 'failed' | 'interrupted'; reason: string | null;
+    error: ToolEvidence['error']; pendingWork: null } | null;
   skill: { id: string | null; name: string | null; text: string; sha256: string; origin: string;
     contextID: null; consumption: null } | null;
   status: 'captured' | 'omitted' | 'unrecognized';
@@ -349,10 +361,12 @@ export default Plugin.define({
                 .find((value): value is string => typeof value === 'string') ?? null,
               ordinal: typeof data.ordinal === 'number' && Number.isSafeInteger(data.ordinal) && data.ordinal >= 0
                 ? data.ordinal : null,
-              content: null, tool: null, interaction: null, retry: null, skill: null, status: 'omitted',
+              content: null, tool: null, interaction: null, retry: null, measurement: null, lifecycle: null,
+              skill: null, status: 'omitted',
               omissions: ['event-payload-not-captured'], redactions: [],
             };
             captureTool(record, data, config.secrets);
+            captureMetrics(record, data, config.secrets);
             if (record.toolName === 'skill' && record.type === 'session.tool.called' && record.tool) {
               const id = object(record.tool.input).id;
               if (typeof id === 'string') skillLoads.set(callKey, id);
@@ -572,10 +586,12 @@ export default Plugin.define({
           coverage: { replay: false, content: ['admitted-user-text', 'completed-assistant-text', 'tool-input', 'tool-text-result',
             'session-permission-interactions', 'session-form-interactions', 'skill-load-results', 'admitted-skills',
             'selected-runtime-definitions', 'selected-project-skill-files', 'context-hook-text-and-tool-definitions',
+            'model-step-runtime-usage', 'compaction-runtime-usage', 'session-total-runtime-usage', 'execution-outcomes',
             'session-hook.context.primary', 'session-hook.compaction', 'session-hook.generate', 'session-hook.title'],
             excluded: ['attachments', 'tool-internal-http', 'reasoning', 'headers', 'global-config', 'final-wire-context',
               'non-session-generation', 'websocket-frames', 'skill-lifecycle-compliance-and-cost',
-              'post-hook-http-and-protocol-transforms', 'request-options', 'non-text-context-parts'],
+              'post-hook-http-and-protocol-transforms', 'request-options', 'non-text-context-parts',
+              'provider-usage-provenance', 'billed-cost', 'title-and-transient-generation-usage-attribution', 'pending-work-description'],
             executionID: 'not-exposed', ordering: 'arrival-is-not-causality' } });
         // Subscription failure can race the durable write: check again before publishing readiness.
         if (failed) throw new Error('Subscription failed during preparation.');
@@ -629,6 +645,91 @@ async function packageVersion(path: URL, name: string) {
 function safeIdentifier(value: string, secrets: string[], toolName = false) {
   return (toolName ? /^[A-Za-z0-9_.:-]{1,256}$/ : /^[A-Za-z0-9_-]{1,256}$/).test(value)
     && !secrets.some(secret => value.includes(secret));
+}
+
+function captureMetrics(record: CapturedEvent, data: Record<string, unknown>, secrets: string[]) {
+  const execution = /^session\.execution\.(started|succeeded|failed|interrupted)$/.exec(record.type);
+  const step = /^session\.step\.(started|streamed|ended|failed)$/.exec(record.type);
+  const compaction = /^session\.compaction\.(ended|failed)$/.exec(record.type);
+  const total = record.type === 'session.usage.updated';
+  if (!execution && !step && !compaction && !total) return;
+  const text = (value: string) => {
+    const result = redact(value, secrets); record.redactions.push(...result.reasons); return result.text;
+  };
+  const error = (value: unknown): NonNullable<ToolEvidence['error']> => {
+    const item = object(value);
+    if (typeof item.type !== 'string' || typeof item.message !== 'string') throw new Error('Unknown error');
+    return { type: text(item.type), message: text(item.message),
+      ...(Number.isInteger(item.status) && Number(item.status) >= 100 && Number(item.status) <= 599
+        ? { status: Number(item.status) } : {}) };
+  };
+  const number = (value: unknown): number => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new Error('Unknown measurement');
+    return value;
+  };
+  try {
+    if (record.sourceVersion !== (total ? null : 1)) throw new Error('Unknown version');
+    if (execution) {
+      const phase = execution[1] as NonNullable<CapturedEvent['lifecycle']>['phase'];
+      if (phase === 'interrupted' && !['user', 'shutdown', 'superseded', 'inactivity'].includes(String(data.reason))) {
+        throw new Error('Unknown interruption');
+      }
+      record.lifecycle = { phase, reason: phase === 'interrupted' ? String(data.reason) : null,
+        error: phase === 'failed' ? error(data.error) : null, pendingWork: null };
+      record.omissions = ['pending-work-description-not-exposed', 'execution-causal-id-not-exposed'];
+    } else {
+      const phase = (step?.[1] ?? compaction?.[1] ?? 'updated') as NonNullable<CapturedEvent['measurement']>['phase'];
+      const terminal = ['ended', 'failed', 'updated'].includes(phase);
+      const model = object(data.model);
+      const tokens = object(data.tokens);
+      const cache = object(tokens.cache);
+      const finish = data.finish;
+      if (finish !== undefined && !['stop', 'length', 'tool-calls', 'content-filter', 'error', 'unknown'].includes(String(finish))) {
+        throw new Error('Unknown finish');
+      }
+      if (step && phase === 'started' && (typeof model.providerID !== 'string' || typeof model.id !== 'string')) {
+        throw new Error('Unknown dispatched model');
+      }
+      if (terminal && phase !== 'failed' && !compaction && (data.tokens === undefined || data.cost === undefined)) {
+        throw new Error('Missing required usage');
+      }
+      if (step && phase === 'ended' && finish === undefined) throw new Error('Missing finish');
+      if (data.model !== undefined && (typeof model.providerID !== 'string' || typeof model.id !== 'string')) {
+        throw new Error('Unknown model');
+      }
+      record.measurement = { kind: step ? 'model-step' : compaction ? 'compaction' : 'session-total', phase,
+        model: typeof model.providerID === 'string' && typeof model.id === 'string'
+          ? { providerID: text(model.providerID), id: text(model.id) } : null,
+        startedAt: step && phase === 'started' ? number(data.started) : null,
+        tokens: data.tokens === undefined ? null : { input: number(tokens.input), output: number(tokens.output),
+          reasoning: number(tokens.reasoning), cache: { read: number(cache.read), write: number(cache.write) } },
+        costUSD: data.cost === undefined ? null : number(data.cost),
+        finish: finish === undefined ? null : finish as NonNullable<CapturedEvent['measurement']>['finish'],
+        error: phase === 'failed' ? error(data.error) : null };
+      record.omissions = ['provider-usage-provenance-not-exposed', 'cost-is-runtime-estimate-not-invoice',
+        'model-step-execution-link-not-exposed', 'provider-internal-attempts-not-exposed', 'skill-consumption-not-exposed',
+        ...(total ? ['session-total-is-snapshot-not-additive', 'auxiliary-usage-attribution-not-exposed'] : [])];
+    }
+    // A redacted discriminator/key is not a different, valid metric or terminal outcome.
+    for (const key of ['measurement', 'lifecycle'] as const) {
+      const value = record[key];
+      if (value === null) continue;
+      const filtered = sanitizeJson(value, secrets, record.redactions, 0, true);
+      const discriminators = (item: unknown) => {
+        const data = object(item); return [data.kind, data.phase, data.finish, data.reason];
+      };
+      if (JSON.stringify(discriminators(value)) !== JSON.stringify(discriminators(filtered))) {
+        throw new Error('Redacted metric discriminator');
+      }
+      // Filtering above preserves the validated structure, not the original free text.
+      if (key === 'measurement') record.measurement = filtered as CapturedEvent['measurement'];
+      else record.lifecycle = filtered as CapturedEvent['lifecycle'];
+    }
+    record.status = 'captured';
+  } catch {
+    record.measurement = null; record.lifecycle = null;
+    record.status = 'unrecognized'; record.omissions = [execution ? 'unrecognized-lifecycle-format' : 'unrecognized-measurement-format'];
+  }
 }
 
 function captureTool(record: CapturedEvent, data: Record<string, unknown>, secrets: string[]) {

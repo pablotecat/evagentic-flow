@@ -48,6 +48,12 @@ http.createServer(async (req, res) => {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   const send = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ ...base,
     object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+  const usage = () => {
+    if (!input.includes('SYNTHETIC_USAGE_')) return;
+    const [prompt_tokens, completion_tokens] = input.includes('SYNTHETIC_USAGE_B') ? [31, 13] : [11, 7];
+    res.write(`data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [],
+      usage: { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens } })}\n\n`);
+  };
   const delegate = body.tools?.find(tool => tool.function?.name === 'subagent');
   const unknownInput = input.includes('SYNTHETIC_ACTION_UNKNOWN');
   const action = body.tools?.find(tool => tool.function?.name === 'synthetic_actions_inspect');
@@ -118,6 +124,7 @@ http.createServer(async (req, res) => {
   });
   if (res.destroyed) return;
   send({ content: 'secret-42.' + (cookieText ? '\n' + cookieText : '') });
-  send({}, 'stop');
+  send({}, input.includes('SYNTHETIC_BLOCKED') ? 'content_filter' : 'stop');
+  usage();
   res.end('data: [DONE]\n\n');
 }).listen(process.env.PORT);

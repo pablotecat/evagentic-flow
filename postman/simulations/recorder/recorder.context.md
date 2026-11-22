@@ -51,10 +51,24 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
   `metadata.kind: question` y `metadata.tool.id/messageID`; sus respuestas no
   exponen actor autenticado. Las aprobaciones produjeron `permission.*` con
   `source` de herramienta. (Observado 2026-11-22 mediante APIs públicas aisladas.)
+- Los casos `SYNTHETIC_USAGE_A/B` añaden cifras distintas por SSE. Sin ese uso,
+  OpenCode informó ceros normalizados; no acreditan consumo cero del proveedor.
+  La generación transitoria devolvió texto sin `tokens` en este binario 2.1.2.
+  (Observado 2026-11-22 en las pruebas focales de #7.)
+- Un reintento puede emitir varios `session.step.started` con el mismo mensaje;
+  sobrescribir su inicio ocultaba esperas. La consulta conserva los despachos sin
+  repartirles uso ni atribuirles duración de cuerpo. (Observado 2026-11-22, #7.)
 
 ## Observations
 
 <!-- begin:observations -->
+2026-11-22: suite final de #7 aprobada (55/55), sin retries de pruebas ni fallos
+de bootstrap; #12 sigue como seguimiento, no se declara resuelto. `synthetic-model`,
+único miembro, sirvió 200 y fallos controlados 400/429; ninguno quedó sin tráfico
+en el conjunto. Se comprobaron consumos concurrentes distintos, coste sintético,
+despachos repetidos, espera externa, filtro de contenido, interrupción y ausencias
+mediante paquete instalado, APIs públicas y lector independiente. No se verificó
+compactación satisfactoria ni procedencia del consumo real de un proveedor.
 2026-11-22: suite de #6 aprobada (31/31) con HOME temporal de Postman reutilizado
 por archivo, sin reintentos automáticos. `synthetic-model`, único miembro, sirvió
 chat 200 y fallos controlados 400/429; ninguno quedó sin tráfico en el conjunto.
@@ -91,6 +105,10 @@ miembro quedó sin tráfico; se comprobaron los eventos `request` del log local.
 
 ## What didn't work
 
+- 2026-11-22: la prueba auxiliar de #7 esperaba una compactación satisfactoria,
+  pero el texto genérico del proveedor produjo `compaction.failed` con
+  `Compaction summary did not match the required template`. El caso ahora verifica
+  ese fallo público y sus cifras de runtime, no afirma compactación satisfactoria.
 - 2026-11-22: dos ejecuciones completas de #6 quedaron en 30/31 por el mismo
   `Permission denied while accessing local dataset files` antes de `listening`,
   en casos distintos. La repetición focal del primer caso pasó. Causa raíz no

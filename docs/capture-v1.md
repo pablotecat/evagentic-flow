@@ -173,7 +173,7 @@ Además del sobre, todas las filas de eventos públicos admitidos incluyen:
 | `messageID` | `assistantMessageID`, `inboxID` o `messageID` observados, o `null`. No se inventa una asociación. |
 | `ordinal` | Entero de bloque de contenido cuando existe, o `null`. |
 | `content` | `null` o `{ "role": "user" \| "assistant", "text": "…" }`, ya filtrado. |
-| `status` | `captured`, `omitted` o `unrecognized`; `captured` puede referirse a `content`, `tool`, `interaction`, `retry` o `skill`. |
+| `status` | `captured`, `omitted` o `unrecognized`; `captured` puede referirse a `content`, `tool`, `interaction`, `retry`, `skill`, `measurement` o `lifecycle`. |
 | `omissions` | Array de códigos de omisión, sin datos originales. |
 | `redactions` | Array de códigos de filtrado, sin los valores eliminados. |
 
@@ -220,7 +220,7 @@ Los eventos `session.execution.*` conservan sus identidades/tiempos como
 metadatos; su ID de evento identifica ese hecho, no se reutiliza como ID causal
 de otros eventos. No se asocian respuestas al último encargo por orden de llegada.
 
-Salvo los formatos de #5 y #6 descritos a continuación, los demás eventos de sesión observables conservan sobre y metadatos permitidos,
+Salvo los formatos de #5, #6 y #7 descritos a continuación, los demás eventos de sesión observables conservan sobre y metadatos permitidos,
 pero **no payload** (`status: omitted`, `event-payload-not-captured`). Los campos
 no textuales del encargo/respuesta quedan excluidos (`non-text-fields-not-captured`).
 Un texto reconocido con forma o versión no admitida queda sin contenido y con
@@ -477,6 +477,122 @@ admisión sin ejecución, activaciones repetidas, versiones de contenido en una
 ruta mutable, los cuatro hooks y un hook posterior cuyo texto **sí** recibe el
 proveedor sintético pero **no** estaba en la observación anterior. Solo conserva
 evidencia sintética en temporales y no autoriza desplegar en Flujo en Proyecto.
+
+## Consumo, duración y finalización (#7)
+
+Las nuevas filas de eventos añaden `measurement` y `lifecycle`, objetos o `null`.
+El lector admite los diarios anteriores sin ellos, sin completar sus métricas ni
+acreditar desenlaces a partir del nombre del evento. Valida forma, discriminadores,
+tipo de evento y versión pública antes de consultar; las omisiones y redacciones
+no permiten eximir una forma inválida. Una clave o discriminador destruido por
+el filtrado omite el objeto completo, como en las observaciones de #6.
+
+### Valores de OpenCode y alcance
+
+`measurement` tiene exactamente `kind`, `phase`, `model`, `startedAt`, `tokens`,
+`costUSD`, `finish` y `error`. Valores ausentes son `null`, nunca ceros añadidos.
+
+| Eventos públicos / versión | Proyección y alcance |
+| --- | --- |
+| `session.step.started` v1 | `kind: model-step`, `phase: started`, `model: {providerID, id}` y `startedAt` de `data.started`: tiempo de despacho, no escritura del diario. Resto `null`. |
+| `session.step.streamed` v1 | `phase: streamed`; conserva en el sobre el límite de fin del cuerpo del proveedor (`sourceTime`), separado del asentamiento de herramientas. Otros valores `null`. |
+| `session.step.ended` v1 | `phase: ended`, `tokens`, `costUSD` de `data.cost` y `finish`: `stop`, `length`, `tool-calls`, `content-filter`, `error` o `unknown`. No convierte el fin del paso en éxito del encargo. |
+| `session.step.failed` v1 | `phase: failed`, error filtrado; consumo/coste opcionales y `finish: content-filter` si existe. Conserva lo disponible aunque termine en fallo. |
+| `session.compaction.ended` / `.failed` v1 | `kind: compaction`, fase, consumo/coste opcionales y modelo si el evento lo expone; error en fallo. Solo alcance de sesión/compactación, sin asociarla al último mensaje, hook o ejecución. |
+| `session.usage.updated` efímero, sin versión durable | `kind: session-total`, `phase: updated`, consumo y coste: **snapshot acumulado del runtime**, no consumo nuevo. Sin modelo, mensaje, llamada ni ejecución atribuidos. |
+
+`tokens` conserva `{input, output, reasoning, cache: {read, write}}` tal como lo
+informa el runtime; `costUSD` conserva su número finito no negativo. No se suman
+categorías ni se recalcula un coste. `error` reutiliza la selección filtrada de
+`type`, `message` y `status` de #5. Se excluyen `native`, `rawFinish`, snapshots,
+archivos, cuerpos de error y metadata arbitraria. Modelo conserva la referencia
+de proveedor/ID, no una atestación del modelo servido ni sus variantes/opciones.
+
+**Observar un número del runtime no acredita una medición del proveedor.**
+OpenCode puede normalizar uso ausente a cero. La captura conserva ese número
+sin interpretarlo como ausencia de consumo; el diagnóstico declara siempre
+`tokens.providerReported: null` y `basis: runtime-normalized-unverified`.
+Las cifras que sí se recibieron por HTTP en la prueba son sintéticas; no hay
+una marca pública que permita distinguir todos los ceros de normalización.
+Sin campo público el valor queda `null`. El coste es una **estimación informada
+por el runtime**, no cobro observado ni factura; no se garantiza la disponibilidad,
+vigencia o procedencia de sus tarifas. Incluso coste cero no demuestra gratuidad.
+
+Los pasos/reintentos conservan proyecto + sesión + mensaje de asistente. El
+runtime no expone enlace causal a ejecución: `executionID` sigue `null`. Una
+llamada de herramienta conserva además su propio `callID`; no hereda los tokens
+del paso que la produjo. Los reintentos conservan número, fecha y error públicos,
+con consumo/coste individuales desconocidos: no se reparten los del desenlace
+entre intentos ni se cuentan intentos HTTP internos no expuestos. Un fallo
+recuperado sigue accesible. `scheduledDelayMs` expresa solo la demora programada
+del evento de reintento a `at`; `actualWaitMs: null` no inventa la espera real.
+Tampoco se reparte consumo entre skills.
+
+La generación de título y la generación transitoria tienen observaciones de
+hook, pero no un evento público de uso individual aquí enlazable; se declara
+`auxiliary-usage-attribution-not-exposed`. Un snapshot puede contener actividad
+auxiliar: no se resta de él el último paso para inventar el consumo de un título,
+ni se añade a pasos o compactaciones. Los hooks no prueban despacho.
+
+### Desenlaces y trabajo pendiente
+
+`lifecycle` se captura de `session.execution.started`, `.succeeded`, `.failed`
+y `.interrupted` v1. Contiene `phase`, `reason`, `error` y `pendingWork`.
+La interrupción conserva el motivo público `user`, `shutdown`, `superseded` o
+`inactivity`; el fallo conserva el error filtrado. En las otras fases el motivo
+es `null`. **`succeeded` solo acredita conclusión normal declarada por OpenCode**,
+no aceptación de objetivos ni de descendientes. No hay un texto público de
+trabajo pendiente: `pendingWork` permanece `null`, no una lista vacía.
+
+El bloqueo se limita a la señal explícita `finish: content-filter` del paso.
+No se deduce bloqueo de cualquier error, ni interrupción de toda herramienta por
+interrumpir una sesión. Las solicitudes externas sin réplica observada y los
+items de inbox sin entrega/cancelación observada se conservan como evidencia
+pendiente al horizonte leído, no como un snapshot causal del instante de fin.
+Una respuesta externa no identifica al actor humano; una espera no prueba que
+las demás ramas hayan dejado de trabajar. Ausencia de fin nunca acredita éxito.
+
+### Consulta independiente
+
+`inspect.mjs <directorio> <sesión> --metrics` selecciona raíz y descendientes con
+las mismas relaciones de `--tree`. No atribuye filas con identidad excluida a
+la sesión seleccionada. Emite JSONL de diagnóstico sin alterar la captura:
+
+- `diagnostic.model-step`: modelo, métricas, tiempos, desenlaces y reintentos por
+  identidad pública; `dispatches` conserva cada inicio observado y su modelo sin
+  atribuirle consumo/coste por proximidad. `results` conserva todos los resultados. Resultados múltiples
+  no se colapsan en éxito ni se suman: el resumen queda `ambiguous`.
+- `diagnostic.measurement`: observaciones individuales de compactación o snapshots
+  de sesión, nunca filas de consumo aditivo.
+- `diagnostic.execution-interval`: pares observados de inicio/fin dentro del mismo
+  diario, proyecto, sesión y agregado, ordenados solo por su secuencia pública.
+  `intervalRef` referencia evidencia, **no** es un ID causal de ejecución. Un nuevo
+  inicio deja abierto el anterior; no se cruza un hueco/fallo declarado de captura.
+  Sin extremo, identidad o secuencia suficientes, la duración es `null`.
+- `diagnostic.wait`: intervalo de solicitud/réplica por ID público; abierto queda
+  `waiting-external-decision`, con duración total y desenlace desconocidos.
+- `diagnostic.pending-inbox`: admisión sin entrega/cancelación observada, no una
+  ejecución completada. `diagnostic.tool-attempt` reutiliza íntegramente #5.
+- `diagnostic.metric-coverage`: límites y referencias de diagnósticos globales.
+
+Cada métrica de modelo, tokens o coste indica `value`, `status`, `source` y
+`scope`. `observed` significa valor público del runtime, `estimated` coste
+informado por ese runtime, y `unknown` falta de valor; no se estiman ausencias.
+Todas las filas conservan referencias `evidence` y los `horizons` de los diarios
+leídos, además de omisiones. No son evaluaciones, rúbricas ni puntuaciones.
+
+`elapsedMs` resta tiempos observados solo con ambos extremos no invertidos;
+`durationSource` declara su procedencia. En un paso va del primer despacho
+observado al terminal, incluidas esperas de reintento. `providerBodyMs` termina en
+`streamed`, antes del asentamiento de herramientas; con varios despachos queda
+`null` porque no se expone el enlace causal a un despacho concreto.
+En herramientas va de `called` al terminal; en ejecución y espera usa sus
+eventos públicos. Son **intervalos transcurridos**, no tiempo de CPU, trabajo
+exclusivo ni intervalos a sumar: pueden solaparse e incluir esperas.
+Los límites causales del flujo no se exponen: `flowElapsedMs: null`; no se suma
+concurrencia ni se resta una espera compartida para inventar duración activa.
+Los relojes pueden variar y no existe un orden causal global entre diarios.
+La suscripción sin replay tampoco demuestra ausencia de pérdidas no señaladas.
 
 ## Alcance y cobertura real
 

@@ -5,8 +5,9 @@ Plugin de servidor **independiente** para OpenCode **V2 2.1.2**, con SDK
 [#2](https://github.com/pablotecat/evagentic-flow/issues/2),
 [#3](https://github.com/pablotecat/evagentic-flow/issues/3),
 [#4](https://github.com/pablotecat/evagentic-flow/issues/4),
-[#5](https://github.com/pablotecat/evagentic-flow/issues/5) y
-[#6](https://github.com/pablotecat/evagentic-flow/issues/6): encargo admitido,
+[#5](https://github.com/pablotecat/evagentic-flow/issues/5),
+[#6](https://github.com/pablotecat/evagentic-flow/issues/6) y
+[#7](https://github.com/pablotecat/evagentic-flow/issues/7): encargo admitido,
 texto final, delegación, herramientas, interacciones externas, skills y definiciones observables del proyecto autorizado,
 con aviso e interrupción del conjunto observado ante fallos del registrador. No modifica
 agentes, permisos de las sesiones observadas, delegación ni otros plugins.
@@ -90,6 +91,7 @@ node scripts/inspect.mjs C:/synthetic/captures
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tree
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tools
+node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --metrics
 ```
 
 También basta un lector de JSON por línea. El lector incluido no importa el
@@ -118,6 +120,19 @@ sus servicios internos. No se agrupan reintentos por nombre, argumentos u orden:
 cuando el runtime no expone el enlace, `retryOf` y `operationID` quedan en `null`.
 Los reintentos de modelo expuestos en `session.retry.scheduled` se conservan aparte;
 los reintentos HTTP internos del proveedor pueden no producir ese evento.
+
+`--metrics` consulta la sesión y sus descendientes conocidos. Distingue pasos de
+modelo, snapshots de consumo de sesión, intervalos de ejecución y esperas externas;
+reutiliza también los intentos de herramientas. Conserva valor, fuente, alcance,
+referencias y horizonte, sin sumar ramas concurrentes ni snapshots y pasos.
+El consumo observado es el **valor normalizado que informa OpenCode**, no prueba
+del consumo original del proveedor: su procedencia queda desconocida, incluso si
+el runtime informa cero. El coste se etiqueta como estimación, nunca factura.
+Sin métrica/desenlace observado queda `null`/`unknown`, no cero ni éxito.
+Los intervalos muestran conclusión, fallo e interrupción; un filtro de contenido
+acredita bloqueo del paso y una solicitud abierta acredita espera externa, no que
+todo el flujo se haya detenido. El trabajo textual pendiente y los límites causales
+del flujo no se exponen: no se inventan. No hay rúbricas ni puntuaciones.
 
 Las preguntas nativas usan formularios y las aprobaciones usan `permission.*`.
 Se conservan solicitudes y respuestas, con enlaces públicos cuando existen, pero

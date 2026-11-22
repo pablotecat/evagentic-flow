@@ -211,7 +211,8 @@ export async function fixture(t, options = {}) {
     serverConfig.model = 'synthetic/synthetic';
     serverConfig.providers = { synthetic: { name: 'Synthetic',
       package: '@opencode/ai/providers/openai-compatible', settings: { baseURL, apiKey: 'synthetic-header-secret' },
-      models: { synthetic: { name: 'Synthetic', limit: { context: 32000, output: 1000 } } } } };
+      models: { synthetic: { name: 'Synthetic', limit: { context: 32000, output: 1000 },
+        ...(options.modelCost ? { cost: options.modelCost } : {}) } } } };
     serverConfig.policies = [{ action: 'provider.use', resource: '*', effect: 'deny' },
       { action: 'provider.use', resource: 'synthetic', effect: 'allow' }];
   }
