@@ -254,8 +254,15 @@ export default Plugin.define({
         };
         let filtered: Json = null;
         let status = 'captured';
-        try { filtered = sanitizeJson(value, config.secrets, redactions); }
-        catch { status = 'unrecognized'; omissions.push('unrecognized-observation-format'); }
+        try {
+          filtered = sanitizeJson(value, config.secrets, redactions, 0, true);
+          if (JSON.stringify(observationDiscriminators(details, value)) !== JSON.stringify(observationDiscriminators(details, filtered))) {
+            throw new Error('redacted-observation-shape');
+          }
+        } catch (error) {
+          filtered = null; status = 'unrecognized'; omissions.push('unrecognized-observation-format');
+          if (error instanceof Error && error.message === 'redacted-observation-shape') omissions.push(error.message);
+        }
         const identity = details.identity === null ? null : redact(details.identity, config.secrets);
         redactions.push(...identity?.reasons ?? []);
         await append({ type: 'recorder.observation', observationVersion: 1, stage: details.stage,
@@ -755,20 +762,33 @@ function captureInteraction(record: CapturedEvent, data: Record<string, unknown>
   }
 }
 
-function sanitizeJson(value: unknown, secrets: string[], reasons: string[], depth = 0): Json {
+// Free text may change; these discriminators must still attest the observed projection.
+function observationDiscriminators(details: Observation, value: unknown): unknown[] {
+  const data = object(value);
+  if (details.stage === 'context-hook') return [data.kind,
+    ...Array.isArray(data.messages) ? data.messages.map(message => object(message).role) : []];
+  if (details.stage === 'runtime-definition' && details.source === 'opencode.agent.get') return [data.mode];
+  if (details.stage === 'environment' && Array.isArray(data.plugins)) {
+    return data.plugins.flatMap(plugin => [object(plugin).source, object(plugin).status]);
+  }
+  return [];
+}
+
+function sanitizeJson(value: unknown, secrets: string[], reasons: string[], depth = 0, preserveKeys = false): Json {
   if (depth > 32) throw new Error('Unsupported content depth');
   if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
   if (typeof value === 'string') {
     const result = redact(value, secrets); reasons.push(...result.reasons); return result.text;
   }
-  if (Array.isArray(value)) return value.map(item => sanitizeJson(item, secrets, reasons, depth + 1));
+  if (Array.isArray(value)) return value.map(item => sanitizeJson(item, secrets, reasons, depth + 1, preserveKeys));
   if (typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('Unsupported JSON');
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
     const safeKey = sanitizeJson(key, secrets, reasons, depth + 1) as string;
+    if (preserveKeys && safeKey !== key) throw new Error('redacted-observation-shape');
     if (/(?:^|[-_])(?:authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|private[_-]?key|passphrase|password|secret)$/i.test(key)) {
       reasons.push('credential-pattern'); return [safeKey, '[REDACTED]'];
     }
-    return [safeKey, sanitizeJson(item, secrets, reasons, depth + 1)];
+    return [safeKey, sanitizeJson(item, secrets, reasons, depth + 1, preserveKeys)];
   }));
 }
 

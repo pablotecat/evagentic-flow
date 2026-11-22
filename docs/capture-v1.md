@@ -422,6 +422,18 @@ agente y herramientas son `null`; las listas de fuentes de instrucciones y los
 IDs de mensaje pueden ser `null`. Una observación `unrecognized` mantiene tanto
 `value` como `sha256` en `null`.
 
+El filtrado no exime de acreditar esa forma. Si cambia una clave de la proyección
+(también en herramientas o esquemas anidados), o un discriminador exigido
+(`kind`, roles de mensajes, modo de agente, fuente o estado de plugin), el productor
+omite la proyección completa: `status: "unrecognized"`, `value: null`, `sha256: null`,
+`unrecognized-observation-format` y `redacted-observation-shape` en `omissions`.
+Conserva el sobre, la procedencia, los códigos de filtrado y las otras observaciones;
+no conserva fragmentos de la proyección ni recupera los valores originales.
+El texto libre filtrado cuya forma sigue siendo válida conserva su contenido y hash.
+El lector no admite discriminadores sustituidos por marcadores ni claves alteradas
+como excepción al esquema, tampoco en diarios anteriores: no los repara ni infiere
+la estructura secreta a partir de `redactions` o del hash.
+
 Los archivos no se leen fuera del proyecto, incluidos symlinks resueltos hacia
 fuera (`definition-file-outside-project-not-read`); archivos no regulares o
 ausentes producen omisiones y contenido `null`. Una lectura estática posterior

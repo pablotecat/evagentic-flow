@@ -39,7 +39,9 @@ test('una skill cargada conserva su activación pública sin contar disponibilid
     const runtime = evidence.find(row => row.stage === 'runtime-definition' && row.identity === 'transformed');
     const deployed = evidence.find(row => row.stage === 'deployed-file' && row.identity === 'transformed');
     assert.equal(runtime?.source, 'opencode.skill.list');
+    assert.equal(runtime.status, 'captured');
     assert.match(runtime.value.content, /^Transformed observed body/);
+    assert.match(runtime.value.content, /\[REDACTED\]/);
     assert.match(deployed?.value.content, /Deployed observed body/);
     assert.notEqual(runtime.sha256, deployed.sha256);
     assert.ok(runtime.observationTime >= activation.sourceTime);
@@ -238,4 +240,73 @@ test('el contexto real con identidad excluida no se incluye al consultar otra se
         .trim().split('\n').map(JSON.parse);
       assert.deepEqual(selected.map(row => row.type), ['recorder.ready']);
     }
+  });
+
+test('un secreto que altera el discriminador del contexto omite la proyección sin invalidar el diario',
+  { timeout: 90000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticDefinitions: true, config: { secrets: ['primary'] } });
+    const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+    await instance.api(`/api/session/${session.id}/prompt`, { text: 'Synthetic redacted context discriminator' });
+    await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+    const evidence = await eventually(async () => {
+      const all = await records(instance.captureDirectory);
+      return all.some(row => row.type === 'session.execution.succeeded') && all;
+    }, 'synthetic redacted context work did not finish');
+    const context = evidence.find(row => row.source === 'opencode.session.hook.context');
+    assert.equal(context.status, 'unrecognized');
+    assert.equal(context.value, null);
+    assert.equal(context.sha256, null);
+    assert.ok(context.omissions.includes('redacted-observation-shape'));
+    assert.ok(context.redactions.includes('configured-literal'));
+    const agent = evidence.find(row => row.source === 'opencode.agent.get');
+    assert.equal(agent.status, 'unrecognized');
+    assert.equal(agent.value, null);
+    assert.ok(agent.omissions.includes('redacted-observation-shape'));
+    await instance.stop();
+    const script = fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url));
+    for (const args of [[], [session.id], [session.id, '--tree'], [session.id, '--tools']]) {
+      const inspected = execFileSync(process.execPath, [script, instance.captureDirectory, ...args],
+        { encoding: 'utf8', stdio: 'pipe' });
+      if (!args.includes('--tools')) assert.ok(inspected.includes('redacted-observation-shape'));
+    }
+  });
+
+test('roles, fuentes, estados y claves excluidos dejan omisiones legibles sin perder otras observaciones',
+  { timeout: 300000 }, async t => {
+    for (const { secrets, omitted } of [
+      { secrets: ['user'], omitted: ['opencode.session.hook.context'] },
+      { secrets: ['local'], omitted: ['opencode.plugin.list'] },
+      { secrets: ['active'], omitted: ['opencode.plugin.list'] },
+      { secrets: ['providerID'], omitted: ['opencode.session.hook.context'] },
+      { secrets: ['system', 'messages'], omitted: ['opencode.session.hook.context', 'opencode.agent.get'] },
+    ]) await t.test(secrets.join(', '), { timeout: 90000 }, async t => {
+      const instance = await fixture(t, { simulation: true, syntheticDefinitions: true, config: { secrets } });
+      const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+      await instance.api(`/api/session/${session.id}/prompt`, { text: 'Synthetic redacted projection shape' });
+      await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+      await eventually(async () => (await records(instance.captureDirectory))
+        .some(row => row.type === 'session.execution.succeeded'), 'synthetic redacted projection work did not finish');
+      await instance.stop();
+      const evidence = await records(instance.captureDirectory);
+      for (const source of ['opencode.session.hook.context', 'opencode.agent.get', 'opencode.skill.list', 'opencode.plugin.list']) {
+        const row = evidence.find(row => row.source === source);
+        assert.ok(row, `missing ${source}`);
+        if (omitted.includes(source)) {
+          assert.equal(row.status, 'unrecognized', source);
+          assert.equal(row.value, null);
+          assert.equal(row.sha256, null);
+          assert.ok(row.omissions.includes('redacted-observation-shape'));
+          assert.ok(row.redactions.includes('configured-literal'));
+        } else {
+          assert.equal(row.status, 'captured', source);
+          assert.equal(row.sha256, createHash('sha256').update(JSON.stringify(row.value), 'utf8').digest('hex'));
+        }
+      }
+      const script = fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url));
+      for (const args of [[], [session.id], [session.id, '--tree'], [session.id, '--tools']]) {
+        const inspected = execFileSync(process.execPath, [script, instance.captureDirectory, ...args],
+          { encoding: 'utf8', stdio: 'pipe' });
+        if (!args.includes('--tools')) assert.deepEqual(inspected.trim().split('\n').map(JSON.parse), evidence);
+      }
+    });
   });

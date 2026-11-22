@@ -70,6 +70,22 @@ test('un hash correcto no convierte una proyección de contexto malformada en ev
   }
 });
 
+test('los códigos de filtrado y omisión no acreditan proyecciones parciales ni arbitrarias', async () => {
+  for (const value of [42, { ...context, kind: '[REDACTED]' },
+    { ...context, kind: 'pri[REDACTED]ry' }, { ...context, '[REDACTED]': context.kind, kind: undefined }]) {
+    for (const status of ['captured', 'unrecognized']) {
+      const directory = await capture([observation('context-hook', 'opencode.session.hook.context', value, {
+        status, ...(status === 'unrecognized' ? { sha256: null } : {}),
+        omissions: ['unrecognized-observation-format', 'redacted-observation-shape'], redactions: ['configured-literal'],
+      })]);
+      for (const args of [[], ['session_root'], ['session_root', '--tree'], ['session_root', '--tools']]) {
+        assert.throws(() => inspect(directory, ...args),
+          error => error.status === 1 && error.stdout === '' && error.stderr.includes('line 1'));
+      }
+    }
+  }
+});
+
 test('el lector valida definiciones y disponibilidad por etapa y fuente aunque el hash coincida', async () => {
   const skill = { id: 'synthetic', name: 'Synthetic', description: null, content: 'Synthetic body',
     path: 'synthetic/SKILL.md', autoinvoke: null };
@@ -129,6 +145,9 @@ test('las proyecciones válidas conservan los desconocidos null y el contenido f
     { redactions: ['credential-pattern'] }),
     observation('context-hook', 'opencode.session.hook.context', null,
       { status: 'unrecognized', sha256: null, omissions: ['unrecognized-observation-format'] }),
+    observation('context-hook', 'opencode.session.hook.context', null,
+      { status: 'unrecognized', sha256: null, omissions: ['unrecognized-observation-format', 'redacted-observation-shape'],
+        redactions: ['configured-literal'] }),
   ];
   const directory = await capture(rows);
   for (const args of [[], ['session_root'], ['session_root', '--tree']]) {
