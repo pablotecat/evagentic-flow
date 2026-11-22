@@ -33,10 +33,19 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 - Code Mode representa el error provocado como herramienta completada con
   `metadata.error: true`, no `session.tool.failed`; la prueba consulta también
   sus mensajes públicos. (Observado 2026-11-22 en la prueba de herramienta.)
+- Los avisos automáticos de subagentes pueden iniciar otra ronda en el padre:
+  contar bloques de respuesta no cuenta sesiones ni invocaciones de delegación.
+  (Observado 2026-11-22 en `test/delegation.test.mjs`.)
 
 ## Observations
 
 <!-- begin:observations -->
+2026-11-22: suite completa de #4, 17 pruebas aprobadas; `synthetic-model` fue el
+único miembro y sirvió chat con 200 y el fallo deliberado con 400. La preparación
+rechazada no despachó modelos; ningún miembro quedó sin tráfico en el conjunto.
+2026-11-22: pruebas focales de #4 y regresiones de fallo aprobadas. El único miembro,
+`synthetic-model`, sirvió POST de chat con 200, incluidas llamadas nativas a
+`subagent`; ninguno quedó sin tráfico. Sin proveedor probabilístico ni consumidor real.
 2026-11-22: suite final, 15 pruebas aprobadas. El único miembro, `synthetic-model`,
 sirvió POST de chat con 200 y el fallo deliberado con 400. Los casos de preparación
 fallida no despacharon POST, intencionadamente; ningún miembro quedó sin ejercitar

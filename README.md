@@ -2,15 +2,17 @@
 
 Plugin de servidor **independiente** para OpenCode **V2 2.1.2**, con SDK
 `@opencode/plugin` fijado a `2.1.2`. Implementa los cortes
-[#2](https://github.com/pablotecat/evagentic-flow/issues/2) y
-[#3](https://github.com/pablotecat/evagentic-flow/issues/3): encargo admitido y
-texto final de respuesta, persistidos durante la ejecución de un único proyecto
-autorizado, con aviso e interrupción ante fallos del registrador. No modifica
+[#2](https://github.com/pablotecat/evagentic-flow/issues/2),
+[#3](https://github.com/pablotecat/evagentic-flow/issues/3) y
+[#4](https://github.com/pablotecat/evagentic-flow/issues/4): encargo admitido,
+texto final y relaciones de delegación de las sesiones del proyecto autorizado,
+con aviso e interrupción del conjunto observado ante fallos del registrador. No modifica
 agentes, permisos de las sesiones observadas, delegación ni otros plugins.
 
 **No se ha instalado ni activado en el proyecto consumidor.** La parada ante
-fallos se comprueba solo para una ejecución simple; subejecuciones, herramientas,
-entregables y cobertura del piloto siguen pendientes. No utilizar este corte como
+fallos se comprueba también con delegación anidada, ramas concurrentes y
+descendientes nuevos; contenido de herramientas, entregables y cobertura del piloto
+siguen pendientes. No utilizar este corte como
 autorización para el piloto.
 
 ## Desarrollo y pruebas
@@ -81,12 +83,19 @@ Worktrees, subdirectorios y clones no se incorporan implícitamente.
 ```sh
 node scripts/inspect.mjs C:/synthetic/captures
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic
+node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tree
 ```
 
 También basta un lector de JSON por línea. El lector incluido no importa el
 plugin ni requiere OpenCode, navegador o exportación. No ignora líneas inválidas:
 termina con error indicando el archivo y la línea. No ordena eventos entre
 diarios como si hubiera un orden causal global.
+
+`--tree` incluye los descendientes relacionados por evidencia, sin exigir
+activación por flujo. Las filas conservan padre, agente, llamada y sesión hija
+cuando se observan; `null` significa relación desconocida o excluida, no una
+asociación deducida. Los intervalos `session.execution.*` permiten reconocer
+solapamientos: no sumar las duraciones de ramas concurrentes como duración global.
 
 Contrato y límites: [captura v1](docs/capture-v1.md).
 
@@ -102,6 +111,11 @@ Contrato y límites: [captura v1](docs/capture-v1.md).
   solicitud. `not-running`, errores o comprobaciones que no concluyen se muestran
   como **`unconfirmed`**, no como éxito. No se revierten ni se garantiza cancelar
   inmediatamente efectos externos, herramientas no cooperativas o descendientes.
+- La comprobación reenumera el proyecto después de cada oleada de interrupciones.
+  Tras fallar la escritura, la suscripción sigue observando identidades y solicita
+  interrumpir también nuevas sesiones autorizadas, sin seguir capturando contenido.
+  Cada sesión mantiene su propio aviso y resultado; no hay una confirmación global
+  ficticia. Los hooks de herramientas y shell bloquean nuevos despachos locales.
 - La admisión y el despacho de modelos quedan bloqueados, también si un encargo
   estaba en preparación al fallar la captura. Se arma una marca durable **antes**
   de declarar preparado el registrador; solo una limpieza sana puede retirarla.

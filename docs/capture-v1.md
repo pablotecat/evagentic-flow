@@ -61,7 +61,7 @@ agente. Puede no escribirse si el disco falla; también se avisa en stderr del
 servidor. No hay recuperación automática ni replay. Tras un fallo de escritura,
 la cola no se recupera para escribir diagnósticos como si la captura siguiera sana.
 
-### Aviso e interrupción (#3)
+### Aviso e interrupción (#3 y #4)
 
 Se usa el título existente de la sesión y su metadata pública, no un toast efímero
 ni una suscripción del navegador. `GET /api/session/{sessionID}` devuelve en
@@ -113,12 +113,30 @@ Un runtime incompatible o incapaz de registrar el guardián queda públicamente
 `failed`, pero **eso no demuestra bloqueo de la ejecución**: impide declarar
 preparado el piloto. No se promete cancelar descendientes, herramientas que no
 cooperen ni efectos externos, ni parada instantánea o reversión. Este corte
-comprueba una ejecución simple; los demás caminos de entrada y subejecuciones
-necesitan su propio corte y no quedan autorizados por esta prueba.
+comprueba sesiones simples y árboles con delegación anidada y concurrencia; no
+autoriza el piloto ni otros mecanismos de trabajo no ejercitados.
 Si ni siquiera se puede armar el estado inicial, no se declara captura preparada;
 no hay garantía ficticia de recordar un fallo tras perder todo el almacenamiento
 del runtime. Esto bloquea autorizar el piloto, no autoriza recrear la base de
 datos para eludir la revisión.
+
+La enumeración del proyecto se repite después de cada oleada de solicitudes hasta
+una comprobación sin identidades nuevas. Las sesiones ya verificadas también se
+incluyen si falla la enumeración. La suscripción no se cierra por perder el diario:
+continúa verificando identidades y solicitando interrupciones de sesiones nuevas,
+sin capturar contenido después del fallo. Si se pierde el propio stream, solo
+quedan la enumeración y los guardias; no se afirma cobertura en vivo de ese hueco.
+Se solicita una interrupción por sesión y activación del guardián, sin duplicarla
+por sus propios eventos de aviso. Admisión, despacho de modelos, herramientas y
+shell quedan bloqueados localmente. No se borran sesiones para detenerlas.
+
+Cada sesión conserva su diagnóstico público, incluso un descendiente creado
+durante la comprobación. `confirmed` se refiere exclusivamente a esa sesión y al
+desenlace comprobado, no a todos sus efectos. Una notificación de subagente puede
+competir con los guardias y terminar en fallo o sin desenlace `interrupted`:
+la solicitud aceptada permanece con parada `unconfirmed`. El SDK fijado no expone
+un registro independiente de jobs ni una confirmación de sus efectos externos;
+los trabajos de subagente aquí ejercitados se identifican por su sesión hija.
 
 `recorder.gap` añade `reason: "unrecognized-session-envelope"`: un evento de
 sesión observable no trae el sobre necesario para atribuirlo. Conserva solo el
@@ -146,6 +164,36 @@ Además del sobre, todas las filas `session.*` incluyen:
 | `status` | `captured`, `omitted` o `unrecognized`. |
 | `omissions` | Array de códigos de omisión, sin datos originales. |
 | `redactions` | Array de códigos de filtrado, sin los valores eliminados. |
+
+El corte #4 añade a las filas nuevas el siguiente grupo de campos. El lector
+actual acepta también filas v1 anteriores sin el grupo completo; no las rellena
+por inferencia. Todos los identificadores nuevos pasan las mismas exclusiones:
+
+| Campo | Tipo / significado |
+| --- | --- |
+| `parentSessionID` | Padre leído mediante `session.get`, solo si también está autorizado; `null` si ausente, excluido o desconocido. |
+| `agentID` | Agente seleccionado que expone la sesión, o `null`; no se supone `build` si falta. |
+| `sessionObservedAt` | Momento local de la lectura de sesión/padre; no fecha causal del evento ni snapshot histórico de su agente. |
+| `callID` | `data.id` de un evento `session.tool.*`, o `null`. Identidad compuesta: **sesión + mensaje + llamada**, no nombre del componente. |
+| `toolName` | Nombre expuesto por `session.tool.input.started`, o `null`. |
+| `childSessionID` | Sesión hija expuesta en `session.tool.success` v2 de una llamada previamente observada como `subagent`, comprobando proyecto, ubicación y padre; en otro caso `null`. |
+
+La procedencia de estas relaciones es el evento público salvo padre y agente,
+leídos por la API pública en `sessionObservedAt`. No se conserva metadata
+arbitraria de herramientas. Un padre no demuestra qué llamada creó al hijo;
+solo el resultado de delegación observado aporta ese enlace. Una llamada sin
+resultado conserva su identidad sin inventar un hijo. Los hooks son guardias,
+no filas adicionales de invocación: la captura de actividad usa solo eventos.
+Varias fases con la misma identidad compuesta son observaciones de la misma
+llamada, no ejecuciones nuevas. Esto no garantiza exactamente una vez entre
+persistencia y efectos externos.
+
+`inspect.mjs <directorio> <sesión> --tree` selecciona raíz y descendientes conocidos,
+manteniendo el orden local de cada diario. Los inicios y desenlaces de ejecución
+conservan `sourceTime` y secuencia dentro de su agregado. Sus intervalos permiten
+distinguir ramas solapadas; no hay suma de duraciones ni orden causal global.
+El ID causal de ejecución sigue sin exponerse: `executionID` permanece `null`,
+también cuando un aviso de subagente inicia otra ronda en la misma sesión.
 
 Solo se captura texto de `session.inbox.enqueued` con item `user` (encargo ya
 admitido, versión durable `1`) y `session.text.ended` (bloque final de respuesta,
@@ -176,11 +224,13 @@ falla visiblemente en vez de atribuirle contenido por inferencia.
 
 El stream es **en vivo**: no se recupera lo anterior al arranque y puede faltar
 `session.created` cuando la carga del plugin se difiere hasta el primer prompt.
-No se capturan eventos globales, texto de deltas, razonamiento, herramientas,
+No se capturan eventos globales, texto de deltas, razonamiento, payloads de herramientas,
 adjuntos, instrucciones, definiciones, skills ni entregables en este corte.
 Si una respuesta se interrumpe antes del bloque final, no se recupera su texto
-parcial. No se demuestra cobertura de subejecuciones, concurrencia, sesiones
-movidas, cancelación de descendientes ni efectos externos.
+parcial. Las pruebas sintéticas ejercitan subejecuciones anidadas, llamadas
+repetidas al mismo agente y ramas concurrentes, incluida su interrupción y el
+aislamiento de otro proyecto. No demuestran cancelación de efectos externos,
+cobertura completa de sesiones movidas ni de otros tipos de trabajo.
 
 ## Exclusión de secretos
 

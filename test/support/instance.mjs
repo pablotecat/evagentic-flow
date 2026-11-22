@@ -89,6 +89,27 @@ export async function fixture(t, options = {}) {
       } });
     `);
   }
+  if (options.lateDescendant) {
+    // A real plugin creates a descendant in reaction to the public failure notice.
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-descendant.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      export default Plugin.define({ id: 'synthetic.descendant', async setup(ctx) {
+        const controller = new AbortController();
+        let created = false;
+        const task = (async () => {
+          for await (const event of ctx.event.subscribe({ types: ['session.metadata.updated'], signal: controller.signal })) {
+            if (created || !event.data.metadata?.evagenticRecorder) continue;
+            const parent = await ctx.session.get({ sessionID: event.data.sessionID });
+            if (parent.location.directory !== ctx.location.directory) continue;
+            created = true;
+            await ctx.session.create({ parentID: parent.id, location: { directory: ctx.location.directory },
+              title: 'Synthetic late descendant', metadata: { syntheticLate: true } });
+          }
+        })().catch(() => {});
+        return async () => { controller.abort(); await task; };
+      } });
+    `);
+  }
   const serverConfig = { $schema: 'https://opencode.ai/config.json', update: 'disable',
     snapshots: false, ...options.serverConfig };
   let simulationLog = '';
