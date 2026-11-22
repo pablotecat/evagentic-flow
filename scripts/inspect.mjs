@@ -44,6 +44,55 @@ const validSkill = skill => skill === null || (exactKeys(skill, ['id', 'name', '
   && ['successful-skill-tool-result', 'runtime-activation-event'].includes(skill.origin)
   && skill.sha256 === digest(skill.text) && skill.contextID === null && skill.consumption === null);
 const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
+// A missing/excluded session identity does not make session evidence global.
+const globalRecord = row => ['recorder.ready', 'recorder.failed', 'recorder.gap'].includes(row.type);
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const nullableString = value => value === null || typeof value === 'string';
+const validContext = (source, value) => exactKeys(value, ['kind', 'agentID', 'model', 'system', 'messages', 'tools', 'finalContext'])
+  && value.kind === (source === 'opencode.session.hook.context' ? 'primary' : source.split('.').at(-1))
+  && nullableString(value.agentID) && exactKeys(value.model, ['providerID', 'id'])
+  && typeof value.model.providerID === 'string' && typeof value.model.id === 'string'
+  && Array.isArray(value.system) && value.system.every(part => exactKeys(part, ['text', 'instructions'])
+    && typeof part.text === 'string' && (part.instructions === null || (Array.isArray(part.instructions)
+      && part.instructions.every(entry => exactKeys(entry, ['key', 'text'])
+        && typeof entry.key === 'string' && typeof entry.text === 'string'))))
+  && Array.isArray(value.messages) && value.messages.every(message => exactKeys(message, ['id', 'role', 'text'])
+    && identifier(message.id) && ['system', 'user', 'assistant', 'tool'].includes(message.role) && strings(message.text))
+  && (source === 'opencode.session.hook.title' ? value.agentID === null && value.tools === null
+    : object(value.tools) && Object.values(value.tools).every(tool => tool === '[REDACTED]'
+      || (exactKeys(tool, ['description', 'input']) && typeof tool.description === 'string'
+        && (typeof tool.input === 'boolean' || object(tool.input)))))
+  && value.finalContext === false;
+const skillSummary = value => typeof value.id === 'string' && typeof value.name === 'string'
+  && nullableString(value.description) && (value.autoinvoke === null || typeof value.autoinvoke === 'boolean');
+function validProjection({ stage, source, value }) {
+  switch (stage) {
+    case 'availability':
+      return Array.isArray(value) && value.every(skill => exactKeys(skill, ['id', 'name', 'description', 'autoinvoke'])
+        && skillSummary(skill));
+    case 'admitted-skill':
+      return value === null || (exactKeys(value, ['id', 'name', 'text'])
+        && [value.id, value.name, value.text].every(text => typeof text === 'string'));
+    case 'runtime-definition':
+      return source === 'opencode.skill.list'
+        ? value === null || (exactKeys(value, ['id', 'name', 'description', 'content', 'path', 'autoinvoke'])
+          && skillSummary(value) && typeof value.content === 'string' && typeof value.path === 'string')
+        : exactKeys(value, ['id', 'name', 'mode', 'description', 'system'])
+          && typeof value.id === 'string' && typeof value.name === 'string' && ['primary', 'subagent', 'all'].includes(value.mode)
+          && nullableString(value.description) && nullableString(value.system);
+    case 'deployed-file':
+      return exactKeys(value, ['path', 'content']) && nullableString(value.path) && nullableString(value.content);
+    case 'context-hook':
+      return validContext(source, value);
+    case 'environment':
+      return exactKeys(value, ['plugins', 'configurationSources', 'transformations'])
+        && value.configurationSources === null && value.transformations === null && Array.isArray(value.plugins)
+        && value.plugins.every(plugin => exactKeys(plugin, ['id', 'source', 'version', 'status'])
+          && nullableString(plugin.id) && ['builtin', 'local', 'package', 'sdk'].includes(plugin.source)
+          && nullableString(plugin.version) && ['active', 'failed'].includes(plugin.status));
+    default: return false;
+  }
+}
 
 function validRecord(row) {
   if (row?.schemaVersion !== 1 || typeof row.captureID !== 'string'
@@ -79,6 +128,7 @@ function validRecord(row) {
         .every(key => identifier(row[key])) && row.executionID === null && row.hashBasis === 'redacted-json-utf8'
       && json(row.value) && strings(row.omissions) && strings(row.redactions)
       && (row.status === 'captured' ? row.sha256 === digest(JSON.stringify(row.value))
+        && validProjection(row)
         : row.status === 'unrecognized' && row.value === null && row.sha256 === null);
   }
   if (row.type === 'recorder.failed' || row.type === 'recorder.gap') {
@@ -134,7 +184,7 @@ if (!directory) {
           const row = JSON.parse(line);
           if (!validRecord(row)) throw new Error('Unsupported or malformed capture');
           if (mode) rows.push(row);
-          else if (!sessionID || row.sessionID === sessionID || (row.type.startsWith('recorder.') && !row.sessionID)) {
+          else if (!sessionID || row.sessionID === sessionID || globalRecord(row)) {
             console.log(JSON.stringify(row));
           }
         }
@@ -155,7 +205,7 @@ if (!directory) {
     }
     for (const row of rows) {
       if (mode === '--tools') continue;
-      if (!sessionID || selected.has(row.sessionID) || (row.type.startsWith('recorder.') && !row.sessionID)) console.log(JSON.stringify(row));
+      if (!sessionID || selected.has(row.sessionID) || globalRecord(row)) console.log(JSON.stringify(row));
     }
     if (mode === '--tools') {
       const attempts = new Map();

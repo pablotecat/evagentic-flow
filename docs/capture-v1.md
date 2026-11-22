@@ -207,6 +207,11 @@ distinguir ramas solapadas; no hay suma de duraciones ni orden causal global.
 El ID causal de ejecución sigue sin exponerse: `executionID` permanece `null`,
 también cuando un aviso de subagente inicia otra ronda en la misma sesión.
 
+La selección normal y de árbol incluye como diagnósticos globales únicamente
+`recorder.ready`, `recorder.failed` y `recorder.gap`. Una observación o inventario
+con `sessionID: null` conserva una relación desconocida o excluida, no una relación
+global: no se atribuye a la sesión seleccionada. Sigue visible al leer sin filtro.
+
 El campo `content` solo conserva texto de `session.inbox.enqueued` con item `user` (encargo ya
 admitido, versión durable `1`) y `session.text.ended` (bloque final de respuesta,
 versión durable `1`). Un encargo admitido con `resume: false` **no** demuestra
@@ -406,7 +411,16 @@ la fila; no necesita OpenCode ni acceso al proyecto.
 | `deployed-file` / `node.fs.readFile` | `{path, content}` del archivo apuntado por esa skill, solo si `realpath` queda dentro del proyecto autorizado y es regular. Ruta relativa y contenido UTF-8 filtrado; no se busca el repositorio de desarrollo. |
 | `runtime-definition` / `opencode.agent.get` | `{id, name, mode, description, system}` del agente del hook, leído en ese momento y ligado por `requestObservationID`. No copia settings, permisos ni configuración global. |
 | `context-hook` / `opencode.session.hook.<nombre>` | Proyección de la petición en el punto del registrador: `kind`, `agentID`, `model: {providerID, id}`, `system`, `messages`, `tools`, `finalContext: false`. |
-| `environment` / `opencode.plugin.list` | `{plugins: [{id, source, version, status}], configurationSources: null, transformations: null}`. Fuente `builtin`, `local` o `package`; versión solo si la fuente de paquete la expone. No captura locators, rutas de plugins, opciones ni configuración. |
+| `environment` / `opencode.plugin.list` | `{plugins: [{id, source, version, status}], configurationSources: null, transformations: null}`. Fuente `builtin`, `local`, `package` o `sdk`; versión solo si la fuente de paquete la expone. No captura locators, rutas de plugins, opciones ni configuración. |
+
+El lector valida la proyección por etapa y fuente, incluidos sus campos anidados,
+además del hash; JSON arbitrario con hash correcto no acredita una forma admitida.
+Conserva los desconocidos `null`: definición de skill no encontrada, adjunto de
+skill no reconocido, ruta/contenido de archivo no leído, campos opcionales y
+fuentes de configuración/transformaciones no expuestas. En un contexto de título,
+agente y herramientas son `null`; las listas de fuentes de instrucciones y los
+IDs de mensaje pueden ser `null`. Una observación `unrecognized` mantiene tanto
+`value` como `sha256` en `null`.
 
 Los archivos no se leen fuera del proyecto, incluidos symlinks resueltos hacia
 fuera (`definition-file-outside-project-not-read`); archivos no regulares o

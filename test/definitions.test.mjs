@@ -157,6 +157,14 @@ test('definiciones transformadas, instrucciones y versiones identifican el punto
     // The synthetic provider is independent of the recorder's earlier hook.
     const wire = await (await fetch(`${instance.simulationURL}/control/context-provenance`)).json();
     assert.ok(wire.laterHookRequests > 0, 'later public hook did not change the dispatched request');
+    await instance.stop();
+    for (const mode of [[], ['--tree']]) {
+      const inspected = execFileSync(process.execPath,
+        [fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url)), instance.captureDirectory, session.id, ...mode],
+        { encoding: 'utf8' }).trim().split('\n').map(JSON.parse);
+      assert.deepEqual(inspected.filter(row => row.type === 'recorder.observation'),
+        (await records(instance.captureDirectory)).filter(row => row.type === 'recorder.observation'));
+    }
   });
 
 test('los hooks separan peticiones primarias, generación transitoria, título y compactación',
@@ -205,4 +213,29 @@ test('una definición del registro no autoriza leer su archivo fuera del proyect
     assert.ok(file.omissions.includes('definition-file-outside-project-not-read'));
     assert.ok(evidence.some(row => row.skill?.id === 'outside'));
     assert.ok(!JSON.stringify(evidence).includes('synthetic-unrelated-file-content'));
+    execFileSync(process.execPath, [fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url)),
+      instance.captureDirectory, session.id], { encoding: 'utf8' });
+  });
+
+test('el contexto real con identidad excluida no se incluye al consultar otra sesión',
+  { timeout: 90000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticDefinitions: true, config: { secrets: ['ses_'] } });
+    const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+    assert.ok(session.id.startsWith('ses_'));
+    await instance.api(`/api/session/${session.id}/prompt`, { text: 'Synthetic excluded session identity' });
+    await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+    const context = await eventually(async () => (await records(instance.captureDirectory))
+      .find(row => row.stage === 'context-hook'), 'context with excluded identity was not captured');
+    assert.equal(context.sessionID, null);
+    assert.ok(context.omissions.includes('unsafe-identifier'));
+    await instance.stop();
+    const script = fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url));
+    const all = execFileSync(process.execPath, [script, instance.captureDirectory], { encoding: 'utf8' });
+    assert.ok(all.includes('"stage":"context-hook"'), 'unscoped inspection lost excluded-identity evidence');
+    for (const mode of [[], ['--tree']]) {
+      const selected = execFileSync(process.execPath,
+        [script, instance.captureDirectory, 'ses_synthetic_other', ...mode], { encoding: 'utf8' })
+        .trim().split('\n').map(JSON.parse);
+      assert.deepEqual(selected.map(row => row.type), ['recorder.ready']);
+    }
   });
