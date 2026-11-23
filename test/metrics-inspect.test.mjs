@@ -93,6 +93,110 @@ test('los despachos repetidos conservan el intervalo completo sin inventar durac
   assert.equal(step.tokens.value.input, 11);
 });
 
+test('un primer despacho sin medición impide sustituir su inicio por un despacho posterior reconocido', async () => {
+  const start = { ...measurement, phase: 'started', startedAt: 140,
+    model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null };
+  for (const status of ['omitted', 'unrecognized']) {
+    for (const reversed of [false, true]) {
+      const journals = [
+        [event('session.step.started', { status, measurement: status === 'omitted' ? undefined : null,
+          omissions: [status === 'omitted' ? 'event-payload-not-captured' : 'unrecognized-measurement-format'] })],
+        [event('session.step.started', { measurement: start, sourceTime: 140, sourceSequence: 2 }),
+          event('session.step.ended', { measurement, sourceTime: 160, sourceSequence: 3 })],
+      ];
+      const directory = await capture(...(reversed ? journals.reverse() : journals));
+      const step = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse)
+        .find(row => row.type === 'diagnostic.model-step');
+      assert.equal(step.startedAt, null);
+      assert.equal(step.elapsedMs, null);
+      assert.equal(step.providerBodyMs, null);
+      assert.equal(step.dispatches.length, 2);
+      const unknown = step.dispatches.find(row => row.startedAt === null);
+      assert.equal(unknown.model.value, null);
+      assert.equal(unknown.model.status, 'unknown');
+      assert.equal(unknown.model.source, null);
+      assert.equal(unknown.tokens, null);
+      assert.equal(unknown.costUSD, null);
+      assert.equal(unknown.evidence.type, 'session.step.started');
+      assert.equal(step.dispatches.find(row => row.startedAt === 140).model.value.providerID, 'synthetic');
+      assert.equal(step.model.value.providerID, 'synthetic');
+      assert.equal(step.tokens.value.input, 11);
+      assert.equal(step.costUSD.value, 0.000025);
+      assert.equal(step.outcome, 'ended');
+      assert.equal(step.evidence.length, 3);
+      assert.equal(step.horizons.length, 2);
+      assert.ok(step.omissions.includes('dispatch-measurement-not-observed'));
+      assert.ok(step.omissions.includes('multiple-dispatches-body-duration-not-attributable'));
+    }
+  }
+});
+
+test('un despacho posterior sin medición impide atribuir el cuerpo a un único intento sin perder el intervalo válido', async () => {
+  const start = { ...measurement, phase: 'started', startedAt: 100,
+    model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null };
+  const stream = { ...measurement, phase: 'streamed', tokens: null, costUSD: null, finish: null };
+  for (const status of ['omitted', 'unrecognized']) {
+    for (const reversed of [false, true]) {
+      for (const terminal of [false, true]) {
+        const journals = [
+          [event('session.step.started', { measurement: start, sourceTime: 110 })],
+          [event('session.step.started', { status, sourceTime: 140, sourceSequence: 2,
+            measurement: status === 'omitted' ? undefined : null }),
+          event('session.step.streamed', { measurement: stream, sourceTime: 150, sourceSequence: 3 }),
+          ...terminal ? [event('session.step.ended', { measurement, sourceTime: 160, sourceSequence: 4 })] : []],
+        ];
+        const directory = await capture(...(reversed ? journals.reverse() : journals));
+        const step = inspect(directory, 'session_root', '--metrics').trim().split('\n').map(JSON.parse)
+          .find(row => row.type === 'diagnostic.model-step');
+        assert.equal(step.startedAt, 100);
+        assert.equal(step.streamedAt, 150);
+        assert.equal(step.elapsedMs, terminal ? 60 : null);
+        assert.equal(step.providerBodyMs, null);
+        assert.equal(step.dispatches.length, 2);
+        assert.equal(step.dispatches.find(row => row.startedAt === null).model.status, 'unknown');
+        assert.equal(step.model.value.providerID, 'synthetic');
+        assert.equal(step.tokens.value?.input ?? null, terminal ? 11 : null);
+        assert.equal(step.outcome, terminal ? 'ended' : 'not-observed');
+        assert.equal(step.evidence.length, terminal ? 4 : 3);
+        assert.ok(step.omissions.includes('dispatch-measurement-not-observed'));
+        assert.ok(step.omissions.includes('multiple-dispatches-body-duration-not-attributable'));
+      }
+    }
+  }
+});
+
+test('los despachos sin medición no se atribuyen a otra identidad ni completan identidades excluidas', async () => {
+  const start = { ...measurement, phase: 'started', startedAt: 100,
+    model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null };
+  const stream = { ...measurement, phase: 'streamed', tokens: null, costUSD: null, finish: null };
+  for (const extra of [{ projectID: 'project_other' }, { sessionID: 'session_other' }, { messageID: 'msg_other' },
+    { projectID: null }, { sessionID: null }, { messageID: null }]) {
+    const directory = await capture([
+      event('session.step.started', { status: 'unrecognized', sourceVersion: 2, ...extra }),
+      event('session.step.started', { measurement: start, sourceTime: 110, sourceSequence: 2 }),
+      event('session.step.streamed', { measurement: stream, sourceTime: 150, sourceSequence: 3 }),
+      event('session.step.ended', { measurement, sourceTime: 160, sourceSequence: 4 }),
+    ]);
+    const steps = inspect(directory, '', '--metrics').trim().split('\n').map(JSON.parse)
+      .filter(row => row.type === 'diagnostic.model-step');
+    assert.equal(steps.length, 2);
+    const known = steps.find(row => row.tokens.value !== null);
+    assert.equal(known.startedAt, 100);
+    assert.equal(known.elapsedMs, 60);
+    assert.equal(known.providerBodyMs, 50);
+    assert.equal(known.dispatches.length, 1);
+    const unknown = steps.find(row => row.tokens.value === null);
+    assert.equal(unknown.startedAt, null);
+    assert.equal(unknown.elapsedMs, null);
+    assert.equal(unknown.providerBodyMs, null);
+    assert.equal(unknown.outcome, 'not-observed');
+    assert.equal(unknown.dispatches.length, 1);
+    assert.equal(unknown.dispatches[0].startedAt, null);
+    assert.equal(unknown.model.status, 'unknown');
+    assert.ok(unknown.omissions.includes('dispatch-measurement-not-observed'));
+  }
+});
+
 test('el primer despacho usa evidencia del mismo agregado aunque los diarios se lean al revés', async () => {
   const start = startedAt => ({ ...measurement, phase: 'started', startedAt,
     model: { providerID: 'synthetic', id: 'synthetic' }, tokens: null, costUSD: null, finish: null });

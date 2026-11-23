@@ -193,16 +193,18 @@ function printMetrics(rows, allRows) {
       if (row.retry) step.retries.push({ ...row.retry, tokens: null, costUSD: null,
         scheduledDelayMs: elapsed(row.sourceTime, row.retry.at), actualWaitMs: null, evidence: ref(row) });
       const value = row.measurement;
-      if (value) {
-        if (value.phase === 'started') {
-          const model = metric(value.model, `opencode.event.${row.type}.model`, 'model-step');
-          if (!step.dispatches.length) step.model = model;
+      if (row.type === 'session.step.started') {
+        const model = metric(value?.model ?? null, `opencode.event.${row.type}.model`, 'model-step');
+        if (value) {
+          if (!step.startRows.some(row => row.measurement)) step.model = model;
           else if (JSON.stringify(step.model.value) !== JSON.stringify(model.value)) {
             step.model = metric(null, null, 'model-step'); step.omissions.push('multiple-dispatch-models');
           }
-          step.dispatches.push({ startedAt: value.startedAt, model, tokens: null, costUSD: null, evidence: ref(row) });
-          step.startRows.push(row);
-        }
+        } else step.omissions.push('dispatch-measurement-not-observed');
+        step.dispatches.push({ startedAt: value?.startedAt ?? null, model, tokens: null, costUSD: null, evidence: ref(row) });
+        step.startRows.push(row);
+      }
+      if (value) {
         if (value.phase === 'streamed') step.streamRows.push(row);
         if (['ended', 'failed'].includes(value.phase)) {
           step.endRows.push(row);
@@ -254,17 +256,18 @@ function printMetrics(rows, allRows) {
     // Compare only this public step identity, never filenames or local observation times.
     let first = startRows.reduce((first, row) => sourceBefore(row, first) ? row : first, startRows[0]);
     if (first && !startRows.every(row => row === first || (sourceBefore(first, row)
-      && first.measurement.startedAt <= row.measurement.startedAt))) first = undefined;
-    step.startedAt = first?.measurement.startedAt ?? null;
+      && (!first.measurement || !row.measurement
+        || first.measurement.startedAt <= row.measurement.startedAt)))) first = undefined;
+    step.startedAt = first?.measurement?.startedAt ?? null;
     if (startRows.length && !first) step.omissions.push('dispatch-order-not-established');
     const end = endRows.length === 1 ? endRows[0] : null;
     const stream = streamRows.length === 1 ? streamRows[0] : null;
     step.streamedAt = stream?.sourceTime ?? null;
     step.elapsedMs = first && end && startRows.every(row => sourceBefore(row, end)
-      && row.measurement.startedAt <= end.sourceTime) ? elapsed(step.startedAt, step.endedAt) : null;
+      && (!row.measurement || row.measurement.startedAt <= end.sourceTime)) ? elapsed(step.startedAt, step.endedAt) : null;
     step.providerBodyMs = startRows.length === 1 && stream && sourceBefore(first, stream)
       ? elapsed(step.startedAt, step.streamedAt) : null;
-    if (first && end && step.elapsedMs === null) step.omissions.push('step-duration-order-not-established');
+    if (first && end && step.startedAt !== null && step.elapsedMs === null) step.omissions.push('step-duration-order-not-established');
     if (startRows.length === 1 && stream && step.providerBodyMs === null) step.omissions.push('provider-body-order-not-established');
     if (streamRows.length > 1) step.omissions.push('multiple-step-streams-not-collapsed');
     if (step.dispatches.length > 1) step.omissions.push('multiple-dispatches-body-duration-not-attributable');

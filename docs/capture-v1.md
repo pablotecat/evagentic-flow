@@ -560,7 +560,13 @@ la sesión seleccionada. Emite JSONL de diagnóstico sin alterar la captura:
 
 - `diagnostic.model-step`: modelo, métricas, tiempos, desenlaces y reintentos por
   identidad pública; `dispatches` conserva cada inicio observado y su modelo sin
-  atribuirle consumo/coste por proximidad. El orden de esos arrays es de lectura,
+  atribuirle consumo/coste por proximidad. Incluye también `session.step.started`
+  sin medición reconocida: su tiempo de despacho y modelo quedan desconocidos,
+  con `dispatch-measurement-not-observed`, sin sustituirlos por `sourceTime`.
+  Cada despacho conserva su referencia, aunque el resumen mantenga un modelo
+  observado en otro despacho; eso no acredita el modelo de los desconocidos.
+  No se completan identidades excluidas para asociar esos inicios a otro paso.
+  El orden de esos arrays es de lectura,
   no cronología entre diarios. `results` conserva todos los resultados. Resultados múltiples
   no se colapsan en éxito ni se suman: el resumen queda `ambiguous`.
 - `diagnostic.measurement`: observaciones individuales de compactación o snapshots
@@ -594,12 +600,18 @@ observado al terminal, incluidas esperas de reintento. Los despachos de una mism
 identidad se comparan por secuencia pública dentro de su agregado, también entre
 diarios. Sin un primero comparable o con tiempos contradictorios con ese inicio,
 `startedAt` y duración quedan en `null` con `dispatch-order-not-established`.
+Si el primero comparable carece de medición, su inicio y duración permanecen
+desconocidos con `dispatch-measurement-not-observed`, aunque haya un despacho
+posterior reconocido. Un despacho posterior sin medición no borra el inicio
+conocido ni su intervalo hasta el terminal si la secuencia acredita el orden;
+su tiempo individual sigue en `null`, sin inventarlo ni asignarle consumo.
 Para medir hasta el terminal se exige además que todos los despachos lo precedan
-en ese agregado y que sus tiempos fuente no sean posteriores al fin; si no,
+en ese agregado y que sus tiempos de despacho conocidos no sean posteriores al fin; si no,
 la duración es `null` con `step-duration-order-not-established`.
 No se comparan UUID, `arrival` ni `observedAt` entre activaciones.
 `providerBodyMs` termina en
-`streamed`, antes del asentamiento de herramientas; con varios despachos queda
+`streamed`, antes del asentamiento de herramientas; con varios despachos (también
+los omitidos/no reconocidos) queda
 `null` porque no se expone el enlace causal a un despacho concreto. Con uno exige
 secuencia comparable y tiempos no invertidos; en otro caso declara
 `provider-body-order-not-established`. Varios límites `streamed` no se colapsan
