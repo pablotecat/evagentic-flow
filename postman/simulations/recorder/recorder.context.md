@@ -62,6 +62,10 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 ## Observations
 
 <!-- begin:observations -->
+2026-11-23: regularización de #2–#4 sobre `30b2d40`: suite completa 77/77 y
+typecheck correctos, sin reintentos de pruebas. Los logs locales del único miembro,
+`synthetic-model` (routeKey `model`), muestran tráfico 200/400/429; ninguno quedó
+sin ejercitar en el conjunto. Sin fallo de bootstrap observado; #12 sigue abierta.
 2026-11-23: focales de #8, 7/7; la suite completa terminó 71/72 por el bootstrap
 descrito abajo, sin reintentos. `synthetic-model`, único miembro, sirvió tráfico
 200/400/429 en el conjunto; quedó sin arrancar en el caso de cookies. Las siete
@@ -83,28 +87,6 @@ prefijadas y secretos escapados en JSON completo. `synthetic-model`, único miem
 sirvió 200, 400 y 429 controlados; ningún miembro quedó sin ejercitar en el conjunto.
 Las pruebas utilizaron el paquete instalado, APIs públicas y lector independiente.
 Sin activar el plugin en el consumidor ni tocar el servicio compartido.
-2026-11-22: seis pruebas focales de #5 aprobadas: herramienta local satisfactoria,
-fallo y recuperación, intento sin desenlace tras terminar el proceso aislado,
-pregunta/aprobación controladas, reintento de proveedor y exclusiones de formularios.
-El único miembro, `synthetic-model`, sirvió chat con 200 y los 429 controlados;
-no quedó ningún miembro sin tráfico en el conjunto. El caso de formularios por
-API pública no requirió simulación. Sin consumidor real ni servicio compartido.
-2026-11-22: suite completa de #4, 17 pruebas aprobadas; `synthetic-model` fue el
-único miembro y sirvió chat con 200 y el fallo deliberado con 400. La preparación
-rechazada no despachó modelos; ningún miembro quedó sin tráfico en el conjunto.
-2026-11-22: pruebas focales de #4 y regresiones de fallo aprobadas. El único miembro,
-`synthetic-model`, sirvió POST de chat con 200, incluidas llamadas nativas a
-`subagent`; ninguno quedó sin tráfico. Sin proveedor probabilístico ni consumidor real.
-2026-11-22: suite final, 15 pruebas aprobadas. El único miembro, `synthetic-model`,
-sirvió POST de chat con 200 y el fallo deliberado con 400. Los casos de preparación
-fallida no despacharon POST, intencionadamente; ningún miembro quedó sin ejercitar
-en el conjunto. La carrera confirmó cero despachos de la admisión retenida mediante
-el contador HTTP, no contando respuestas SSE aún abiertas en NDJSON.
-2026-11-21: suite final, 7 pruebas aprobadas. En los tres casos con simulación,
-`synthetic-model` sirvió POST de chat con 200; ningún miembro quedó sin tráfico.
-2026-11-21: pruebas de persistencia y selección de ambos proyectos: el único miembro
-`synthetic-model` recibió POST `/v1/chat/completions` con respuesta 200. Ningún
-miembro quedó sin tráfico; se comprobaron los eventos `request` del log local.
 <!-- end:observations -->
 
 ## What didn't work
