@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import assert from 'node:assert/strict';
+import { startSimulation } from './simulation.mjs';
 
 export const repository = fileURLToPath(new URL('../../', import.meta.url));
 const binary = process.env.OPENCODE_TEST_BIN ?? (process.platform === 'win32'
@@ -208,35 +209,15 @@ export async function fixture(t, options = {}) {
     serverConfig.skills = [join(projects[options.projectIndex ?? 0], '.opencode/skills')];
     serverConfig.instructions = [join(projects[options.projectIndex ?? 0], 'AGENTS.md')];
   }
-  let simulationLog = '';
+  let simulationLog = () => '';
   let simulationURL;
   if (options.simulation) {
     // Cache only CLI bootstrap in a temporary home; every mock still gets a fresh process/state.
     simulationHome ??= mkdtemp(join(temporary, 'recorder-simulation-home-'));
     const home = await simulationHome;
-    const simulation = spawn('postman', ['simulation', 'run',
-      join(repository, 'postman/simulations/recorder/recorder.sim.yaml'),
-      '--port', 'auto', '--output', 'ndjson', '--no-history'],
-    { cwd: repository, env: { ...env, HOME: home, USERPROFILE: home } });
-    let errors = '';
-    simulation.stdout.on('data', chunk => { simulationLog += chunk; });
-    simulation.stderr.on('data', chunk => { errors += chunk; });
-    simulation.on('error', error => { errors += error.message; });
-    t.after(async () => {
-      if (simulation.exitCode === null && simulation.signalCode === null) {
-        const exited = once(simulation, 'exit'); simulation.kill(); await exited;
-      }
-      await writeFile(join(root, 'sim.ndjson'), simulationLog);
-      await writeFile(join(root, 'sim.err'), errors);
-    });
-    const listening = await eventually(() => {
-      if (simulation.exitCode !== null) throw new Error(errors);
-      return simulationLog.split('\n').filter(Boolean).map(line => JSON.parse(line))
-        .find(event => event.event === 'listening' || event.type === 'listening');
-    }, 'synthetic model simulation did not listen', 60000).catch(error => {
-      throw new Error(`${error.message}: ${errors}`);
-    });
-    simulationURL = `http://127.0.0.1:${listening.port}/model`;
+    const simulation = await startSimulation(t, { root, home, env });
+    simulationLog = simulation.log;
+    simulationURL = `http://127.0.0.1:${simulation.port}/model`;
     const baseURL = `${simulationURL}/v1`;
     serverConfig.model = 'synthetic/synthetic';
     serverConfig.providers = { synthetic: { name: 'Synthetic',
@@ -286,7 +267,7 @@ export async function fixture(t, options = {}) {
   }
   return { root, projects, captureDirectory, configFile, api, stop,
     restart: async () => { await stop(); await start(); }, output: () => output,
-    simulationURL, simulationLog: () => simulationLog,
+    simulationURL, simulationLog,
     plugins: async (directory = projects[0]) => (await api(`/api/plugin?location[directory]=${encodeURIComponent(directory)}`)).data };
 }
 

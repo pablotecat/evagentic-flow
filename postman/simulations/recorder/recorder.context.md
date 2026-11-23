@@ -13,8 +13,9 @@ rutas no modeladas con 501 y solicitudes incompatibles con 400.
 ## Execution
 
 `npm test` inicia y detiene esta simulación junto con cada instancia aislada;
-el harness toma el puerto del evento `listening` y conserva `sim.ndjson` en el
-directorio temporal del caso. Ejecución manual:
+el harness toma el puerto del evento `listening` y conserva `sim.ndjson`, `sim.err`,
+`sim.cli.log` y `sim.process.json` en el directorio temporal del caso. Diagnóstico
+y límites en [bootstrap de datasets](../../../docs/postman-bootstrap.md). Ejecución manual:
 `postman simulation run postman/simulations/recorder/recorder.sim.yaml --port auto --output ndjson --no-history`.
 Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 
@@ -26,7 +27,9 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
   puede solicitar también un título, por lo que no se asume un solo POST por
   encargo. (Observado 2026-11-21 en las pruebas de persistencia y selección.)
 - El bootstrap del motor de datasets puede superar 20 s con HOME nuevo. El
-  harness espera hasta 60 s y conserva `sim.err`. (Observado 2026-11-22.)
+  harness permite hasta 60 s mientras siga vivo; una salida terminal se comunica
+  sin agotar ese plazo y conserva el diagnóstico con debug solo en Postman.
+  (Bootstrap observado 2026-11-22; frontera proceso/OS verificada 2026-11-23, #12.)
 - El harness reutiliza un HOME temporal de Postman por archivo de pruebas para no
   reinstalar el motor por caso; cada simulación sigue siendo un proceso nuevo y
   OpenCode conserva almacenamiento separado por caso. No usa el HOME real.
@@ -62,6 +65,11 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 ## Observations
 
 <!-- begin:observations -->
+2026-11-23: #12, suites iniciales 82/82 y 82/82; tras cubrir copia inaccesible del
+log, dos suites finales consecutivas 83/83 y 83/83. Sin reintentos ni fallo natural
+de bootstrap. `synthetic-model`, único miembro, sirvió 200/400/429 en las cuatro;
+ninguno quedó sin tráfico en el conjunto. Seis arranques naturales de
+frío/caliente y aislamiento sirvieron HTTP 200. Esto no demuestra erradicación.
 2026-11-23: regularización de #2–#4 sobre `30b2d40`: suite completa 77/77 y
 typecheck correctos, sin reintentos de pruebas. Los logs locales del único miembro,
 `synthetic-model` (routeKey `model`), muestran tráfico 200/400/429; ninguno quedó
@@ -82,15 +90,15 @@ por archivo, sin reintentos automáticos. `synthetic-model`, único miembro, sir
 chat 200 y fallos controlados 400/429; ninguno quedó sin tráfico en el conjunto.
 El control HTTP confirmó instrucciones de un hook posterior ausentes del punto
 observado por el registrador. No demuestra contexto final universal ni cumplimiento.
-2026-11-22: suite final de #5, 23/23 pruebas aprobadas tras incluir claves sensibles
-prefijadas y secretos escapados en JSON completo. `synthetic-model`, único miembro,
-sirvió 200, 400 y 429 controlados; ningún miembro quedó sin ejercitar en el conjunto.
-Las pruebas utilizaron el paquete instalado, APIs públicas y lector independiente.
-Sin activar el plugin en el consumidor ni tocar el servicio compartido.
 <!-- end:observations -->
 
 ## What didn't work
 
+- 2026-11-23: #12, un handle exclusivo propio sobre el motor extraído produjo
+  salida 1 antes de `listening`, sin tráfico, con `An unexpected error occurred
+  while accessing the dataset`; liberarlo permitió otro arranque explícito con
+  HTTP 200. No es la firma EPERM histórica. Debug no identificó syscall/archivo;
+  falta una captura OS de reproducción natural. Evidencia y límites en el documento enlazado.
 - 2026-11-23: `npm test` falló en `Cookie y Set-Cookie completos...` antes de
   `listening`: `Permission denied while accessing local dataset files` al preparar
   soporte de datasets de Postman. El caso no llegó a ejecutar el registrador;
