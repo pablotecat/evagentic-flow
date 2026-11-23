@@ -65,6 +65,20 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 ## Observations
 
 <!-- begin:observations -->
+2026-11-23: #9, suite completa final **86/86**, 579078.7735 ms, después de corregir
+el alcance del presupuesto 429 y exigir exactamente tres respuestas en la prueba
+pública de métricas. Se conservan los 84 casos previos y se añaden consulta de
+cobertura y comprobación integrada; sin skips ni reintentos automáticos. El único
+miembro `synthetic-model` sirvió 200/400/429 en el conjunto; ninguno quedó sin
+tráfico. No apareció EPERM en esta ejecución y #12 permanece abierta.
+2026-11-23: #9, `npm run verify:pilot` pasó con dos proyectos en la misma
+instancia temporal y cambio exclusivo de configuración local del registrador.
+`synthetic-model`, único miembro (routeKey `model`), sirvió POST 200/429; ninguno
+quedó sin tráfico. El contador de 429 pertenece al proyecto del contexto V2:
+el contador global previo impedía ejercitar el reintento en el segundo proyecto.
+La fase final verificó aviso, parada confirmada de trabajo activo, resultado no
+confirmado de sesión inactiva y continuidad del proyecto excluido. Sin consumidor
+ni servidor real, sin reintentos automáticos de prueba; no cierra #12.
 2026-11-23: #12, suites iniciales 82/82 y 82/82; tras cubrir copia inaccesible del
 log, dos suites finales consecutivas 83/83 y 83/83. Sin reintentos ni fallo natural
 de bootstrap. `synthetic-model`, único miembro, sirvió 200/400/429 en las cuatro;
@@ -94,6 +108,16 @@ observado por el registrador. No demuestra contexto final universal ni cumplimie
 
 ## What didn't work
 
+- 2026-11-23: primera suite completa de #9, 85/86. El contador de 429 por cuerpo
+  completo reiniciaba el presupuesto al continuar herramientas y agotó el timeout
+  público de `los reintentos y fallos recuperados...` (`test/metrics.test.mjs`).
+  Una primera corrección por contexto completo pasó la prueba focal pero el nuevo
+  conteo HTTP explícito aún encontró 5 respuestas 429, no 3: el contexto cambia.
+  La sonda temporal mostró un presupuesto sin entorno (petición auxiliar) y otro
+  del proyecto; se retiró la sonda y se limita la inyección al contexto primario.
+  Se conserva el presupuesto por directorio del entorno V2 para permitir
+  otro proyecto sin volver a inyectar fallos en cada continuación. No fue EPERM
+  ni fallo de bootstrap; no se ha reintentado automáticamente el caso.
 - 2026-11-23: #12, un handle exclusivo propio sobre el motor extraído produjo
   salida 1 antes de `listening`, sin tráfico, con `An unexpected error occurred
   while accessing the dataset`; liberarlo permitió otro arranque explícito con

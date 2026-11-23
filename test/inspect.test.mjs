@@ -25,6 +25,36 @@ const inspect = (directory, ...args) => execFileSync(process.execPath,
   [fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url)), directory, ...args],
   { encoding: 'utf8', stdio: 'pipe' });
 
+test('la consulta de cobertura separa capacidades declaradas, observaciones y huecos sin aprobar el piloto', async () => {
+  const directory = await capture([
+    { ...common, type: 'recorder.ready', runtimeVersion: '2.1.2', sdkVersion: '2.1.2',
+      coverage: { replay: false, content: ['completed-assistant-text'], excluded: ['reasoning'],
+        executionID: 'not-exposed', ordering: 'arrival-is-not-causality' } },
+    observation('context-hook', 'opencode.session.hook.context', context,
+      { omissions: ['later-hooks-and-protocol-transforms-not-observed'] }),
+    observation('context-hook', 'opencode.session.hook.context', context, { sessionID: 'session_other' }),
+    { ...common, type: 'recorder.gap', reason: 'unrecognized-session-envelope' },
+  ]);
+  const report = JSON.parse(inspect(directory, 'session_root', '--coverage'));
+  assert.equal(report.type, 'diagnostic.capture-coverage');
+  assert.equal(report.readiness, 'not-assessed');
+  assert.equal(report.scope, 'session-tree');
+  assert.deepEqual(report.sessions, ['session_root']);
+  assert.deepEqual(report.declarations[0].coverage.content, ['completed-assistant-text']);
+  assert.deepEqual(report.observed, [{ type: 'recorder.observation', source: 'opencode.session.hook.context',
+    stage: 'context-hook', status: 'captured', count: 1 }]);
+  assert.deepEqual(report.omissions, ['later-hooks-and-protocol-transforms-not-observed']);
+  assert.equal(report.diagnostics[0].type, 'recorder.gap');
+  assert.equal(report.horizons[0].arrival, 4);
+  assert.ok(!JSON.stringify(report).includes('session_other'));
+  assert.equal(JSON.parse(inspect(directory, '--coverage')).scope, 'capture');
+  const empty = await mkdtemp(join(directory, 'empty-'));
+  const absent = JSON.parse(inspect(empty, '--coverage'));
+  assert.deepEqual(absent.declarations, []);
+  assert.deepEqual(absent.observed, []);
+  assert.equal(absent.readiness, 'not-assessed');
+});
+
 test('seleccionar sesión o árbol no atribuye observaciones ni inventarios con identidad excluida', async t => {
   const rows = [
     { ...common, type: 'recorder.ready', runtimeVersion: '2.1.2', sdkVersion: '2.1.2',

@@ -91,7 +91,8 @@ test('los reintentos y fallos recuperados retienen evidencia y consumo desconoci
     assert.equal(report.filter(row => row.type === 'diagnostic.execution-interval').length, 2);
     assert.ok(!JSON.stringify(report).includes('synthetic-secret-42'));
     const traffic = instance.simulationLog().split('\n').filter(Boolean).map(JSON.parse);
-    assert.ok(traffic.some(row => row.event === 'request' && row.statusCode === 429));
+    assert.equal(traffic.filter(row => row.event === 'request' && row.statusCode === 429).length, 3,
+      'tool continuations must not reset the synthetic retry budget');
     assert.ok(traffic.some(row => row.event === 'request' && row.statusCode === 200));
   });
 

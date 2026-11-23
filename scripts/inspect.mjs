@@ -408,13 +408,18 @@ function validRecord(row) {
       : ['omitted', 'unrecognized'].includes(row.status) && row.content === null);
 }
 
-const [directory, sessionID, mode] = process.argv.slice(2);
+const [directory, selection, option] = process.argv.slice(2);
+const sessionID = selection?.startsWith('--') ? undefined : selection;
+const mode = selection?.startsWith('--') ? selection : option;
 if (!directory) {
-  console.error('Usage: node scripts/inspect.mjs <capture-directory> [sessionID [--tree|--tools|--metrics|--deliverables]]');
+  console.error('Usage: node scripts/inspect.mjs <capture-directory> [sessionID] [--tree|--tools|--metrics|--deliverables|--coverage]');
   process.exitCode = 1;
 } else {
   try {
-    if (mode && !['--tree', '--tools', '--metrics', '--deliverables'].includes(mode)) throw new Error('Unknown inspection mode');
+    if (process.argv.length > 5 || (selection?.startsWith('--') && option)
+      || (mode && !['--tree', '--tools', '--metrics', '--deliverables', '--coverage'].includes(mode))) {
+      throw new Error('Unknown inspection mode');
+    }
     // ponytail: tree/attempt inspection buffers the capture; add an index if it outgrows memory.
     const rows = [];
     for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -437,7 +442,7 @@ if (!directory) {
       }
     }
     const selected = new Set([sessionID]);
-    if (mode === '--tree' || mode === '--metrics') {
+    if (mode === '--tree' || mode === '--metrics' || mode === '--coverage') {
       let size;
       do {
         size = selected.size;
@@ -448,9 +453,28 @@ if (!directory) {
       } while (selected.size !== size);
     }
     for (const row of rows) {
-      if (mode === '--tools' || mode === '--metrics') continue;
+      if (mode === '--tools' || mode === '--metrics' || mode === '--coverage') continue;
       if (mode === '--deliverables' && row.stage !== 'deliverable') continue;
       if (!sessionID || selected.has(row.sessionID) || globalRecord(row)) console.log(JSON.stringify(row));
+    }
+    if (mode === '--coverage') {
+      const scoped = rows.filter(row => !sessionID || selected.has(row.sessionID) || globalRecord(row));
+      const observed = new Map();
+      for (const row of scoped.filter(row => !globalRecord(row))) {
+        const shape = { type: row.type, source: row.source ?? null, stage: row.stage ?? null, status: row.status ?? null };
+        const key = JSON.stringify(shape);
+        if (!observed.has(key)) observed.set(key, { ...shape, count: 0 });
+        observed.get(key).count++;
+      }
+      console.log(JSON.stringify({ diagnosticVersion: 1, type: 'diagnostic.capture-coverage',
+        readiness: 'not-assessed', scope: sessionID ? 'session-tree' : 'capture', sessionID: sessionID ?? null,
+        sessions: [...new Set(scoped.map(row => row.sessionID).filter(Boolean))].sort(),
+        declarations: scoped.filter(row => row.type === 'recorder.ready'),
+        observed: [...observed.values()], omissions: [...new Set(scoped.flatMap(row => row.omissions ?? []))].sort(),
+        diagnostics: scoped.filter(row => ['recorder.failed', 'recorder.gap'].includes(row.type)),
+        horizons: [...new Map(rows.map(row => [row.captureID,
+          { captureID: row.captureID, arrival: row.arrival, observedAt: row.observedAt }])).values()],
+      }));
     }
     if (mode === '--metrics') printMetrics(rows.filter(row => !sessionID || selected.has(row.sessionID) || globalRecord(row)), rows);
     if (mode === '--tools' || mode === '--metrics') {

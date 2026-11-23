@@ -22,7 +22,7 @@ async function packagePlugin() {
     [npm, 'pack', '--json', '--pack-destination', root], { cwd: repository, encoding: 'utf8' }));
   execFileSync(process.execPath, [npm, 'install', '--offline', '--ignore-scripts', '--omit=dev',
     '--no-audit', '--no-fund', '--prefix', root, join(root, packed[0].filename)], { encoding: 'utf8' });
-  return join(root, 'node_modules/@evagentic/recorder');
+  return { directory: join(root, 'node_modules/@evagentic/recorder'), manifest: packed[0] };
 }
 
 export async function eventually(check, message, timeout = 20000) {
@@ -37,7 +37,8 @@ export async function eventually(check, message, timeout = 20000) {
 
 export async function fixture(t, options = {}) {
   installed ??= packagePlugin();
-  const plugin = await installed;
+  const packaged = await installed;
+  const plugin = packaged.directory;
   const root = await mkdtemp(join(temporary, 'recorder-case-'));
   const projects = [join(root, 'project-a'), join(root, 'project-b')];
   for (const [index, directory] of projects.entries()) {
@@ -74,7 +75,7 @@ export async function fixture(t, options = {}) {
   });
   await mkdir(join(root, 'config/opencode'), { recursive: true });
   await mkdir(join(root, 'config/opencode/plugins'));
-  await writeFile(join(root, 'config/opencode/plugins/recorder.ts'),
+  if (options.loadRecorder !== false) await writeFile(join(root, 'config/opencode/plugins/recorder.ts'),
     `export { default } from ${JSON.stringify(pathToFileURL(join(plugin, 'dist/index.js')).href)};\n`);
   if (options.syntheticDefinitions) {
     await writeFile(join(root, 'outside-definition.md'), 'synthetic-unrelated-file-content\n');
@@ -266,6 +267,7 @@ export async function fixture(t, options = {}) {
     return text ? JSON.parse(text) : undefined;
   }
   return { root, projects, captureDirectory, configFile, api, stop,
+    packageDirectory: plugin, packageManifest: packaged.manifest, url: () => address,
     restart: async () => { await stop(); await start(); }, output: () => output,
     simulationURL, simulationLog,
     plugins: async (directory = projects[0]) => (await api(`/api/plugin?location[directory]=${encodeURIComponent(directory)}`)).data };

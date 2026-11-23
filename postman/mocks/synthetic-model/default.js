@@ -1,7 +1,7 @@
 // Synthetic OpenAI-compatible chat protocol; no real provider, credentials, or business data.
 const http = require('node:http');
 let heldAdmissions = 0;
-let retryServed = 0;
+const retriesServed = new Map();
 let laterHookRequests = 0;
 http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/control/context-provenance') {
@@ -28,8 +28,12 @@ http.createServer(async (req, res) => {
       + 'sEt-CoOkIe: id="synthetic-set-cookie"; Path=/synthetic-cookie-path; HttpOnly, next=synthetic-next-cookie\r\n'
       + 'Cookie: fold=synthetic-fold-first;\r\n auth=synthetic-fold-second\r\nWork after cookies.' : null;
   if (input.includes('SYNTHETIC_HELD_ADMISSION')) heldAdmissions++;
-  if (body.stream && input.includes('SYNTHETIC_PROVIDER_RETRY') && retryServed < 3) {
-    retryServed++;
+  // One budget per primary V2 project context; auxiliary title requests lack that environment.
+  const system = body.messages.filter(message => message.role === 'system').map(message => message.content).join('\n');
+  const retryScope = system.match(/Working directory: ([^\r\n]+)/)?.[1];
+  const retryServed = retriesServed.get(retryScope) ?? 0;
+  if (body.stream && retryScope && input.includes('SYNTHETIC_PROVIDER_RETRY') && retryServed < 3) {
+    retriesServed.set(retryScope, retryServed + 1);
     res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0' });
     return res.end(JSON.stringify({ error: { message: 'Synthetic retry synthetic-secret-42 Bearer synthetic-retry-token', type: 'rate_limit' } }));
   }

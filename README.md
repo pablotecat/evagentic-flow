@@ -15,8 +15,9 @@ agentes, permisos de las sesiones observadas, delegación ni otros plugins.
 
 **No se ha instalado ni activado en el proyecto consumidor.** La parada ante
 fallos se comprueba también con delegación anidada, ramas concurrentes y
-descendientes nuevos; la cobertura del piloto
-siguen pendientes. No utilizar este corte como
+descendientes nuevos; la preparación integrada aislada se repite con
+`npm run verify:pilot` ([procedimiento](docs/pilot-verification.md)). La activación
+y validación funcional del piloto real siguen pendientes. No utilizar este corte como
 autorización para el piloto.
 
 ## Desarrollo y pruebas
@@ -27,6 +28,7 @@ Requisitos comprobados: Node 26, npm, Git, OpenCode 2.1.2 y Postman CLI 1.83.1
 ```sh
 npm ci
 npm run typecheck
+npm run verify:pilot
 npm test
 ```
 
@@ -100,12 +102,18 @@ node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tree
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tools
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --metrics
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --deliverables
+node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --coverage
 ```
 
 También basta un lector de JSON por línea. El lector incluido no importa el
 plugin ni requiere OpenCode, navegador o exportación. No ignora líneas inválidas:
 termina con error indicando el archivo y la línea. No ordena eventos entre
 diarios como si hubiera un orden causal global.
+
+`--coverage` distingue capacidades/versiones declaradas, tipos y etapas observados,
+omisiones, diagnósticos y horizontes de la sesión y sus descendientes. Sin sesión
+consulta la captura completa. No es una evaluación ni una aprobación del piloto:
+devuelve `readiness: "not-assessed"` incluso si no hay diagnósticos de fallo.
 
 `--tree` incluye los descendientes relacionados por evidencia, sin exigir
 activación por flujo. Las filas conservan padre, agente, llamada y sesión hija
