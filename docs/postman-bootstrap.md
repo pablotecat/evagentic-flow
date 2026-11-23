@@ -10,31 +10,68 @@ histórico; antivirus y ACL no son causas demostradas.
 El arnés conserva el HOME temporal por archivo y un proceso nuevo por caso. Su
 arranque en `test/support/simulation.mjs` activa `POSTMAN_CLI_DEBUG=1` únicamente en el entorno del proceso
 Postman, sin mutar el del arnés ni el de OpenCode. Distingue error de spawn,
-terminación del proceso y timeout de un proceso vivo. Espera `close` para recoger
-también el final de stderr; no introduce reintentos ni modifica el registrador.
+terminación del proceso y timeout de un proceso vivo. Reconoce `exit` sin esperar
+`close`: un descendiente puede conservar los pipes después de la salida del padre.
+El drenaje espera como máximo 1 s; después cierra únicamente los pipes locales y
+desreferencia el handle del proceso si sigue abierto. No introduce reintentos ni
+modifica el registrador.
 
 ## Evidencia local
 
 Cada caso conserva, fuera de Git, en su directorio temporal:
 
-- `sim.ndjson` y `sim.err`: stdout y stderr completos.
+- `sim.ndjson` y `sim.err`: stdout y stderr observados hasta terminar el drenaje.
+  `outputComplete` solo es `true` si ambos streams alcanzaron EOF; si se agotó el
+  plazo, pueden faltar datos y no se presenta la captura como completa.
 - `sim.cli.log`: copia de `HOME/.postman/logs/postman-cli.log`, antes de consultar
   la versión o reutilizar ese HOME en otro caso. Puede estar vacío; si no existe,
   `cliLog` queda en `null`, sin inventar evidencia. Si falla la copia, conserva
   `cliLogError` sin ocultar el fallo de arranque ni impedir el resto del diagnóstico.
 - `sim.process.json`: comando, argumentos, PID, HOME, versión de CLI, Node y SO,
-  fase, error de arranque y código/señal terminal. Si la consulta `--version`
-  falla, conserva `versionError`. El error de arranque señala este directorio.
+  fase, error de arranque y código/señal terminal. `processExited` indica si se
+  observó `exit` del proceso principal; `descendantTermination: "not-confirmed"`
+  declara que no se comprueba ni garantiza la parada de descendientes. Si la
+  consulta `--version` falla, conserva `versionError`. El error de arranque señala
+  este directorio.
 
-El cierre por timeout termina el proceso propio y conserva su diagnóstico; una
-salida terminal no sigue esperando los 60 s de arranque. La consulta de versión
-tiene su propio límite de 10 s y no vuelve a iniciar la simulación.
+El cierre por timeout solicita terminar solo el proceso propio y conserva su
+diagnóstico; si no se observa la salida dentro del plazo de cleanup, no declara
+su terminación. Una salida terminal no sigue esperando los 60 s de arranque. La
+consulta de versión tiene su propio límite de 10 s y no vuelve a iniciar la
+simulación. Estos plazos no acotan la latencia del almacenamiento de evidencias.
 
 No compartir estos archivos en bruto: pueden contener rutas locales y tráfico.
 Se mantienen las variables de aislamiento existentes, sin cambios de ACL,
 antivirus, cachés compartidas, instalación global o configuración del consumidor.
 
-## Comprobaciones del 2026-11-23
+## Regresión de pipes heredados · #17
+
+2026-11-23: un proceso Node propio sale con código 1 después de que su descendiente
+separado confirme que está vivo y herede stdout/stderr. El descendiente permanece
+vivo al comprobar el diagnóstico; el test termina únicamente ese PID propio en
+su cleanup. Un watchdog de 7 s libera el caso si reaparece el bloqueo antiguo.
+
+| Comprobación | Resultado |
+| --- | --- |
+| Regresión antes de la corrección | 0/1: timeout incorrecto, 7,053 s hasta liberar el descendiente |
+| Focales de proceso, primera pasada tras corregir | 7/7, 2,045 s |
+| Focales con aserciones de EOF y salida observada | 7/7, 2,063 s |
+| Persistencia con plugin real y HTTP local | 1/1, 38,892 s |
+| `npm run typecheck`, tres ejecuciones | Correcto en las tres |
+| `npm test`, una sola suite completa en foreground | 84/84, 560,806 s; sin fallos, cancelaciones ni omisiones |
+
+La regresión corregida devolvió salida 1 en 1,171 s en la última pasada focal y
+1,180 s dentro de la suite completa, con `outputComplete: false` y sin declarar
+detenido al descendiente. Los otros casos mantienen ENOENT, timeout real,
+terminación por OS, NDJSON fragmentado y log inaccesible. No hubo reintentos de
+arranque ni de tests; el rojo anterior es un resultado conservado, no una suite
+fallida ocultada. La suite emitió los avisos ya existentes de dependencias
+obsoletas y conversión LF/CRLF.
+
+Esta regresión sintética no prueba que Postman produzca el escenario ni resuelve
+el EPERM histórico de #12. La revisión independiente queda pendiente.
+
+## Comprobaciones previas del 2026-11-23 · `0cc138c`
 
 Postman CLI **1.83.1**, Node del arnés **26.13.1**, Windows **10.0.26200**;
 motor observado en el HOME propio: **0.0.1-beta.64**.

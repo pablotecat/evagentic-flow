@@ -14,15 +14,23 @@ export async function startSimulation(t, { root, home, env, command = 'postman',
   const childEnv = { ...env, HOME: home, USERPROFILE: home, POSTMAN_CLI_DEBUG: '1' };
   const started = Date.now();
   const child = spawn(command, args, { cwd: repository, env: childEnv });
-  let output = '', errors = '', spawnError, startupError, closed = false, listening, cleanup;
+  let output = '', errors = '', spawnError, startupError, exited = false, closed = false, listening, cleanup;
   child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; });
   child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk; });
   child.on('error', error => { spawnError = error; errors += error.message; });
-  // close, unlike exit, guarantees that the trailing stderr has been drained.
+  child.once('exit', () => { exited = true; });
+  // A descendant can keep these pipes open after the main process exits.
   const drained = new Promise(resolve => child.once('close', () => { closed = true; resolve(); }));
   const stop = () => cleanup ??= (async () => {
-    if (!closed) child.kill();
-    await drained;
+    if (!exited && !spawnError) child.kill();
+    let drainTimer;
+    await Promise.race([drained, new Promise(resolve => { drainTimer = setTimeout(resolve, 1000); })]);
+    clearTimeout(drainTimer);
+    const outputComplete = child.stdout.readableEnded && child.stderr.readableEnded;
+    if (!closed) {
+      for (const pipe of child.stdio) pipe?.destroy();
+      child.unref();
+    }
     await writeFile(join(root, 'sim.ndjson'), output);
     await writeFile(join(root, 'sim.err'), errors);
     let cliLog = 'sim.cli.log', cliLogError;
@@ -37,7 +45,8 @@ export async function startSimulation(t, { root, home, env, command = 'postman',
       nodeVersion: process.version, platform: process.platform, osRelease: release(), startupError,
       phase: listening ? 'listening' : 'before-listening',
       started: new Date(started).toISOString(), elapsedMs: Date.now() - started,
-      exitCode: child.exitCode, signal: child.signalCode,
+      exitCode: child.exitCode, signal: child.signalCode, processExited: exited,
+      outputComplete, descendantTermination: 'not-confirmed',
       spawnError: spawnError && { code: spawnError.code, message: spawnError.message }, cliLog, cliLogError,
     }, null, 2));
   })();
@@ -45,7 +54,7 @@ export async function startSimulation(t, { root, home, env, command = 'postman',
   try {
     while (true) {
       if (spawnError) throw new Error(`could not spawn simulation: ${spawnError.message}`);
-      if (closed) throw new Error(`simulation exited before listening (code=${child.exitCode}, signal=${child.signalCode})`);
+      if (exited) throw new Error(`simulation exited before listening (code=${child.exitCode}, signal=${child.signalCode})`);
       // Never parse a partial NDJSON line delivered in a separate pipe chunk.
       listening = output.split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line))
         .find(event => event.event === 'listening' || event.type === 'listening');
