@@ -262,8 +262,9 @@ conservan en `tool`:
 | `retryOf`, `operationID` | `null`: este contrato no expone esos enlaces para herramientas. No se agrupan llamadas por nombre, argumentos ni proximidad. |
 | `consumption` | `null`: desconocido, no cero. Una llamada no acredita una petición HTTP ni visibilidad de sus servicios internos. |
 
-Las partes `file` no conservan URI, MIME, nombre ni bytes; se señala
-`tool-file-content-not-captured`. Una forma o versión no admitida queda sin `tool`,
+La proyección `tool` de las partes `file` no conserva URI, MIME, nombre ni bytes;
+se señala `tool-file-content-not-captured`. #8 conserva por separado únicamente
+las referencias y contenidos autorizados admitidos. Una forma o versión no admitida queda sin `tool`,
 con `unrecognized-tool-format`. Los deltas y progreso efímero quedan omitidos;
 `native` y metadata arbitraria tampoco se conservan. Un error registrado de una
 herramienta no activa la política de fallo del registrador.
@@ -624,6 +625,97 @@ concurrencia ni se resta una espera compartida para inventar duración activa.
 Los relojes pueden variar y no existe un orden causal global entre diarios.
 La suscripción sin replay tampoco demuestra ausencia de pérdidas no señaladas.
 
+## Entregables autorizados (#8)
+
+Reutilizan `recorder.observation` v1, su filtrado y sus hashes: `stage: deliverable`.
+No hay almacén adicional, índices mutables ni publicación. `inspect.mjs
+<directorio> <sesión> --deliverables` recupera exclusivamente estos snapshots;
+la consulta normal y `--tree` también los incluyen, con el mismo aislamiento de
+sesiones. No requieren el proyecto original ni un servidor en marcha.
+
+La selección automática parte de **referencias estructuradas explícitas**:
+
+| `source` | Evidencia y adquisición |
+| --- | --- |
+| `opencode.session.inbox.files` | Adjuntos de `session.inbox.enqueued` v1 de usuario: bytes base64 resueltos que expone el evento, no una lectura posterior. Conserva mensaje/evento; papel `input`. |
+| `opencode.session.tool.content` | Partes `file` de un resultado de herramienta reconocido v2 (incluido progreso terminal de un fallo). Solo URI `file:` local del proyecto; lee después. Conserva mensaje, evento y llamada públicos; papel `output` en esa frontera, no prueba de que la herramienta creara el archivo. |
+| `opencode.tool.hook.execute.after` | Solo herramientas vinculadas explícitamente en `deliverableTools`, tras resultado completado no marcado como error. Usa su argumento de ruta, no el texto del resultado ni metadata arbitraria. Lee después; conserva sesión, mensaje y llamada del hook, con `eventID: null`. |
+
+`deliverableTools` es un array opcional de objetos exactamente `{name,
+pathArgument, role}` en la configuración **local no versionada** v1. No se
+permiten nombres duplicados. `name` es el nombre efectivo, `pathArgument` una
+clave directa del objeto de argumentos y `role` es `input`, `intermediate` u
+`output`, según el contrato de herramienta que autoriza el operador. Rutas
+relativas se resuelven contra el proyecto seleccionado, no contra el directorio
+actual de un shell. No hay valores predeterminados ni extracción por heurística:
+autorizar el proyecto no atribuye semántica de archivo a cualquier clave `path`.
+El ejemplo sintético declara `read.path` como entrada y `write.path` como salida;
+una sustitución de esas herramientas exige revisar ese contrato local.
+
+El `value` tiene exactamente:
+
+- `path`: referencia relativa al proyecto o `null` si no se conoce/no se admite.
+  No se guardan URIs externas, sus credenciales ni nombres arbitrarios de adjuntos.
+- `content`: texto UTF-8 autorizado filtrado, o `null` con motivo explícito.
+  JSON válido se decodifica y filtra estructuralmente antes de serializarlo
+  (`deliverable-json-normalized`), incluidos secretos escapados y claves sensibles.
+- `acquisition`: `runtime-content`, `post-event-file-read` (lectura posterior
+  al evento/hook) o `not-acquired`. No se presenta una lectura como bytes del runtime.
+- `role` y `roleSource`: papel observado en la frontera pública con
+  `public-file-boundary`, o declarado en el contrato local con
+  `configured-tool-contract`. No se supone que toda salida sea final ni que toda
+  lectura fuese la entrada original del flujo. `finality` permanece `null`.
+- `callID`: llamada pública cuando se expone; `null` en adjuntos admitidos.
+- `sourceTime` y `sourceTimeBasis`: `runtime-event-created` para el reloj del
+  evento, o `local-hook-clock` para el instante local del hook. La lectura termina
+  en `observationTime`, distinto de la escritura `observedAt`.
+
+El sobre conserva proyecto, sesión, mensaje y evento públicos disponibles.
+`executionID` sigue en `null`: no se enlaza al último inicio por proximidad.
+Los hashes verifican la **proyección filtrada conservada**, incluidos contenido,
+procedencia y relaciones, no los bytes secretos originales ni una firma. El
+lector valida además la forma, el papel y la adquisición compatibles con cada
+fuente. Un hash de una proyección con `content: null` no inventa versión de archivo.
+Un discriminador/claves destruidos por el filtrado omiten toda esa proyección,
+como en #6, sin invalidar las demás observaciones.
+
+Cada observación se añade al diario: otra lectura o cambio no reemplaza las
+anteriores. `file-read-is-not-runtime-version` advierte que una lectura posterior
+no acredita qué bytes utilizó/produjo la acción anterior. Si una revisión nunca
+fue observada, no se reconstruye desde el archivo actual ni desde Git.
+
+La adquisición valida límites léxicos y `realpath` dentro del proyecto, también
+para adjuntos con fuente URI. Los archivos leídos deben ser regulares; comprueba
+la identidad al abrir y cambios observables durante la lectura, con omisión si
+cambian. No ofrece aislamiento frente a un sistema de archivos hostil. Se limita
+a **1 MiB** por contenido, UTF-8 válido sin controles binarios; para adjuntos y
+resultados `file` se exige MIME textual o `application/json`. Inaccesibles,
+referencias externas/symlinks de escape, no regulares, formatos no admitidos,
+exceso de tamaño y cambios durante lectura dejan `content: null`,
+`acquisition: not-acquired` y un código `deliverable-*` de omisión. No activan
+la política de avería del registrador; un fallo de persistencia sí la activa.
+
+No se interpretan rutas en prosa, shell, código o parches; tampoco se recorren
+directorios, se siguen watchers generales, se leen rutas no vinculadas, se
+descargan URIs remotas ni se decodifican URIs `data:` de herramientas. Estos
+límites figuran en `recorder.ready.coverage.excluded`; los argumentos/resultados
+textuales de #5 siguen disponibles con su propio filtrado. No son cobertura
+universal de formatos ni una autorización para copiar el proyecto.
+
+Las pruebas del paquete completo usan únicamente instancias aisladas y archivos
+sintéticos: producción/consulta nativas, versiones de adjuntos, consulta tras
+cambiar originales, integridad/forma del lector, exclusión de archivo ajeno y
+secretos, symlink de escape y límites de formato/tamaño. No autorizan el piloto.
+
+Validación de #8 (2026-11-23): `npm run typecheck` correcto y
+`node --test test/deliverables.test.mjs` **7/7**. `npm test`, ejecutado completo
+en foreground sin retries, terminó **71/72**: el caso previo de cookies no pudo
+arrancar Postman (`Permission denied while accessing local dataset files`),
+antes de `listening`. Las siete pruebas nuevas pasaron también en esa ejecución.
+Se mantiene el bloqueo de validación global y el seguimiento de infraestructura
+[#12](https://github.com/pablotecat/evagentic-flow/issues/12); no se declara
+suite completa aprobada ni ese problema resuelto.
+
 ## Alcance y cobertura real
 
 La instancia del plugin solo escribe si su ubicación coincide con el directorio
@@ -636,7 +728,7 @@ falla visiblemente en vez de atribuirle contenido por inferencia.
 El stream es **en vivo**: no se recupera lo anterior al arranque y puede faltar
 `session.created` cuando la carga del plugin se difiere hasta el primer prompt.
 No se capturan eventos globales, texto de deltas, razonamiento, contenido no admitido de herramientas,
-adjuntos ni entregables. Instrucciones, definiciones y skills solo tienen la
+adjuntos ni entregables fuera de la selección explícita de #8. Instrucciones, definiciones y skills solo tienen la
 cobertura explícita de #6, no una copia universal del entorno ni contexto final.
 Si una respuesta se interrumpe antes del bloque final, no se recupera su texto
 parcial. Las pruebas sintéticas ejercitan subejecuciones anidadas, llamadas

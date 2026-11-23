@@ -122,6 +122,21 @@ function validProjection({ stage, source, value }) {
           && nullableString(value.description) && nullableString(value.system);
     case 'deployed-file':
       return exactKeys(value, ['path', 'content']) && nullableString(value.path) && nullableString(value.content);
+    case 'deliverable':
+      return exactKeys(value, ['path', 'content', 'acquisition', 'role', 'roleSource', 'sourceTimeBasis', 'finality', 'callID', 'sourceTime'])
+        && nullableString(value.path) && nullableString(value.content) && identifier(value.callID)
+        && (value.path === null || (value.path.length > 0 && !/^(?:[A-Za-z]:|[\\/])/.test(value.path)
+          && !value.path.split(/[\\/]/).includes('..')))
+        && nonnegative(value.sourceTime) && value.finality === null
+        && ['input', 'intermediate', 'output'].includes(value.role)
+        && (source === 'opencode.session.inbox.files' ? value.role === 'input' && value.callID === null
+          && value.acquisition !== 'post-event-file-read'
+          : source === 'opencode.session.tool.content' ? value.role === 'output' && value.acquisition !== 'runtime-content'
+            : value.acquisition !== 'runtime-content')
+        && value.roleSource === (source === 'opencode.tool.hook.execute.after' ? 'configured-tool-contract' : 'public-file-boundary')
+        && value.sourceTimeBasis === (source === 'opencode.tool.hook.execute.after' ? 'local-hook-clock' : 'runtime-event-created')
+        && (value.content === null ? value.acquisition === 'not-acquired'
+          : ['runtime-content', 'post-event-file-read'].includes(value.acquisition));
     case 'context-hook':
       return validContext(source, value);
     case 'environment':
@@ -342,6 +357,7 @@ function validRecord(row) {
       'runtime-definition': ['opencode.skill.list', 'opencode.agent.get'],
       'context-hook': ['context', 'compaction', 'generate', 'title'].map(name => `opencode.session.hook.${name}`),
       environment: ['opencode.plugin.list'], 'admitted-skill': ['opencode.session.inbox.skills'],
+      deliverable: ['opencode.session.inbox.files', 'opencode.session.tool.content', 'opencode.tool.hook.execute.after'],
     };
     return exactKeys(row, [...common, 'observationVersion', 'stage', 'source', 'identity', 'observationTime',
       'requestObservationID', 'projectID', 'sessionID', 'executionID', 'messageID', 'eventID', 'value', 'sha256',
@@ -394,11 +410,11 @@ function validRecord(row) {
 
 const [directory, sessionID, mode] = process.argv.slice(2);
 if (!directory) {
-  console.error('Usage: node scripts/inspect.mjs <capture-directory> [sessionID [--tree|--tools|--metrics]]');
+  console.error('Usage: node scripts/inspect.mjs <capture-directory> [sessionID [--tree|--tools|--metrics|--deliverables]]');
   process.exitCode = 1;
 } else {
   try {
-    if (mode && !['--tree', '--tools', '--metrics'].includes(mode)) throw new Error('Unknown inspection mode');
+    if (mode && !['--tree', '--tools', '--metrics', '--deliverables'].includes(mode)) throw new Error('Unknown inspection mode');
     // ponytail: tree/attempt inspection buffers the capture; add an index if it outgrows memory.
     const rows = [];
     for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -433,6 +449,7 @@ if (!directory) {
     }
     for (const row of rows) {
       if (mode === '--tools' || mode === '--metrics') continue;
+      if (mode === '--deliverables' && row.stage !== 'deliverable') continue;
       if (!sessionID || selected.has(row.sessionID) || globalRecord(row)) console.log(JSON.stringify(row));
     }
     if (mode === '--metrics') printMetrics(rows.filter(row => !sessionID || selected.has(row.sessionID) || globalRecord(row)), rows);

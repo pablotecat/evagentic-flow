@@ -2,5 +2,9 @@
   "version": 1,
   "projectDirectory": "C:/synthetic/project-a",
   "captureDirectory": "C:/synthetic/captures",
-  "secrets": ["synthetic-secret-42"]
+  "secrets": ["synthetic-secret-42"],
+  "deliverableTools": [
+    { "name": "read", "pathArgument": "path", "role": "input" },
+    { "name": "write", "pathArgument": "path", "role": "output" }
+  ]
 }

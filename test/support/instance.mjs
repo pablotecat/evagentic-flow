@@ -133,6 +133,36 @@ export async function fixture(t, options = {}) {
       } });
     `);
   }
+  if (options.syntheticDeliverables) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-deliverables.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      import { readFile, writeFile } from 'node:fs/promises';
+      import { pathToFileURL } from 'node:url';
+      export default Plugin.define({ id: 'synthetic.deliverables', async setup(ctx) {
+        await ctx.tool.transform(editor => editor.add({ name: 'synthetic_deliverable',
+          description: 'Produce or consult a synthetic deliverable', options: { codemode: false },
+          input: { type: 'object', properties: { mode: { type: 'string' } }, required: ['mode'] },
+          execute: async ({ mode }) => {
+            const path = ctx.location.directory + '/result.txt';
+            if (mode === 'produce') await writeFile(path, 'Synthetic produced result. synthetic-deliverable-secret\\nBearer synthetic-deliverable-token');
+            if (mode === 'consult') await readFile(path, 'utf8');
+            const paths = mode === 'limits' ? ['missing.txt', 'directory', 'binary.bin', 'large.txt', 'escape/outside.txt'] : ['result.txt'];
+            return { content: paths.map(path => ({ type: 'file',
+              uri: pathToFileURL(ctx.location.directory + '/' + path).href, mime: 'text/plain' })) };
+          } }));
+      } });
+    `);
+  }
+  if (options.nativeWrite) await writeFile(join(root, 'config/opencode/plugins/zz-native-write.ts'), `
+    import { Plugin } from '@opencode/plugin';
+    export default Plugin.define({ id: 'synthetic.native-write', async setup(ctx) {
+      await ctx.tool.transform(editor => {
+        for (const name of ['read', 'write']) editor.update(name, tool => {
+          tool.options = { ...tool.options, codemode: false };
+        });
+      });
+    } });
+  `);
   if (options.admissionGate) {
     // A second real plugin delays admission AFTER the recorder hook, without replacing it.
     await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-admission.ts'), `

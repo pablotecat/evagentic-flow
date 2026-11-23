@@ -62,6 +62,10 @@ Se considera ejercitada solo cuando el log tiene un POST servido por `model`.
 ## Observations
 
 <!-- begin:observations -->
+2026-11-23: focales de #8, 7/7; la suite completa terminó 71/72 por el bootstrap
+descrito abajo, sin reintentos. `synthetic-model`, único miembro, sirvió tráfico
+200/400/429 en el conjunto; quedó sin arrancar en el caso de cookies. Las siete
+pruebas nuevas pasaron también dentro de la suite completa.
 2026-11-22: suite final de #7 aprobada (55/55), sin retries de pruebas ni fallos
 de bootstrap; #12 sigue como seguimiento, no se declara resuelto. `synthetic-model`,
 único miembro, sirvió 200 y fallos controlados 400/429; ninguno quedó sin tráfico
@@ -105,6 +109,16 @@ miembro quedó sin tráfico; se comprobaron los eventos `request` del log local.
 
 ## What didn't work
 
+- 2026-11-23: `npm test` falló en `Cookie y Set-Cookie completos...` antes de
+  `listening`: `Permission denied while accessing local dataset files` al preparar
+  soporte de datasets de Postman. El caso no llegó a ejecutar el registrador;
+  las otras 71 pruebas pasaron. Evidencia local: `sim.err` del caso fallido.
+  Causa raíz sin confirmar; #12 se mantiene como seguimiento, sin retries
+  automáticos ni repetición para presentar la suite como aprobada.
+- 2026-11-23: una continuación tras resultado `file` con MIME `text/plain` falló
+  en el proveedor OpenAI Chat de OpenCode con `OpenAI Chat does not support media
+  type text/plain`, antes de HTTP. #8 consulta esas referencias en sesiones
+  separadas; la producción/lectura nativa sí concluye en una misma sesión.
 - 2026-11-22: la prueba auxiliar de #7 esperaba una compactación satisfactoria,
   pero el texto genérico del proveedor produjo `compaction.failed` con
   `Compaction summary did not match the required template`. El caso ahora verifica

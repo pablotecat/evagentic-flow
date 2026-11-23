@@ -58,12 +58,32 @@ http.createServer(async (req, res) => {
   const unknownInput = input.includes('SYNTHETIC_ACTION_UNKNOWN');
   const action = body.tools?.find(tool => tool.function?.name === 'synthetic_actions_inspect');
   const actionResults = body.messages.filter(message => message.role === 'tool').length;
+  const artifact = body.tools?.find(tool => tool.function?.name === 'synthetic_deliverable');
+  const turn = body.messages.slice(body.messages.findLastIndex(message => message.role === 'user'));
+  const artifactInput = JSON.stringify(turn);
+  if (artifact && artifactInput.includes('SYNTHETIC_DELIVERABLE_') && !turn.some(message => message.role === 'tool')) {
+    send({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_synthetic_deliverable', type: 'function',
+      function: { name: artifact.function.name, arguments: JSON.stringify({ mode: artifactInput.includes('SYNTHETIC_DELIVERABLE_LIMITS')
+        ? 'limits' : artifactInput.includes('SYNTHETIC_DELIVERABLE_CONSULT') ? 'consult' : 'produce' }) } }] });
+    send({}, 'tool_calls');
+    return res.end('data: [DONE]\n\n');
+  }
   const recovering = input.includes('SYNTHETIC_ACTION_RECOVERY');
   const fileOnly = input.includes('SYNTHETIC_ACTION_FILE');
   const human = input.includes('SYNTHETIC_HUMAN');
   const question = body.tools?.find(tool => tool.function?.name === 'question');
   const skill = body.tools?.find(tool => tool.function?.name === 'skill');
   const execute = body.tools?.find(tool => tool.function?.name === 'execute' && tool.function.parameters?.properties?.code);
+  const write = body.tools?.find(tool => tool.function?.name === 'write');
+  const nativeRead = body.tools?.find(tool => tool.function?.name === 'read');
+  if (write && nativeRead && input.includes('SYNTHETIC_NATIVE_DELIVERABLE') && actionResults < 2) {
+    send({ role: 'assistant', tool_calls: [{ index: 0, id: actionResults ? 'call_synthetic_read' : 'call_synthetic_write', type: 'function',
+      function: { name: (actionResults ? nativeRead : write).function.name, arguments: JSON.stringify({
+        path: 'native.txt', ...actionResults ? {} : { content: 'Synthetic native result.' },
+      }) } }] });
+    send({}, 'tool_calls');
+    return res.end('data: [DONE]\n\n');
+  }
   if (input.includes('SYNTHETIC_SKILL_LOAD') && actionResults === 0 && (skill || execute)) {
     send({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_synthetic_skill', type: 'function',
       function: { name: (skill || execute).function.name, arguments: JSON.stringify(skill ? { id: 'transformed' }

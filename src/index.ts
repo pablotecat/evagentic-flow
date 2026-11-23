@@ -2,7 +2,8 @@ import { Plugin } from '@opencode/plugin';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, readFile, realpath, rename, stat } from 'node:fs/promises';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 type CapturedEvent = {
   type: string;
@@ -76,7 +77,7 @@ type Interruption = {
 
 type SessionScope = { id: string; projectID: string; location: { directory: string } };
 type Observation = {
-  stage: 'availability' | 'deployed-file' | 'runtime-definition' | 'context-hook' | 'environment' | 'admitted-skill';
+  stage: 'availability' | 'deployed-file' | 'runtime-definition' | 'context-hook' | 'environment' | 'admitted-skill' | 'deliverable';
   source: string;
   identity: string | null;
   observationTime: number;
@@ -214,7 +215,16 @@ export default Plugin.define({
         || !isAbsolute(config.projectDirectory) || typeof config.captureDirectory !== 'string'
         || !isAbsolute(config.captureDirectory) || !Array.isArray(config.secrets)
         || config.secrets.some((value: unknown) => typeof value !== 'string' || !value.length)
-        || Object.keys(config).some(key => !['version', 'projectDirectory', 'captureDirectory', 'secrets'].includes(key))) {
+        || (config.deliverableTools !== undefined && (!Array.isArray(config.deliverableTools)
+          || new Set(config.deliverableTools.map((item: unknown) => object(item).name)).size !== config.deliverableTools.length
+          || config.deliverableTools.some((item: unknown) => {
+            const binding = object(item);
+            return Object.keys(binding).length !== 3 || typeof binding.name !== 'string'
+              || !/^[A-Za-z0-9_.:-]{1,256}$/.test(binding.name) || typeof binding.pathArgument !== 'string'
+              || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(binding.pathArgument) || typeof binding.role !== 'string'
+              || !['input', 'intermediate', 'output'].includes(binding.role);
+          })))
+        || Object.keys(config).some(key => !['version', 'projectDirectory', 'captureDirectory', 'secrets', 'deliverableTools'].includes(key))) {
         throw new Error('Recorder: invalid local configuration v1.');
       }
       project = await realpath(config.projectDirectory);
@@ -267,7 +277,18 @@ export default Plugin.define({
         let filtered: Json = null;
         let status = 'captured';
         try {
-          filtered = sanitizeJson(value, config.secrets, redactions, 0, true);
+          let normalizedContent: string | undefined;
+          if (details.stage === 'deliverable' && typeof object(value).content === 'string') {
+            let parsed: unknown;
+            try { parsed = JSON.parse(String(object(value).content)); } catch { /* Ordinary text, not JSON. */ }
+            if (parsed !== undefined) {
+              normalizedContent = JSON.stringify(sanitizeJson(parsed, config.secrets, redactions));
+              omissions.push('deliverable-json-normalized');
+            }
+          }
+          filtered = sanitizeJson(normalizedContent === undefined ? value : { ...object(value), content: null }, config.secrets, redactions, 0, true);
+          // JSON was filtered structurally once. Re-filtering its serialization as prose destroys its shape.
+          if (normalizedContent !== undefined) (filtered as Record<string, Json>).content = normalizedContent;
           if (JSON.stringify(observationDiscriminators(details, value)) !== JSON.stringify(observationDiscriminators(details, filtered))) {
             throw new Error('redacted-observation-shape');
           }
@@ -309,6 +330,88 @@ export default Plugin.define({
         } catch { omissions.push('definition-file-unavailable'); }
         await observe(session, { stage: 'deployed-file', source: 'node.fs.readFile', identity: skillID,
           eventID, messageID, observationTime: Date.now(), omissions }, { path, content });
+      };
+      const projectRelative = (path: string) => {
+        const rel = relative(project!, path);
+        return !rel || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`) ? null : rel;
+      };
+      const observeDeliverable = async (session: SessionScope,
+        record: Pick<CapturedEvent, 'eventID' | 'messageID' | 'callID' | 'sourceTime'>,
+        attachment: unknown, origin: 'input' | 'output' | 'configured', configuredRole?: string) => {
+        const file = object(attachment);
+        const source = origin === 'input' ? object(file.source) : { type: 'uri', uri: file.uri };
+        let path: string | null = null;
+        let content: string | null = null;
+        const omissions = ['execution-causal-id-not-exposed', 'deliverable-finality-not-exposed'];
+        const runtime = origin === 'input';
+        if (!runtime) omissions.push('file-read-is-not-runtime-version');
+        try {
+          let resolved: string | undefined;
+          if (source.type === 'uri') {
+            const url = new URL(String(source.uri));
+            if (url.protocol !== 'file:' || url.hostname || url.search || url.hash) throw new Error('deliverable-reference-not-supported');
+            const candidate = fileURLToPath(url);
+            path = projectRelative(candidate);
+            if (path === null) throw new Error('deliverable-outside-project');
+            try { resolved = await realpath(candidate); }
+            catch { throw new Error('deliverable-reference-unavailable'); }
+            if (projectRelative(resolved) === null) throw new Error('deliverable-outside-project');
+          } else if (source.type !== 'inline') throw new Error('unrecognized-deliverable-format');
+          if (origin !== 'configured' && (typeof file.mime !== 'string' || !/^(?:text\/[a-z0-9.+-]+|application\/json)$/.test(file.mime))) {
+            throw new Error('deliverable-format-not-supported');
+          }
+          let bytes: Buffer;
+          if (runtime) {
+            if (typeof file.data !== 'string') throw new Error('unrecognized-deliverable-format');
+            if (file.data.length > Math.ceil(1048576 / 3) * 4) throw new Error('deliverable-size-limit');
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(file.data)) {
+              throw new Error('unrecognized-deliverable-format');
+            }
+            bytes = Buffer.from(file.data, 'base64');
+            if (bytes.toString('base64') !== file.data) throw new Error('unrecognized-deliverable-format');
+          } else {
+            if (!(await stat(resolved!)).isFile()) throw new Error('deliverable-not-regular');
+            const handle = await open(resolved!, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
+              .catch(() => { throw new Error('deliverable-reference-unavailable'); });
+            try {
+              const before = await handle.stat();
+              if (!before.isFile()) throw new Error('deliverable-not-regular');
+              if (before.size > 1048576) throw new Error('deliverable-size-limit');
+              const current = await stat(resolved!);
+              if (await realpath(fileURLToPath(String(source.uri))) !== resolved
+                || current.dev !== before.dev || current.ino !== before.ino) throw new Error('deliverable-changed-during-read');
+              const buffer = Buffer.alloc(1048577);
+              let length = 0;
+              while (length < buffer.length) {
+                const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+                if (!bytesRead) break;
+                length += bytesRead;
+              }
+              if (length > 1048576) throw new Error('deliverable-size-limit');
+              const after = await handle.stat();
+              if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+                || await realpath(fileURLToPath(String(source.uri))) !== resolved) throw new Error('deliverable-changed-during-read');
+              bytes = buffer.subarray(0, length);
+            } finally { await handle.close(); }
+          }
+          if (bytes.length > 1048576) throw new Error('deliverable-size-limit');
+          content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(content)) throw new Error('deliverable-format-not-supported');
+        } catch (error) {
+          content = null; omissions.push(error instanceof Error && error.message.startsWith('deliverable-')
+            ? error.message : 'deliverable-format-not-supported');
+        }
+        const callID = record.callID && safeIdentifier(record.callID, config.secrets) ? record.callID : null;
+        if (record.callID && callID === null) omissions.push('unsafe-identifier');
+        await observe(session, { stage: 'deliverable', source: origin === 'input' ? 'opencode.session.inbox.files'
+          : origin === 'output' ? 'opencode.session.tool.content' : 'opencode.tool.hook.execute.after', identity: path,
+          eventID: record.eventID, messageID: record.messageID, observationTime: Date.now(), omissions }, {
+          path, content, acquisition: content === null ? 'not-acquired' : runtime ? 'runtime-content' : 'post-event-file-read',
+          role: origin === 'configured' ? configuredRole : origin,
+          roleSource: origin === 'configured' ? 'configured-tool-contract' : 'public-file-boundary',
+          sourceTimeBasis: origin === 'configured' ? 'local-hook-clock' : 'runtime-event-created',
+          finality: null, callID, sourceTime: record.sourceTime,
+        });
       };
       const task = (async () => {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
@@ -470,6 +573,16 @@ export default Plugin.define({
             record.omissions = [...new Set(record.omissions)];
             record.redactions = [...new Set(record.redactions)];
             await append(record);
+            if (event.type === 'session.inbox.enqueued' && durable?.version === 1 && object(data.item).type === 'user') {
+              const files = object(object(data.item).payload).files;
+              if (Array.isArray(files)) for (const file of files) await observeDeliverable(session, record, file, 'input');
+              else if (files !== undefined) await observeDeliverable(session, record, null, 'input');
+            }
+            if (['session.tool.success', 'session.tool.failed'].includes(event.type) && durable?.version === 2 && record.tool) {
+              if (Array.isArray(data.content)) for (const part of data.content) {
+                if (object(part).type === 'file') await observeDeliverable(session, record, part, 'output');
+              }
+            }
             if (record.skill?.id) await observeSkill(session, record.skill.id, record.eventID, record.messageID);
             if (event.type === 'session.inbox.enqueued' && durable?.version === 1 && object(data.item).type === 'user') {
               const skills = object(object(data.item).payload).skills;
@@ -508,6 +621,25 @@ export default Plugin.define({
       let promoted = false;
       try {
         if (failed) throw new Error('Subscription failed.');
+        await ctx.tool.hook('execute.after', async event => {
+          const bindings = (config.deliverableTools ?? []) as { name: string; pathArgument: string; role: string }[];
+          const binding = bindings.find(binding => binding.name === event.tool);
+          if (!binding || event.status !== 'completed' || event.result.metadata?.error === true) return;
+          if (failed) return rejectFailedWork(event);
+          try {
+            const session = await ctx.session.get({ sessionID: event.sessionID });
+            if (!await inScope(session)) return;
+            const path = object(event.input)[binding.pathArgument];
+            // Explicit local contract: this one structured argument resolves against the selected project.
+            // Never parse command text, patch text, output prose, or arbitrary result metadata for paths.
+            await observeDeliverable(session, { eventID: null, messageID: event.messageID,
+              callID: event.id, sourceTime: Date.now() },
+            { uri: typeof path === 'string' ? pathToFileURL(resolve(project!, path)).href : null }, 'configured', binding.role);
+          } catch {
+            void fail('event-stream-or-persistence-failure');
+            throw new Error('Recorder: deliverable observation failed; pilot blocked.');
+          }
+        });
         for (const hook of ['context', 'compaction', 'generate', 'title'] as const) await ctx.session.hook(hook, async event => {
           const { sessionID } = event;
           if (failed) return rejectFailedWork({ sessionID });
@@ -587,11 +719,14 @@ export default Plugin.define({
             'session-permission-interactions', 'session-form-interactions', 'skill-load-results', 'admitted-skills',
             'selected-runtime-definitions', 'selected-project-skill-files', 'context-hook-text-and-tool-definitions',
             'model-step-runtime-usage', 'compaction-runtime-usage', 'session-total-runtime-usage', 'execution-outcomes',
+            'admitted-text-file-attachments', 'tool-local-text-file-references', 'configured-tool-file-arguments',
             'session-hook.context.primary', 'session-hook.compaction', 'session-hook.generate', 'session-hook.title'],
-            excluded: ['attachments', 'tool-internal-http', 'reasoning', 'headers', 'global-config', 'final-wire-context',
+            excluded: ['non-text-and-unsupported-attachments', 'tool-internal-http', 'reasoning', 'headers', 'global-config', 'final-wire-context',
               'non-session-generation', 'websocket-frames', 'skill-lifecycle-compliance-and-cost',
               'post-hook-http-and-protocol-transforms', 'request-options', 'non-text-context-parts',
-              'provider-usage-provenance', 'billed-cost', 'title-and-transient-generation-usage-attribution', 'pending-work-description'],
+              'provider-usage-provenance', 'billed-cost', 'title-and-transient-generation-usage-attribution', 'pending-work-description',
+              'unconfigured-tool-file-arguments', 'shell-and-prose-file-references', 'remote-and-data-tool-file-uris',
+              'project-scans', 'deliverable-global-finality', 'historical-version-of-later-file-reads'],
             executionID: 'not-exposed', ordering: 'arrival-is-not-causality' } });
         // Subscription failure can race the durable write: check again before publishing readiness.
         if (failed) throw new Error('Subscription failed during preparation.');
@@ -866,6 +1001,7 @@ function captureInteraction(record: CapturedEvent, data: Record<string, unknown>
 // Free text may change; these discriminators must still attest the observed projection.
 function observationDiscriminators(details: Observation, value: unknown): unknown[] {
   const data = object(value);
+  if (details.stage === 'deliverable') return [data.role, data.acquisition, data.roleSource, data.sourceTimeBasis];
   if (details.stage === 'context-hook') return [data.kind,
     ...Array.isArray(data.messages) ? data.messages.map(message => object(message).role) : []];
   if (details.stage === 'runtime-definition' && details.source === 'opencode.agent.get') return [data.mode];

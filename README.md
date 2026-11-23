@@ -6,15 +6,16 @@ Plugin de servidor **independiente** para OpenCode **V2 2.1.2**, con SDK
 [#3](https://github.com/pablotecat/evagentic-flow/issues/3),
 [#4](https://github.com/pablotecat/evagentic-flow/issues/4),
 [#5](https://github.com/pablotecat/evagentic-flow/issues/5),
-[#6](https://github.com/pablotecat/evagentic-flow/issues/6) y
-[#7](https://github.com/pablotecat/evagentic-flow/issues/7): encargo admitido,
-texto final, delegación, herramientas, interacciones externas, skills y definiciones observables del proyecto autorizado,
+[#6](https://github.com/pablotecat/evagentic-flow/issues/6),
+[#7](https://github.com/pablotecat/evagentic-flow/issues/7) y
+[#8](https://github.com/pablotecat/evagentic-flow/issues/8): encargo admitido,
+texto final, delegación, herramientas, interacciones externas, skills, definiciones y entregables autorizados observables,
 con aviso e interrupción del conjunto observado ante fallos del registrador. No modifica
 agentes, permisos de las sesiones observadas, delegación ni otros plugins.
 
 **No se ha instalado ni activado en el proyecto consumidor.** La parada ante
 fallos se comprueba también con delegación anidada, ramas concurrentes y
-descendientes nuevos; entregables y cobertura del piloto
+descendientes nuevos; la cobertura del piloto
 siguen pendientes. No utilizar este corte como
 autorización para el piloto.
 
@@ -59,6 +60,12 @@ node --test --test-name-pattern="el encargo" test/recorder.test.mjs
    absolutas. Seleccionar exactamente un directorio y un destino **fuera** del
    proyecto observado. `secrets` enumera los valores literales conocidos que deben
    excluirse; no se descubren leyendo configuración global ni credenciales.
+   `deliverableTools` es opcional: vincula una vez el nombre efectivo de una
+   herramienta, un argumento estructurado de ruta y su papel (`input`,
+   `intermediate` o `output`). El ejemplo declara los contratos de `read`/`write`;
+   comprobarlos si otro plugin sustituye esas herramientas. Sus rutas relativas
+   se resuelven explícitamente contra el proyecto seleccionado. Sin vinculación
+   no se adivinan rutas de argumentos, comandos, parches ni texto de resultados.
 3. Establecer `EVAGENTIC_CONFIG` en el entorno **del servidor aislado** con la ruta
    absoluta de ese archivo. No basta con establecerlo en un cliente ya conectado.
 4. En la instancia autorizada, añadir un archivo de entrada nuevo en su directorio
@@ -92,6 +99,7 @@ node scripts/inspect.mjs C:/synthetic/captures ses_synthetic
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tree
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --tools
 node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --metrics
+node scripts/inspect.mjs C:/synthetic/captures ses_synthetic --deliverables
 ```
 
 También basta un lector de JSON por línea. El lector incluido no importa el
@@ -147,6 +155,16 @@ fuente, momento y hash verificable, no solo rutas mutables. Las activaciones
 públicas y cargas satisfactorias conservan su procedencia y los enlaces expuestos;
 no prueban cumplimiento ni coste por skill. Una selección de sesión/árbol excluye
 observaciones de otras sesiones.
+
+`--deliverables` recupera los snapshots de entregables de esa sesión, sin volver
+al proyecto. Se conservan adjuntos textuales admitidos, referencias locales `file`
+de resultados y rutas de herramientas vinculadas por configuración local. Cada
+snapshot conserva contenido filtrado, hash comprobado, procedencia, momento,
+mensaje/llamada disponibles y límites. Se distingue contenido del evento de una
+lectura posterior del archivo: esta última **no acredita su versión histórica**.
+Cambiar el archivo no sobrescribe el diario. El papel de entrada/salida de una
+herramienta no acredita que sea el resultado final del flujo; `finality` queda
+desconocida. No hay recorrido del proyecto, descargas ni búsqueda en comandos.
 
 **El contexto de un hook no es el contexto final del modelo.** Otros hooks y el
 protocolo pueden cambiarlo después. Las versiones del servidor, dependencia SDK
@@ -205,7 +223,7 @@ si se movió el destino para diagnosticar un fallo, usar su ubicación conservad
   No se sube ni publica captura, configuración local o simulación automáticamente.
 - Las exclusiones conocidas y patrones de credenciales se aplican antes de
   escribir. **No es anonimización universal** de texto libre. No se vuelcan
-  cabeceras de transporte, configuración global, adjuntos ni metadata arbitraria.
+  cabeceras de transporte, configuración global, adjuntos no admitidos ni metadata arbitraria.
   Los argumentos JSON autorizados y resultados textuales de herramientas pasan el
   mismo filtrado; claves sensibles también se excluyen en estructuras anidadas.
 - Una respuesta parcial sin `session.text.ended` queda sin texto; sus eventos
