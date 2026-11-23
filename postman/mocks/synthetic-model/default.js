@@ -107,6 +107,8 @@ http.createServer(async (req, res) => {
         : input.includes('SYNTHETIC_ACTION_HOLD') ? 'hold' : fileOnly ? 'file'
           : recovering && actionResults === 0 ? 'failure' : 'success', payload: {
         ...(cookieText ? { cookieText } : {}),
+        ...(input.includes('SYNTHETIC_SCALAR_VALUES') ? { code: 986120443, enabled: true, disabled: false,
+          safe: 42, cookieText: '986120443' } : {}),
         ...(unknownInput ? { opaque: Array.from({ length: 40 }).reduce(value => ({ nested: value }),
           { text: 'synthetic-unknown-payload-secret' }) } : {}),
         work: 'Authorized synthetic-secret-42', escaped: 'synthetic-escaped-"credential"', nested: { password: 'synthetic-input-password',

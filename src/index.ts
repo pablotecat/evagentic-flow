@@ -1013,7 +1013,13 @@ function observationDiscriminators(details: Observation, value: unknown): unknow
 
 function sanitizeJson(value: unknown, secrets: string[], reasons: string[], depth = 0, preserveKeys = false): Json {
   if (depth > 32) throw new Error('Unsupported content depth');
-  if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
+  if (value === null) return value;
+  if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
+    const result = redact(String(value), secrets); reasons.push(...result.reasons);
+    // Typed projections cannot retain a scalar whose JSON type changes during filtering.
+    if (result.reasons.length && preserveKeys) throw new Error('redacted-observation-shape');
+    return result.reasons.length ? result.text : value;
+  }
   if (typeof value === 'string') {
     const result = redact(value, secrets); reasons.push(...result.reasons); return result.text;
   }

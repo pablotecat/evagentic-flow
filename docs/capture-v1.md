@@ -712,9 +712,19 @@ Validación de #8 (2026-11-23): `npm run typecheck` correcto y
 en foreground sin retries, terminó **71/72**: el caso previo de cookies no pudo
 arrancar Postman (`Permission denied while accessing local dataset files`),
 antes de `listening`. Las siete pruebas nuevas pasaron también en esa ejecución.
-Se mantiene el bloqueo de validación global y el seguimiento de infraestructura
+En aquella ejecución quedó el bloqueo de validación global y el seguimiento de infraestructura
 [#12](https://github.com/pablotecat/evagentic-flow/issues/12); no se declara
-suite completa aprobada ni ese problema resuelto.
+esa suite aprobada ni ese problema resuelto.
+
+Validación de #16 (2026-11-23): la regresión pública falló antes de corregir el
+sanitizador compartido. `npm run typecheck` correcto; focales
+`node --test --test-concurrency=1 test/scalar-redactions.test.mjs test/deliverables.test.mjs`
+**12/12**. El primer `npm test` terminó **76/77**: el literal corto `11` de la
+prueba nueva excluyó también una identidad generada y la aserción eligió otro
+diagnóstico. Se corrigió el caso con un coste decimal sintético excluido y una
+referencia exacta de evidencia; el segundo `npm test` terminó **77/77**, en
+foreground y sin retries automáticos. #12 no se reprodujo en esas ejecuciones;
+no se modificó su infraestructura ni se declara resuelto.
 
 ## Alcance y cobertura real
 
@@ -748,6 +758,14 @@ ni atributos separados por espacios, comas o punto y coma. Solo entran campos ex
 no se serializan metadata arbitraria, cabeceras de transporte, configuración global ni errores
 con contenido original. En JSON se filtran también claves sensibles anidadas
 (incluidas autorización y cookies) antes de persistir argumentos o decisiones.
+Las exclusiones literales se aplican asimismo a la representación normalizada de
+números y booleanos, tanto anidados como escalares: si coinciden, el valor pasa
+a ser una cadena filtrada (por ejemplo `986120443` queda `"[REDACTED]"`), siempre
+JSON válido. Los escalares sin coincidencia conservan su tipo y valor; `null`
+permanece como ausencia. En proyecciones tipadas de observaciones y métricas,
+un cambio de tipo omite la proyección con su diagnóstico de forma no reconocida,
+sin sustituir una medición por texto ni recuperar el original. Contenido y hashes
+se calculan sobre lo filtrado; no se modifican los archivos ni valores observados.
 Solo se admiten valores JSON finitos, de objetos ordinarios y profundidad máxima
 32; formatos no admitidos se señalan sin serializarlos como fallback.
 No se promete detectar cualquier secreto en texto libre,
