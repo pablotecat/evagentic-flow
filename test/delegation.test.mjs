@@ -50,7 +50,6 @@ test('la delegación anidada y repetida conserva ramas concurrentes consultables
   assert.ok(children.every(child => inspected.includes(child.id)));
   assert.ok(!inspected.includes('synthetic-secret-42'));
   assert.ok(!JSON.stringify(evidence).includes('synthetic-secret-42'));
-  // Admission hooks may run again, but a retried public message ID is still one admission.
   await Promise.all([0, 1].map(() => instance.api(`/api/session/${root.id}/prompt`, {
     id: 'msg_synthetic_retry', text: 'Synthetic retried admission', resume: false })));
   await eventually(async () => (await records(instance.captureDirectory))
@@ -107,7 +106,6 @@ test('un fallo interrumpe el árbol observado y nuevos descendientes sin afectar
     const active = (await instance.api('/api/session/active')).data;
     return before.every(session => !active[session.id]);
   }, 'observed execution remained active after interruption');
-  // The failed writer must not terminate identity observation after its initial scan.
   const later = (await instance.api('/api/session', { parentID: late.id,
     location: { directory: instance.projects[0] }, title: 'Synthetic descendant after quiet scan' })).data;
   await eventually(async () => (await instance.api(`/api/session/${later.id}`)).data.metadata

@@ -156,7 +156,6 @@ test('definiciones transformadas, instrucciones y versiones identifican el punto
       assert.equal(row.executionID, null);
       assert.ok(row.observationTime > 0 && row.observedAt >= row.observationTime);
     }
-    // The synthetic provider is independent of the recorder's earlier hook.
     const wire = await (await fetch(`${instance.simulationURL}/control/context-provenance`)).json();
     assert.ok(wire.laterHookRequests > 0, 'later public hook did not change the dispatched request');
     await instance.stop();

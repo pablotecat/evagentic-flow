@@ -47,7 +47,6 @@ test('preparación integrada del paquete conserva personalizaciones y cambia de 
     const captures = [];
     for (const index of [0, 1]) {
       const captureDirectory = join(instance.root, `verified-${index}`);
-      // Second pass changes ONLY the recorder's local project/destination configuration.
       const local = { ...stableConfig, projectDirectory: instance.projects[index], captureDirectory };
       await writeFile(instance.configFile, JSON.stringify(local));
       for (const directory of instance.projects) await instance.api(
@@ -60,7 +59,7 @@ test('preparación integrada del paquete conserva personalizaciones y cambia de 
       const events = client.event.subscribe()[Symbol.asyncIterator]();
       assert.equal((await events.next()).value.type, 'server.connected');
       await instance.api(`/api/session/${root.id}/prompt`, { text: 'SYNTHETIC_TREE_ROOT synthetic-secret-42' });
-      await events.return(); // Close the last real event subscriber while server-side work continues.
+      await events.return();
       let evidence = await eventually(async () => {
         const all = await records(captureDirectory);
         return new Set(all.filter(row => row.type === 'session.execution.succeeded').map(row => row.sessionID)).size >= 4 && all;
@@ -109,7 +108,6 @@ test('preparación integrada del paquete conserva personalizaciones y cambia de 
       assert.ok(evidence.some(row => row.stage === 'runtime-definition' && row.identity === 'transformed'));
       assert.ok(evidence.some(row => row.stage === 'deployed-file' && row.identity === 'transformed'));
       assert.ok(evidence.some(row => row.stage === 'context-hook' && row.value?.finalContext === false));
-      // --deliverables is session-scoped, unlike --coverage/--metrics; inspect the selected capture here.
       assert.ok(inspect(captureDirectory, undefined, '--deliverables').some(row => row.value.content === 'Synthetic native result.'));
       const metrics = inspect(captureDirectory, root.id, '--metrics');
       assert.ok(metrics.some(row => row.type === 'diagnostic.model-step' && row.tokens.value?.input === 11));
@@ -140,7 +138,6 @@ test('preparación integrada del paquete conserva personalizaciones y cambia de 
     assert.ok(traffic.some(row => row.routeKey === 'model' && row.path === '/v1/chat/completions' && row.statusCode === 200));
     assert.ok(traffic.some(row => row.statusCode === 429));
 
-    // Fault injection is confined to this isolated instance and its temporary destination.
     const idle = (await instance.api('/api/session', { location: { directory: instance.projects[1] } })).data;
     await instance.api(`/api/session/${idle.id}/prompt`, { text: 'Synthetic idle session', resume: false });
     const running = (await instance.api('/api/session', { location: { directory: instance.projects[1] } })).data;

@@ -182,7 +182,6 @@ test('una recarga pública no vuelve pendiente un encargo entregado aunque se le
     assert.equal(admission.sourceAggregateID, delivery.sourceAggregateID);
     assert.ok(Number.isSafeInteger(admission.sourceSequence) && Number.isSafeInteger(delivery.sourceSequence));
     assert.ok(admission.sourceSequence < delivery.sourceSequence);
-    // Close the journals through the public lifecycle before copying their unchanged bytes.
     await instance.api('/api/location/reload', {});
     const reversed = await mkdtemp(join(instance.root, 'reversed-journals-'));
     for (const [row, name] of [[delivery, '00000000-0000-4000-8000-000000000001'],
@@ -212,7 +211,7 @@ test('el uso auxiliar y los snapshots no se atribuyen al último mensaje ni se s
     const auxiliary = report.find(row => row.type === 'diagnostic.measurement' && row.kind === 'compaction');
     assert.equal(auxiliary.outcome, 'failed');
     assert.equal(auxiliary.error.type, 'compaction.failed');
-    assert.equal(auxiliary.tokens.value.input, 0); // Public runtime value, NOT measured provider consumption.
+    assert.equal(auxiliary.tokens.value.input, 0);
     assert.equal(auxiliary.tokens.providerReported, null);
     assert.equal(auxiliary.tokens.scope, 'compaction');
     assert.equal(auxiliary.messageID, null);

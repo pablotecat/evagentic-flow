@@ -27,10 +27,16 @@ Requisitos comprobados: Node 26, npm, Git, OpenCode 2.1.2 y Postman CLI 1.83.1
 
 ```sh
 npm ci
+npm run lint
 npm run typecheck
 npm run verify:pilot
 npm test
 ```
+
+El código propio se mantiene sin comentarios: decisiones en ADR y deuda en
+GitHub Issues. La [política y el ratchet](docs/comment-policy.md) permiten revisar
+el presupuesto restante; `/delete-comment [alcance]` repite la limpieza. La
+[auditoría inicial](docs/comment-audit.md) clasifica los 68 comentarios retirados.
 
 Las pruebas empaquetan e instalan el plugin en un directorio temporal, comprueban
 las rutas aisladas **antes** de abrir la base de datos e inician `opencode serve`

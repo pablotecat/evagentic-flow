@@ -33,7 +33,6 @@ test('el encargo y la respuesta persisten sin cliente y tras finalizar la instan
   const { data: prompt } = await instance.api(`/api/session/${session.id}/prompt`, {
     text: 'Encargo autorizado. clave synthetic-secret-42.',
     metadata: { authorization: 'synthetic-metadata-secret' } });
-  // No event client, browser or export is connected while the model streams its reply.
   const evidence = await eventually(async () => {
     const all = await records(instance.captureDirectory);
     return all.some(row => row.type === 'session.text.ended') && all;
@@ -134,7 +133,6 @@ test('un destino no escribible avisa y bloquea el encargo antes de comenzar', { 
   await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No comenzar sin captura.' }), /500:/);
   const plugin = await eventually(async () => (await instance.plugins()).find(row => row.id === 'evagentic.recorder'),
     'failed recorder was not reported');
-  // The runtime hook must remain active even though recorder preparation failed.
   assert.equal(plugin.state.status, 'active');
   const { data } = await instance.api(`/api/session/${session.id}`);
   assert.match(data.title, /Fallo del registrador/);
@@ -154,7 +152,6 @@ test('un fallo de escritura avisa, interrumpe sin navegador y conserva la eviden
     const all = await records(instance.captureDirectory);
     return all.some(row => row.type === 'session.text.delta') && all;
   }, 'controlled execution did not start');
-  // Fail the real filesystem boundary, not a recorder collaborator. Keep the original evidence.
   const preserved = join(instance.root, 'preserved');
   await rename(instance.captureDirectory, preserved);
   await writeFile(instance.captureDirectory, 'Synthetic unavailable capture destination');
@@ -172,9 +169,8 @@ test('un fallo de escritura avisa, interrumpe sin navegador y conserva la eviden
   const stopped = (await instance.api(`/api/session/${session.id}`)).data;
   assert.equal(stopped.outcome, 'interrupted');
   await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No reanudar sin revisión.' }),
-    /500:/); // 2.1.2 rejects a throwing hook without a typed/public response body.
+    /500:/);
   assert.deepEqual((await records(preserved)).slice(0, evidence.length), evidence);
-  // Repairing the destination and reloading is not a review or permission to resume.
   await unlink(instance.captureDirectory);
   await rename(preserved, instance.captureDirectory);
   const beforeReload = await records(instance.captureDirectory);
@@ -215,7 +211,6 @@ test('un error real de herramienta se registra sin solicitar la parada del flujo
   await instance.api(`/api/experimental/session/${session.id}/wait`, {});
   const messages = (await instance.api(`/api/session/${session.id}/message`)).data;
   const tool = messages.flatMap(message => message.content ?? []).find(part => part.type === 'tool');
-  // Code Mode reports a completed tool with error:true, not session.tool.failed in this runtime.
   assert.equal(tool.state.metadata.error, true);
   assert.deepEqual(tool.state.content, [{ type: 'text', text: 'Error: Synthetic tool failure' }]);
   const evidence = await eventually(async () => {
@@ -253,7 +248,6 @@ test('perder una sesión en la adquisición interrumpe la ejecución simple y co
   await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING adquisición' });
   await eventually(async () => (await records(instance.captureDirectory))
     .some(row => row.type === 'session.text.delta'), 'controlled execution did not start');
-  // The public deletion removes the object the event acquisition must resolve, without replacing that logic.
   const removed = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
   await instance.api(`/api/session/${removed.id}`, undefined, 'DELETE');
   const state = await eventually(async () => {
@@ -275,7 +269,7 @@ test('perder la ruta del proyecto no impide interrumpir el trabajo ya observado'
   await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING ruta perdida' });
   await eventually(async () => (await records(instance.captureDirectory))
     .some(row => row.type === 'session.text.delta'), 'controlled execution did not start');
-  await unlink(instance.projects[0]); // Remove only the synthetic alias, not the watched project or its data.
+  await unlink(instance.projects[0]);
   await instance.api(`/api/session/${session.id}`, { title: 'Evento tras perder la ruta.' }, 'PATCH');
   await eventually(async () => {
     const { data } = await instance.api(`/api/session/${session.id}`);
@@ -313,7 +307,7 @@ test('un cierre sin limpieza exige revisión aunque no pudiera guardar el fallo 
   await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING cierre abrupto' });
   await eventually(async () => (await records(instance.captureDirectory))
     .some(row => row.type === 'session.text.delta'), 'controlled execution did not start');
-  await instance.restart(); // Terminate the isolated process; no recorder failure callback can run.
+  await instance.restart();
   const evidence = await records(instance.captureDirectory);
   await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No ignorar el cierre sin limpieza.' }), /500:/);
   assert.deepEqual(await records(instance.captureDirectory), evidence);

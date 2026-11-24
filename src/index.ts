@@ -160,13 +160,10 @@ export default Plugin.define({
       if (!failure) failureReason = reason;
       return failure ??= (async () => {
         console.error(`Recorder: ${notice}`);
-        // Already armed before capture: failure of THIS write must not erase the safety latch.
         const latch = ctx.storage.set('failure', { reason, reviewRequired: true })
           .catch(() => { console.error('Recorder: failure latch could not be persisted; pilot blocked.'); });
         try {
-          if (!selected) return; // Invalid configuration cannot authorize cross-session interruption.
-          // Repeat after interruption: delegates may appear while the previous wave is checked.
-          // The live subscription below keeps enforcing the latch after a quiet scan too.
+          if (!selected) return;
           let previousSize = -1;
           do {
             previousSize = interruptions.size;
@@ -236,7 +233,6 @@ export default Plugin.define({
         await fail(previous.reason === 'preparation-failure' ? previous.reason : 'event-stream-or-persistence-failure');
         return;
       }
-      // Arm durably BEFORE declaring capture ready. Only a healthy cleanup may disarm it.
       await ctx.storage.set('failure', { reason: 'event-stream-or-persistence-failure', reviewRequired: true });
       await mkdir(config.captureDirectory, { recursive: true, mode: 0o700 });
       const destination = await realpath(config.captureDirectory);
@@ -252,12 +248,10 @@ export default Plugin.define({
       let arrival = 0;
       let writes = Promise.resolve();
       const append = (record: Record<string, unknown>) => writes = writes.then(async () => {
-        // Do not recreate missing evidence. Reopening also detects a lost destination on Windows.
         const file = await open(journalPath, constants.O_WRONLY | constants.O_APPEND);
         try {
           await file.appendFile(`${JSON.stringify({ schemaVersion: 1, captureID,
             arrival: ++arrival, observedAt: Date.now(), ...record })}\n`, 'utf8');
-          // ponytail: fsync per event favors evidence over throughput; batching needs an explicit loss window.
           await file.sync();
         } finally { await file.close(); }
       });
@@ -280,14 +274,13 @@ export default Plugin.define({
           let normalizedContent: string | undefined;
           if (details.stage === 'deliverable' && typeof object(value).content === 'string') {
             let parsed: unknown;
-            try { parsed = JSON.parse(String(object(value).content)); } catch { /* Ordinary text, not JSON. */ }
+            try { parsed = JSON.parse(String(object(value).content)); } catch {}
             if (parsed !== undefined) {
               normalizedContent = JSON.stringify(sanitizeJson(parsed, config.secrets, redactions));
               omissions.push('deliverable-json-normalized');
             }
           }
           filtered = sanitizeJson(normalizedContent === undefined ? value : { ...object(value), content: null }, config.secrets, redactions, 0, true);
-          // JSON was filtered structurally once. Re-filtering its serialization as prose destroys its shape.
           if (normalizedContent !== undefined) (filtered as Record<string, Json>).content = normalizedContent;
           if (JSON.stringify(observationDiscriminators(details, value)) !== JSON.stringify(observationDiscriminators(details, filtered))) {
             throw new Error('redacted-observation-shape');
@@ -418,11 +411,10 @@ export default Plugin.define({
           try {
             if (!event.type.startsWith('session.') && !['permission.asked', 'permission.replied',
               'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) continue;
-            // Context location alone is NOT an authorization boundary: this stream can cross projects.
             if (event.location && await realpath(event.location.directory) !== project) continue;
             const data = object(event.data);
             const sessionID = event.type === 'form.created' ? object(data.form).sessionID : data.sessionID;
-            if (event.type.startsWith('form.') && sessionID === 'global') continue; // Authentication/MCP sentinel, not a session.
+            if (event.type.startsWith('form.') && sessionID === 'global') continue;
             if (typeof sessionID !== 'string'
               || !('created' in event) || !Number.isFinite(event.created)) {
               await append({ type: 'recorder.gap', reason: 'unrecognized-session-envelope' });
@@ -606,17 +598,15 @@ export default Plugin.define({
           } catch {
             void fail('event-stream-or-persistence-failure');
             try { await append({ type: 'recorder.failed', reason: 'event-stream-or-persistence-failure' }); }
-            catch { /* Continue observing identities even when the capture destination has failed. */ }
+            catch {}
           }
         }
         if (!controller.signal.aborted) throw new Error('Event stream ended.');
       })().catch(async error => {
-        // Only cancellation of the subscription is expected during cleanup. An in-flight
-        // acquisition/write can fail AFTER abort; that is still a recorder failure.
         if (controller.signal.aborted && error instanceof Error && error.name === 'AbortError') return;
         await fail('event-stream-or-persistence-failure');
         try { await append({ type: 'recorder.failed', reason: 'event-stream-or-persistence-failure' }); }
-        catch { /* A failed disk cannot be relied on to record its own failure. */ }
+        catch {}
       });
       let promoted = false;
       try {
@@ -630,8 +620,6 @@ export default Plugin.define({
             const session = await ctx.session.get({ sessionID: event.sessionID });
             if (!await inScope(session)) return;
             const path = object(event.input)[binding.pathArgument];
-            // Explicit local contract: this one structured argument resolves against the selected project.
-            // Never parse command text, patch text, output prose, or arbitrary result metadata for paths.
             await observeDeliverable(session, { eventID: null, messageID: event.messageID,
               callID: event.id, sourceTime: Date.now() },
             { uri: typeof path === 'string' ? pathToFileURL(resolve(project!, path)).href : null }, 'configured', binding.role);
@@ -663,7 +651,6 @@ export default Plugin.define({
               id: message.id && safeIdentifier(message.id, config.secrets) ? message.id : null,
               role: message.role, text: message.content.flatMap(part => {
                 if (part.type === 'text') return [part.text];
-                // Do not serialize reasoning, encrypted checkpoints, media, native/provider metadata or arbitrary results.
                 omissions.push('non-text-context-part-not-captured'); return [];
               }),
             }));
@@ -728,7 +715,6 @@ export default Plugin.define({
               'unconfigured-tool-file-arguments', 'shell-and-prose-file-references', 'remote-and-data-tool-file-uris',
               'project-scans', 'deliverable-global-finality', 'historical-version-of-later-file-reads'],
             executionID: 'not-exposed', ordering: 'arrival-is-not-causality' } });
-        // Subscription failure can race the durable write: check again before publishing readiness.
         if (failed) throw new Error('Subscription failed during preparation.');
         await rename(pending, journal);
         journalPath = journal;
@@ -754,8 +740,6 @@ export default Plugin.define({
       };
     } catch {
       await fail('preparation-failure');
-      // A failed setup is not an admission veto in 2.1.2: keep the rejecting hook registered.
-      // Runtime "active" means the safety guard runs, NOT that capture preparation succeeded.
     }
   },
 });
@@ -845,7 +829,6 @@ function captureMetrics(record: CapturedEvent, data: Record<string, unknown>, se
         'model-step-execution-link-not-exposed', 'provider-internal-attempts-not-exposed', 'skill-consumption-not-exposed',
         ...(total ? ['session-total-is-snapshot-not-additive', 'auxiliary-usage-attribution-not-exposed'] : [])];
     }
-    // A redacted discriminator/key is not a different, valid metric or terminal outcome.
     for (const key of ['measurement', 'lifecycle'] as const) {
       const value = record[key];
       if (value === null) continue;
@@ -856,7 +839,6 @@ function captureMetrics(record: CapturedEvent, data: Record<string, unknown>, se
       if (JSON.stringify(discriminators(value)) !== JSON.stringify(discriminators(filtered))) {
         throw new Error('Redacted metric discriminator');
       }
-      // Filtering above preserves the validated structure, not the original free text.
       if (key === 'measurement') record.measurement = filtered as CapturedEvent['measurement'];
       else record.lifecycle = filtered as CapturedEvent['lifecycle'];
     }
@@ -888,7 +870,6 @@ function captureTool(record: CapturedEvent, data: Record<string, unknown>, secre
       let parsed: unknown;
       let isJson = true;
       try { parsed = JSON.parse(data.text); } catch { isJson = false; }
-      // Decode complete JSON before filtering: escaped literals must not bypass configured secrets.
       tool.inputText = isJson ? JSON.stringify(sanitizeJson(parsed, secrets, record.redactions)) : text(data.text);
       record.omissions.push(isJson ? 'tool-input-text-normalized-json' : 'tool-input-text-unparsed');
     }
@@ -998,7 +979,6 @@ function captureInteraction(record: CapturedEvent, data: Record<string, unknown>
   }
 }
 
-// Free text may change; these discriminators must still attest the observed projection.
 function observationDiscriminators(details: Observation, value: unknown): unknown[] {
   const data = object(value);
   if (details.stage === 'deliverable') return [data.role, data.acquisition, data.roleSource, data.sourceTimeBasis];
@@ -1016,7 +996,6 @@ function sanitizeJson(value: unknown, secrets: string[], reasons: string[], dept
   if (value === null) return value;
   if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
     const result = redact(String(value), secrets); reasons.push(...result.reasons);
-    // Typed projections cannot retain a scalar whose JSON type changes during filtering.
     if (result.reasons.length && preserveKeys) throw new Error('redacted-observation-shape');
     return result.reasons.length ? result.text : value;
   }
@@ -1043,7 +1022,6 @@ function redact(input: string, secrets: string[]) {
   }
   const patterns = [
     /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-    // Cookie values span semicolons, spaces and commas; include folded header continuations.
     /(?:\b|[_-])(?:set-cookie|cookie)["']?[ \t]*[=:][^\r\n]*(?:(?:\r\n|[\r\n])[ \t]+[^\r\n]*)*/gi,
     /\b(?:Bearer|Basic)\s+[A-Za-z0-9+/_=.\-]+/gi,
     /(?:\b|[_-])(?:authorization|proxy-authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|private[_-]?key|passphrase|password|secret)["']?\s*[=:]\s*(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;]+)/gi,

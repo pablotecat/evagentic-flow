@@ -75,7 +75,7 @@ test('una herramienta efectiva conserva argumentos, resultado e identidad sin co
       work: 'Authorized [REDACTED]', escaped: '[REDACTED]', nested: { password: '[REDACTED]', authorization: '[REDACTED]',
         headers: { 'X-Api-Key': '[REDACTED]' } } } });
     assert.equal(called.tool.outcome, 'not-observed');
-    assert.equal(called.tool.executed, false); // Runtime flag, not proof that the local executor did not run.
+    assert.equal(called.tool.executed, false);
     const completedInput = evidence.find(row => row.type === 'session.tool.input.ended');
     assert.ok(!completedInput.tool.inputText.includes('synthetic-escaped-'));
     assert.equal(result.toolName, called.toolName);
@@ -197,7 +197,7 @@ test('un intento sin desenlace observado queda como incidente desconocido, no co
     await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_ACTION_HOLD' });
     await eventually(async () => (await records(instance.captureDirectory))
       .some(row => row.type === 'session.tool.called'), 'held tool did not start');
-    await instance.stop(); // Public process boundary: no private runtime or recorder collaborators.
+    await instance.stop();
     const [attempt] = inspect(instance, session.id, '--tools');
     assert.equal(attempt.outcome, 'not-observed');
     assert.deepEqual(attempt.incident, { kind: 'outcome-not-observed', cause: null });

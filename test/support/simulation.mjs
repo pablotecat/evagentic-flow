@@ -7,7 +7,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 
-// Only the simulation process boundary: no recorder or OpenCode substitutes.
 export async function startSimulation(t, { root, home, env, command = 'postman',
   args = ['simulation', 'run', join(repository, 'postman/simulations/recorder/recorder.sim.yaml'),
     '--port', 'auto', '--output', 'ndjson', '--no-history'], timeout = 60000 }) {
@@ -19,7 +18,6 @@ export async function startSimulation(t, { root, home, env, command = 'postman',
   child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk; });
   child.on('error', error => { spawnError = error; errors += error.message; });
   child.once('exit', () => { exited = true; });
-  // A descendant can keep these pipes open after the main process exits.
   const drained = new Promise(resolve => child.once('close', () => { closed = true; resolve(); }));
   const stop = () => cleanup ??= (async () => {
     if (!exited && !spawnError) child.kill();
@@ -55,7 +53,6 @@ export async function startSimulation(t, { root, home, env, command = 'postman',
     while (true) {
       if (spawnError) throw new Error(`could not spawn simulation: ${spawnError.message}`);
       if (exited) throw new Error(`simulation exited before listening (code=${child.exitCode}, signal=${child.signalCode})`);
-      // Never parse a partial NDJSON line delivered in a separate pipe chunk.
       listening = output.split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line))
         .find(event => event.event === 'listening' || event.type === 'listening');
       if (listening) return { port: listening.port, log: () => output, stop };

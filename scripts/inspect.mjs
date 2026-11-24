@@ -4,7 +4,6 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-// Independent consumer of capture v1: no plugin imports, database or running OpenCode.
 const common = ['schemaVersion', 'captureID', 'arrival', 'observedAt', 'type'];
 const exactKeys = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
@@ -44,7 +43,6 @@ const validSkill = skill => skill === null || (exactKeys(skill, ['id', 'name', '
   && ['successful-skill-tool-result', 'runtime-activation-event'].includes(skill.origin)
   && skill.sha256 === digest(skill.text) && skill.contextID === null && skill.consumption === null);
 const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
-// A missing/excluded session identity does not make session evidence global.
 const globalRecord = row => ['recorder.ready', 'recorder.failed', 'recorder.gap'].includes(row.type);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const nullableString = value => value === null || typeof value === 'string';
@@ -149,7 +147,6 @@ function validProjection({ stage, source, value }) {
   }
 }
 
-// These are observation intervals, not invented causal execution IDs or billable totals.
 const elapsed = (start, end) => start !== null && end !== null && end >= start ? end - start : null;
 const sourceBefore = (a, b) => a.projectID && a.projectID === b.projectID && a.sessionID && a.sessionID === b.sessionID
   && a.sourceAggregateID && a.sourceAggregateID === b.sourceAggregateID
@@ -268,7 +265,6 @@ function printMetrics(rows, allRows) {
     }
   }
   for (const { startRows, streamRows, endRows, ...step } of steps.values()) {
-    // Compare only this public step identity, never filenames or local observation times.
     let first = startRows.reduce((first, row) => sourceBefore(row, first) ? row : first, startRows[0]);
     if (first && !startRows.every(row => row === first || (sourceBefore(first, row)
       && (!first.measurement || !row.measurement
@@ -312,7 +308,6 @@ function printMetrics(rows, allRows) {
   }
   for (const wait of waits.values()) emit({ ...wait, elapsedMs: elapsed(wait.startedAt, wait.endedAt),
     state: wait.startedAt !== null && wait.endedAt === null ? 'waiting-external-decision' : 'not-waiting-or-unknown' });
-  // Pending inbox work is session-scoped. Delivery is not a success/acceptance signal.
   const inbox = new Map();
   for (const row of rows) {
     if (row.sourceVersion !== 1 || !row.projectID || !row.sessionID || !row.messageID) continue;
@@ -420,7 +415,6 @@ if (!directory) {
       || (mode && !['--tree', '--tools', '--metrics', '--deliverables', '--coverage'].includes(mode))) {
       throw new Error('Unknown inspection mode');
     }
-    // ponytail: tree/attempt inspection buffers the capture; add an index if it outgrows memory.
     const rows = [];
     for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
       if (entry.name.endsWith('.pending')) throw new Error(`Incomplete preparation: ${entry.name}`);
@@ -502,7 +496,7 @@ if (!directory) {
         if (row.toolName !== null) attempt.toolName = row.toolName;
         if (row.type === 'session.tool.input.started') attempt.startedAt = row.sourceTime;
         if (row.type === 'session.tool.called') attempt.calledAt = row.sourceTime;
-        if (!row.tool) continue; // Omitted or unknown payloads are not terminal evidence of success.
+        if (!row.tool) continue;
         if (row.tool.input !== null) attempt.input = row.tool.input;
         if (row.tool.inputText !== null) attempt.inputText = row.tool.inputText;
         if (['session.tool.success', 'session.tool.failed'].includes(row.type)) {

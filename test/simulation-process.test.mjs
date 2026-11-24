@@ -46,7 +46,6 @@ test('la salida del padre no espera pipes heredados ni confirma parada del desce
     try { process.kill(pid, 'SIGKILL'); }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
   };
-  // Release only this case's descendant even if the old helper waits for close forever.
   const watchdog = setTimeout(() => {
     stopDescendant().catch(error => t.diagnostic(error.message));
   }, 7000);

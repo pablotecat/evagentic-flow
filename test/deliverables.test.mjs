@@ -218,7 +218,7 @@ test('el plugin produce y consulta una salida, preserva la lectura posterior y e
     for (const row of before) {
       assert.equal(row.value.content, 'Synthetic produced result. [REDACTED]\n[REDACTED]');
       assert.equal(row.value.acquisition, 'post-event-file-read');
-      assert.equal(row.value.role, 'output'); // Role at this tool boundary, not global finality or proof of production.
+      assert.equal(row.value.role, 'output');
       assert.equal(row.value.finality, null);
       assert.equal(row.value.callID, 'call_synthetic_deliverable');
       assert.equal(row.value.path, 'result.txt');

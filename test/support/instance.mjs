@@ -67,7 +67,6 @@ export async function fixture(t, options = {}) {
     XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'),
     XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache'),
     OPENCODE_TEST_HOME: root,
-    // V2 discovers compatibility sources above Git roots too; TEMP lives below the real home.
     OPENCODE_CONFIG_PROJECT_DISABLE: '1',
     PROGRAMDATA: join(root, 'system'), TEMP: root, TMP: root, GIT_CONFIG_NOSYSTEM: '1',
     OPENCODE_DB: join(root, 'data/opencode/test.db'), EVAGENTIC_CONFIG: configFile,
@@ -166,7 +165,6 @@ export async function fixture(t, options = {}) {
     } });
   `);
   if (options.admissionGate) {
-    // A second real plugin delays admission AFTER the recorder hook, without replacing it.
     await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-admission.ts'), `
       import { Plugin } from '@opencode/plugin';
       import { readFile, writeFile } from 'node:fs/promises';
@@ -184,7 +182,6 @@ export async function fixture(t, options = {}) {
     `);
   }
   if (options.lateDescendant) {
-    // A real plugin creates a descendant in reaction to the public failure notice.
     await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-descendant.ts'), `
       import { Plugin } from '@opencode/plugin';
       export default Plugin.define({ id: 'synthetic.descendant', async setup(ctx) {
@@ -213,7 +210,6 @@ export async function fixture(t, options = {}) {
   let simulationLog = () => '';
   let simulationURL;
   if (options.simulation) {
-    // Cache only CLI bootstrap in a temporary home; every mock still gets a fresh process/state.
     simulationHome ??= mkdtemp(join(temporary, 'recorder-simulation-home-'));
     const home = await simulationHome;
     const simulation = await startSimulation(t, { root, home, env });
@@ -229,7 +225,6 @@ export async function fixture(t, options = {}) {
       { action: 'provider.use', resource: 'synthetic', effect: 'allow' }];
   }
   await writeFile(join(root, 'config/opencode/opencode.json'), JSON.stringify(serverConfig));
-  // Prove path isolation before opening a database or starting a server.
   for (const name of ['home', 'data', 'config', 'cache', 'state', 'db']) {
     const actual = execFileSync(binary, ['debug', 'paths', name], { env, cwd: root, encoding: 'utf8' }).trim();
     assert.ok(resolve(actual).startsWith(resolve(root)), `${name} escaped the isolated instance`);
@@ -273,7 +268,6 @@ export async function fixture(t, options = {}) {
     plugins: async (directory = projects[0]) => (await api(`/api/plugin?location[directory]=${encodeURIComponent(directory)}`)).data };
 }
 
-// An independent consumer: only documented JSONL, never a recorder import or server database.
 export async function records(directory) {
   let names;
   try { names = await readdir(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
