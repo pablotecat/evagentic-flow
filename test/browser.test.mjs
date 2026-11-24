@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -135,12 +135,33 @@ test('el navegador lanza, observa y conserva una ejecución de Flujo en Proyecto
   await page.locator('#history button').first().click();
   await page.waitForFunction(() => document.querySelector('[aria-label="Mensajes"]')?.textContent
     ?.includes('Respuesta autorizada') ?? false, undefined, { timeout: 30000 });
+
+  const gapCaptureID = randomUUID();
+  await writeFile(join(instance.captureDirectory, 'synthetic-gap.jsonl'), JSON.stringify({
+    schemaVersion: 1, captureID: gapCaptureID, arrival: 1, observedAt: Date.now(),
+    type: 'recorder.gap', reason: 'unrecognized-session-envelope',
+  }) + '\n');
+  const digest = await hashCapture(instance.captureDirectory);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+    undefined, { timeout: 30000 });
+  await page.locator('#history button').first().click();
+  await page.getByRole('region', { name: 'Lagunas conocidas' }).waitFor();
+  const gap = await page.getByRole('region', { name: 'Lagunas conocidas' }).innerText();
+  assert.ok(gap.includes('Sin atribución a esta ejecución'));
+  assert.ok(gap.includes(gapCaptureID));
+  assert.ok(gap.includes('unrecognized-session-envelope'));
+  assert.ok((await page.locator('[aria-label="Mensajes"]').innerText()).includes('Respuesta autorizada'));
+  await page.getByText('Omisiones observadas en el árbol de sesiones', { exact: true }).click();
+  assert.ok((await page.locator('[aria-label="Omisiones observadas"]').innerText()).includes('non-text-fields-not-captured'));
+  assert.ok((await page.locator('#conversation').innerText()).includes('Árbol de sesiones observado:'));
+  assert.equal(await admittedCount(instance), 3, 'reading gaps dispatched work');
+  assert.equal(await hashCapture(instance.captureDirectory), digest, 'reading gaps altered captured evidence');
 });
 
 test('la pestaña recupera el seguimiento al recargarse o cerrarse sin detener ni repetir el trabajo', { timeout: 480000 }, async t => {
   const instance = await fixture(t, { simulation: true });
   const { app } = await launchWebapp(t, instance);
-  t.after(() => app.close());
   const browser = await chromium.launch();
   t.after(() => browser.close());
   const page = await browser.newPage();

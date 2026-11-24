@@ -80,14 +80,7 @@ export async function startApp({ configPath, port: requestedPort }) {
     }
     const phase = latestLifecycle(evidence.rows.filter(row => row.sessionID === execution.sessionID));
     if (!TERMINAL_PHASES.includes(phase) || !evidence.admission || evidence.recorderFailed) return;
-    const knownIDs = new Set([execution.sessionID]);
-    for (let size = -1; size !== knownIDs.size;) {
-      size = knownIDs.size;
-      for (const row of evidence.rows) {
-        if (row.sessionID && knownIDs.has(row.parentSessionID)) knownIDs.add(row.sessionID);
-        if (row.childSessionID && knownIDs.has(row.sessionID)) knownIDs.add(row.childSessionID);
-      }
-    }
+    const knownIDs = new Set(evidence.scope.sessionIDs);
     let scope;
     try { scope = await engine.scope(config.projectDirectory, execution.sessionID, knownIDs); }
     catch { return; }
@@ -251,7 +244,7 @@ export async function startApp({ configPath, port: requestedPort }) {
           : { entries: [], responses: [] },
         capture: evidence?.ok
           ? { readable: true, captureIDs: evidence.captureIDs, recorderFailed: evidence.recorderFailed,
-            horizon: evidence.horizon }
+            horizon: evidence.horizon, scope: evidence.scope, gaps: evidence.gaps, omissions: evidence.omissions }
           : { readable: false, reason: evidence?.reason ?? 'session-not-confirmed',
             captureIDs: [], recorderFailed: false, horizon: null },
       });

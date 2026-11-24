@@ -82,9 +82,14 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   volver a alcanzar el motor, sin que una reconexión acredite por sí sola
   el desenlace ni reenvíe el encargo. El detalle histórico expone el
   horizonte temporal de la evidencia («Evidencia hasta»: el último momento
-  observado de la captura de esa ejecución), distingue «sin filas de
+  observado del árbol de sesiones acreditado por la captura, con su alcance
+  explícito), distingue «sin filas de
   captura» de «captura no consultable», y no reconstruye texto no capturado:
-  no hay replay ni backfill. La app puede relanzarse en el mismo puerto
+  no hay replay ni backfill. Publica las omisiones observadas con referencias
+  a sesión, captura y fila. Las declaraciones globales `recorder.gap` se
+  muestran como lagunas del destino de captura sin atribuirlas a la ejecución:
+  no identifican una sesión afectada ni amplían el horizonte del árbol.
+  La app puede relanzarse en el mismo puerto
   (puerto interno opcional) para comprobar que la reconstrucción parte del
   índice persistente, no de la memoria del navegador.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza

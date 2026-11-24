@@ -148,6 +148,8 @@ function renderExecution() {
       el('dt', {}, 'Capturas'), el('dd', {}, capture?.readable
         ? (capture.captureIDs.length ? capture.captureIDs.join(', ') : 'sin filas de captura de esta ejecución')
         : `no consultable: ${capture?.reason ?? 'desconocido'}`),
+      el('dt', {}, 'Alcance de evidencia'), el('dd', {}, capture?.readable
+        ? `Árbol de sesiones observado: ${capture.scope.sessionIDs.join(', ')}` : 'desconocido'),
       el('dt', {}, 'Evidencia hasta'), el('dd', {}, capture?.readable
         ? (capture.horizon ?? 'sin eventos observados') : 'horizonte desconocido')),
     el('p', { class: 'notice' }, 'Este corte permite un único envío inicial por ejecución; no hay cierre manual.'),
@@ -159,6 +161,19 @@ function renderExecution() {
   if (capture?.recorderFailed) {
     panel.splice(2, 0, el('p', { role: 'alert', class: 'error' },
       'Fallo del registrador: revisar antes de volver a ejecutar.'));
+  }
+  if (capture?.gaps?.length) {
+    panel.push(el('section', { 'aria-label': 'Lagunas conocidas' },
+      el('h3', {}, 'Lagunas del destino de captura'),
+      el('p', {}, 'Sin atribución a esta ejecución: la captura no identifica la sesión afectada. No hay replay ni relleno de texto.'),
+      el('ul', {}, ...capture.gaps.map(gap => el('li', {},
+        `${gap.captureID} · fila ${gap.arrival} · ${new Date(gap.observedAt).toISOString()}: ${gap.reason}`)))));
+  }
+  if (capture?.omissions?.length) {
+    panel.push(el('details', { 'aria-label': 'Omisiones observadas' },
+      el('summary', {}, 'Omisiones observadas en el árbol de sesiones'),
+      el('ul', {}, ...capture.omissions.map(row => el('li', {},
+        `${row.sessionID} · ${row.captureID} · fila ${row.arrival} · ${row.type}: ${row.omissions.join(', ')}`)))));
   }
   conversationPanel.replaceChildren(...panel);
 }

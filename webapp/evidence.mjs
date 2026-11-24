@@ -47,8 +47,18 @@ export async function readSession(captureDirectory, sessionID) {
   const read = await readRows(captureDirectory);
   if (!read.ok) return { ok: false, reason: read.reason };
   const rows = read.rows.filter(row => row.sessionID === sessionID);
-  const lastObserved = rows.reduce((latest, row) =>
-    Number.isFinite(row.observedAt) && row.observedAt > latest ? row.observedAt : latest, 0);
+  const sessionIDs = new Set([sessionID]);
+  for (let size = -1; size !== sessionIDs.size;) {
+    size = sessionIDs.size;
+    for (const row of read.rows) {
+      if (row.sessionID && sessionIDs.has(row.parentSessionID)) sessionIDs.add(row.sessionID);
+      if (row.childSessionID && sessionIDs.has(row.sessionID)) sessionIDs.add(row.childSessionID);
+    }
+  }
+  const scoped = read.rows.filter(row => sessionIDs.has(row.sessionID));
+  const lastObserved = scoped.reduce((latest, row) =>
+    latest === null || row.observedAt > latest ? row.observedAt : latest, null);
+  const reference = row => ({ captureID: row.captureID, arrival: row.arrival, observedAt: row.observedAt });
   return {
     ok: true,
     rows: read.rows,
@@ -57,8 +67,13 @@ export async function readSession(captureDirectory, sessionID) {
       .map(row => ({ text: row.content.text })),
     responses: rows.filter(row => row.type === RESPONSE && row.content?.role === 'assistant')
       .map(row => ({ text: row.content.text })),
-    captureIDs: [...new Set(rows.map(row => row.captureID).filter(Boolean))],
+    captureIDs: [...new Set(scoped.map(row => row.captureID).filter(Boolean))],
     recorderFailed: read.rows.some(row => row.type === 'recorder.failed'),
-    horizon: lastObserved ? new Date(lastObserved).toISOString() : null,
+    scope: { kind: 'observed-session-tree', rootSessionID: sessionID, sessionIDs: [...sessionIDs] },
+    gaps: read.rows.filter(row => row.type === 'recorder.gap')
+      .map(row => ({ ...reference(row), scope: 'capture', reason: row.reason })),
+    omissions: scoped.filter(row => row.omissions?.length)
+      .map(row => ({ ...reference(row), sessionID: row.sessionID, type: row.type, omissions: row.omissions })),
+    horizon: lastObserved === null ? null : new Date(lastObserved).toISOString(),
   };
 }

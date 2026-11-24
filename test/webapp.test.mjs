@@ -5,9 +5,35 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
+import { execFile } from 'node:child_process';
 import { eventually, fixture, records } from './support/instance.mjs';
 import { appFetch, createExecution, executionDetail, launchWebapp } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
+
+test('el cleanup cierra la app incluso si una aserción falla antes del cierre explícito', async () => {
+  const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
+    ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : tmpdir());
+  const root = await mkdtemp(join(temporary, 'webapp-cleanup-'));
+  const project = join(root, 'project');
+  await mkdir(project);
+  const script = `
+    import test from 'node:test';
+    import assert from 'node:assert/strict';
+    import { launchWebapp } from ${JSON.stringify(new URL('./support/webapp.mjs', import.meta.url).href)};
+    test('synthetic early failure', async t => {
+      await launchWebapp(t, { root: ${JSON.stringify(root)}, projects: [${JSON.stringify(project)}],
+        captureDirectory: ${JSON.stringify(join(root, 'capture'))}, url: () => 'http://127.0.0.1:1' });
+      assert.fail('synthetic assertion before explicit app.close');
+    });
+  `;
+  const result = await new Promise(resolve => execFile(process.execPath,
+    ['--input-type=module', '--eval', script], { timeout: 15000 },
+    (error, stdout, stderr) => resolve({ error, stdout, stderr })));
+  assert.equal(result.error?.killed, false, result.stderr);
+  assert.equal(result.error?.code, 1, 'the failed assertion must remain a normal test failure, not a hung server');
+  assert.match(result.stdout + result.stderr, /synthetic assertion before explicit app.close/);
+  await assert.rejects(readFile(join(root, 'webapp-data', 'index-review-required')), { code: 'ENOENT' });
+});
 
 test('la app lanza una ejecución desde su API y conserva el resultado autorizado', { timeout: 300000 }, async t => {
   const instance = await fixture(t, { simulation: true, config: { secrets: ['synthetic-secret-42'] } });
@@ -182,7 +208,6 @@ test('la app rechaza peticiones ajenas y valida la creación', { timeout: 90000 
 test('la misma clave sigue siendo idempotente al reconciliar el cierre anterior', { timeout: 180000 }, async t => {
   const instance = await fixture(t, { simulation: true });
   const { app } = await launchWebapp(t, instance);
-  t.after(() => app.close());
   const previous = await createExecution(app, 'race-previous', 'Encargo previo sintético.');
   await eventually(async () => (await records(instance.captureDirectory))
     .some(row => row.type === 'session.execution.succeeded'), 'previous assignment did not finish');
@@ -203,7 +228,6 @@ test('la misma clave sigue siendo idempotente al reconciliar el cierre anterior'
 test('el cierre de la raíz no libera un árbol activo ni una pregunta pendiente', { timeout: 240000 }, async t => {
   const instance = await fixture(t, { simulation: true, admissionGate: true });
   const { app } = await launchWebapp(t, instance);
-  t.after(() => app.close());
   const created = await createExecution(app, 'tree-root', 'SYNTHETIC_HELD_ADMISSION');
   const id = created.body.execution.id;
   const root = await eventually(async () => (await executionDetail(app, id)).body.execution.sessionID,
@@ -225,6 +249,16 @@ test('el cierre de la raíz no libera un árbol activo ni una pregunta pendiente
   await instance.api(`/api/experimental/session/${child.id}/wait`, {});
   await eventually(async () => (await records(instance.captureDirectory))
     .some(row => row.sessionID === child.id && row.type === 'session.execution.interrupted'), 'child did not stop');
+  await eventually(async () => {
+    const detail = (await executionDetail(app, id)).body;
+    const rows = (await records(instance.captureDirectory)).filter(row => [root, child.id].includes(row.sessionID));
+    const lastObserved = rows.reduce((latest, row) => Math.max(latest, row.observedAt), 0);
+    assert.deepEqual(new Set(detail.capture.scope.sessionIDs), new Set([root, child.id]));
+    assert.equal(detail.capture.scope.kind, 'observed-session-tree');
+    assert.equal(detail.capture.scope.rootSessionID, root);
+    assert.ok(detail.capture.omissions.some(row => row.sessionID === child.id));
+    return detail.capture.horizon === new Date(lastObserved).toISOString();
+  }, 'the public evidence horizon did not include the observed descendant');
   assert.equal((await executionDetail(app, id)).body.execution.status, 'running');
   assert.equal((await createExecution(app, 'tree-question', 'No debe despacharse.')).status, 409);
   await instance.api(`/api/session/${root}/form/${form.id}/reply`, { answer: { answer: 'Synthetic answer' } });
@@ -235,7 +269,6 @@ test('el cierre de la raíz no libera un árbol activo ni una pregunta pendiente
 test('el cierre no oculta un permiso pendiente en un descendiente', { timeout: 240000 }, async t => {
   const instance = await fixture(t, { simulation: true, syntheticTools: true, admissionGate: true });
   const { app } = await launchWebapp(t, instance);
-  t.after(() => app.close());
   const created = await createExecution(app, 'permission-root', 'SYNTHETIC_HELD_ADMISSION');
   const id = created.body.execution.id;
   const root = await eventually(async () => (await executionDetail(app, id)).body.execution.sessionID,
@@ -264,7 +297,6 @@ for (const failureTarget of ['index', 'directory']) test(`un fallo real de ${fai
   { timeout: 240000 }, async t => {
     const instance = await fixture(t, { simulation: true });
     const { app, configPath } = await launchWebapp(t, instance);
-    t.after(() => app.close());
     const created = await createExecution(app, 'index-root', 'SYNTHETIC_LONG_RUNNING');
     const id = created.body.execution.id;
     await eventually(async () => (await executionDetail(app, id)).body.execution.dispatch === 'admitted',
