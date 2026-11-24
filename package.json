@@ -4,12 +4,18 @@
   "private": true,
   "type": "module",
   "exports": { ".": "./dist/index.js" },
-  "files": ["dist", "docs/capture-v1.md", "scripts/inspect.mjs"],
+  "files": ["dist", "docs/capture-v1.md", "docs/pilot-verification.md", "scripts/inspect.mjs"],
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
+    "lint": "npm run lint:comments",
+    "lint:comments": "node scripts/lint-comments.mjs",
+    "lint:comments:ratchet": "node scripts/lint-comments.mjs --ratchet",
+    "comments:inventory": "node scripts/lint-comments.mjs --inventory",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs"
+    "verify:pilot": "npm run build && node --test --test-concurrency=1 test/pilot.test.mjs",
+    "test": "npm run lint && npm run build && node --test --test-concurrency=1 test/*.test.mjs"
   },
   "dependencies": { "@opencode/plugin": "2.1.2" },
   "devDependencies": { "@types/node": "^26.0.0", "typescript": "^6.0.0" }

@@ -1,10 +1,11 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import assert from 'node:assert/strict';
+import { startSimulation } from './simulation.mjs';
 
 export const repository = fileURLToPath(new URL('../../', import.meta.url));
 const binary = process.env.OPENCODE_TEST_BIN ?? (process.platform === 'win32'
@@ -12,6 +13,7 @@ const binary = process.env.OPENCODE_TEST_BIN ?? (process.platform === 'win32'
 const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
   ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : process.env.TMPDIR ?? '/tmp');
 let installed;
+let simulationHome;
 
 async function packagePlugin() {
   const root = await mkdtemp(join(temporary, 'recorder-package-'));
@@ -20,7 +22,7 @@ async function packagePlugin() {
     [npm, 'pack', '--json', '--pack-destination', root], { cwd: repository, encoding: 'utf8' }));
   execFileSync(process.execPath, [npm, 'install', '--offline', '--ignore-scripts', '--omit=dev',
     '--no-audit', '--no-fund', '--prefix', root, join(root, packed[0].filename)], { encoding: 'utf8' });
-  return join(root, 'node_modules/@evagentic/recorder');
+  return { directory: join(root, 'node_modules/@evagentic/recorder'), manifest: packed[0] };
 }
 
 export async function eventually(check, message, timeout = 20000) {
@@ -35,7 +37,8 @@ export async function eventually(check, message, timeout = 20000) {
 
 export async function fixture(t, options = {}) {
   installed ??= packagePlugin();
-  const plugin = await installed;
+  const packaged = await installed;
+  const plugin = packaged.directory;
   const root = await mkdtemp(join(temporary, 'recorder-case-'));
   const projects = [join(root, 'project-a'), join(root, 'project-b')];
   for (const [index, directory] of projects.entries()) {
@@ -45,6 +48,11 @@ export async function fixture(t, options = {}) {
     execFileSync('git', ['-C', directory, 'add', 'README.md']);
     execFileSync('git', ['-C', directory, '-c', 'user.name=Synthetic', '-c',
       'user.email=synthetic@example.invalid', 'commit', '--quiet', '-m', `project ${index}`]);
+  }
+  if (options.projectAlias) {
+    const target = projects[0];
+    projects[0] = join(root, 'project-alias');
+    await symlink(target, projects[0], process.platform === 'win32' ? 'junction' : 'dir');
   }
   const captureDirectory = join(root, 'capture');
   const configFile = join(root, 'recorder.local.json');
@@ -58,68 +66,193 @@ export async function fixture(t, options = {}) {
     HOME: root, USERPROFILE: root, APPDATA: join(root, 'appdata'), LOCALAPPDATA: join(root, 'localappdata'),
     XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'),
     XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache'),
+    OPENCODE_TEST_HOME: root,
+    OPENCODE_CONFIG_PROJECT_DISABLE: '1',
     PROGRAMDATA: join(root, 'system'), TEMP: root, TMP: root, GIT_CONFIG_NOSYSTEM: '1',
     OPENCODE_DB: join(root, 'data/opencode/test.db'), EVAGENTIC_CONFIG: configFile,
     OPENCODE_PASSWORD: 'synthetic-instance-password',
   });
   await mkdir(join(root, 'config/opencode'), { recursive: true });
   await mkdir(join(root, 'config/opencode/plugins'));
-  await writeFile(join(root, 'config/opencode/plugins/recorder.ts'),
+  if (options.loadRecorder !== false) await writeFile(join(root, 'config/opencode/plugins/recorder.ts'),
     `export { default } from ${JSON.stringify(pathToFileURL(join(plugin, 'dist/index.js')).href)};\n`);
+  if (options.syntheticDefinitions) {
+    await writeFile(join(root, 'outside-definition.md'), 'synthetic-unrelated-file-content\n');
+    for (const directory of projects) {
+      for (const id of ['observed', 'unused']) {
+        await mkdir(join(directory, '.opencode/skills', id), { recursive: true });
+        await writeFile(join(directory, '.opencode/skills', id, 'SKILL.md'),
+          `---\nname: Synthetic ${id}\ndescription: Synthetic ${id} instructions\n---\nDeployed ${id} body.\n`);
+      }
+      await writeFile(join(directory, 'AGENTS.md'), 'Synthetic project instructions.\n');
+    }
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-definitions.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      export default Plugin.define({ id: 'synthetic.definitions', async setup(ctx) {
+        await ctx.skill.transform(editor => {
+          editor.add({ id: 'outside', name: 'Synthetic outside', description: 'Synthetic outside instructions',
+            path: ${JSON.stringify(join(root, 'outside-definition.md'))}, content: 'Synthetic authorized registry body.' });
+          editor.add({ id: 'transformed', name: 'Synthetic transformed',
+          description: 'Synthetic transformed instructions',
+          path: ctx.location.directory + '/.opencode/skills/observed/SKILL.md',
+          content: 'Transformed observed body. synthetic-definition-secret\\nCookie: first=synthetic-definition-cookie; second=synthetic-definition-cookie-two\\nEnd of instructions.' });
+        });
+        await ctx.agent.transform(editor => editor.update('build', agent => {
+          agent.system = 'Synthetic transformed agent instructions.';
+        }));
+        await ctx.session.hook('context', event => {
+          event.system.push({ type: 'text', text: 'Synthetic later hook instructions.' });
+        });
+      } });
+    `);
+  }
+  if (options.syntheticTools) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-tools.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      export default Plugin.define({ id: 'synthetic.tools', async setup(ctx) {
+        await ctx.tool.transform(editor => {
+          editor.namespace({ name: 'synthetic.actions', description: 'Synthetic actions' });
+          editor.add({ name: 'inspect', description: 'Synthetic inspection',
+            options: { namespace: 'synthetic.actions', codemode: false },
+            input: { type: 'object', properties: { mode: { type: 'string' }, payload: { type: 'object' } },
+              required: ['mode', 'payload'], additionalProperties: false },
+            execute: async (input, context) => {
+              const cookieText = input.payload.cookieText ? '\\n' + input.payload.cookieText : '';
+              if (input.mode === 'file') return { content: [{ type: 'file', uri: 'data:text/plain,synthetic-file-secret',
+                mime: 'text/plain', name: 'synthetic-file-name' }] };
+              if (input.mode === 'failure') throw new Error('Synthetic failure synthetic-secret-42 Bearer synthetic-error-token' + cookieText);
+              if (input.mode === 'hold') await new Promise(resolve => context.signal.addEventListener('abort', resolve, { once: true }));
+              if (input.mode === 'approval') await ctx.permission.assert({ sessionID: context.sessionID,
+                source: { type: 'tool', messageID: context.messageID, id: context.id },
+                action: 'synthetic.approval', resources: ['Synthetic resource synthetic-secret-42'],
+                metadata: { ignored: 'synthetic-permission-metadata-secret' } });
+              return { content: [{ type: 'text', text: 'Synthetic result synthetic-secret-42 Bearer synthetic-output-token' + cookieText }] };
+            } });
+          editor.add({ name: 'unused', description: 'Never invoked', options: { codemode: false },
+            input: { type: 'object', properties: {} }, execute: async () => ({ content: 'Unused' }) });
+        });
+      } });
+    `);
+  }
+  if (options.syntheticDeliverables) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-deliverables.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      import { readFile, writeFile } from 'node:fs/promises';
+      import { pathToFileURL } from 'node:url';
+      export default Plugin.define({ id: 'synthetic.deliverables', async setup(ctx) {
+        await ctx.tool.transform(editor => editor.add({ name: 'synthetic_deliverable',
+          description: 'Produce or consult a synthetic deliverable', options: { codemode: false },
+          input: { type: 'object', properties: { mode: { type: 'string' } }, required: ['mode'] },
+          execute: async ({ mode }) => {
+            const path = ctx.location.directory + '/result.txt';
+            if (mode === 'produce') await writeFile(path, 'Synthetic produced result. synthetic-deliverable-secret\\nBearer synthetic-deliverable-token');
+            if (mode === 'consult') await readFile(path, 'utf8');
+            const paths = mode === 'limits' ? ['missing.txt', 'directory', 'binary.bin', 'large.txt', 'escape/outside.txt'] : ['result.txt'];
+            return { content: paths.map(path => ({ type: 'file',
+              uri: pathToFileURL(ctx.location.directory + '/' + path).href, mime: 'text/plain' })) };
+          } }));
+      } });
+    `);
+  }
+  if (options.nativeWrite) await writeFile(join(root, 'config/opencode/plugins/zz-native-write.ts'), `
+    import { Plugin } from '@opencode/plugin';
+    export default Plugin.define({ id: 'synthetic.native-write', async setup(ctx) {
+      await ctx.tool.transform(editor => {
+        for (const name of ['read', 'write']) editor.update(name, tool => {
+          tool.options = { ...tool.options, codemode: false };
+        });
+      });
+    } });
+  `);
+  if (options.admissionGate) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-admission.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      import { readFile, writeFile } from 'node:fs/promises';
+      import { setTimeout } from 'node:timers/promises';
+      export default Plugin.define({ id: 'synthetic.admission', async setup(ctx) {
+        await ctx.session.hook('prompt', async ({ prompt }) => {
+          if (prompt.text !== 'SYNTHETIC_HELD_ADMISSION') return;
+          await writeFile(${JSON.stringify(join(root, 'admission-entered'))}, 'entered');
+          while (true) {
+            try { await readFile(${JSON.stringify(join(root, 'admission-release'))}); return; }
+            catch { await setTimeout(20); }
+          }
+        });
+      } });
+    `);
+  }
+  if (options.lateDescendant) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-descendant.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      export default Plugin.define({ id: 'synthetic.descendant', async setup(ctx) {
+        const controller = new AbortController();
+        let created = false;
+        const task = (async () => {
+          for await (const event of ctx.event.subscribe({ types: ['session.metadata.updated'], signal: controller.signal })) {
+            if (created || !event.data.metadata?.evagenticRecorder) continue;
+            const parent = await ctx.session.get({ sessionID: event.data.sessionID });
+            if (parent.location.directory !== ctx.location.directory) continue;
+            created = true;
+            await ctx.session.create({ parentID: parent.id, location: { directory: ctx.location.directory },
+              title: 'Synthetic late descendant', metadata: { syntheticLate: true } });
+          }
+        })().catch(() => {});
+        return async () => { controller.abort(); await task; };
+      } });
+    `);
+  }
   const serverConfig = { $schema: 'https://opencode.ai/config.json', update: 'disable',
     snapshots: false, ...options.serverConfig };
-  let simulationLog = '';
+  if (options.syntheticDefinitions) {
+    serverConfig.skills = [join(projects[options.projectIndex ?? 0], '.opencode/skills')];
+    serverConfig.instructions = [join(projects[options.projectIndex ?? 0], 'AGENTS.md')];
+  }
+  let simulationLog = () => '';
+  let simulationURL;
   if (options.simulation) {
-    const simulation = spawn('postman', ['simulation', 'run',
-      join(repository, 'postman/simulations/recorder/recorder.sim.yaml'),
-      '--port', 'auto', '--output', 'ndjson', '--no-history'], { cwd: repository, env });
-    let errors = '';
-    simulation.stdout.on('data', chunk => { simulationLog += chunk; });
-    simulation.stderr.on('data', chunk => { errors += chunk; });
-    simulation.on('error', error => { errors += error.message; });
-    t.after(async () => {
-      if (simulation.exitCode === null && simulation.signalCode === null) {
-        const exited = once(simulation, 'exit'); simulation.kill(); await exited;
-      }
-      await writeFile(join(root, 'sim.ndjson'), simulationLog);
-    });
-    const listening = await eventually(() => {
-      if (simulation.exitCode !== null) throw new Error(errors);
-      return simulationLog.split('\n').filter(Boolean).map(line => JSON.parse(line))
-        .find(event => event.event === 'listening' || event.type === 'listening');
-    }, 'synthetic model simulation did not listen');
-    const baseURL = `http://127.0.0.1:${listening.port}/model/v1`;
+    simulationHome ??= mkdtemp(join(temporary, 'recorder-simulation-home-'));
+    const home = await simulationHome;
+    const simulation = await startSimulation(t, { root, home, env });
+    simulationLog = simulation.log;
+    simulationURL = `http://127.0.0.1:${simulation.port}/model`;
+    const baseURL = `${simulationURL}/v1`;
     serverConfig.model = 'synthetic/synthetic';
     serverConfig.providers = { synthetic: { name: 'Synthetic',
       package: '@opencode/ai/providers/openai-compatible', settings: { baseURL, apiKey: 'synthetic-header-secret' },
-      models: { synthetic: { name: 'Synthetic', limit: { context: 32000, output: 1000 } } } } };
+      models: { synthetic: { name: 'Synthetic', limit: { context: 32000, output: 1000 },
+        ...(options.modelCost ? { cost: options.modelCost } : {}) } } } };
     serverConfig.policies = [{ action: 'provider.use', resource: '*', effect: 'deny' },
       { action: 'provider.use', resource: 'synthetic', effect: 'allow' }];
   }
   await writeFile(join(root, 'config/opencode/opencode.json'), JSON.stringify(serverConfig));
-  // Prove path isolation before opening a database or starting a server.
-  for (const name of ['data', 'config', 'cache', 'state', 'db']) {
+  for (const name of ['home', 'data', 'config', 'cache', 'state', 'db']) {
     const actual = execFileSync(binary, ['debug', 'paths', name], { env, cwd: root, encoding: 'utf8' }).trim();
     assert.ok(resolve(actual).startsWith(resolve(root)), `${name} escaped the isolated instance`);
   }
-  const child = spawn(binary, ['serve', '--hostname', '127.0.0.1', '--port', '0'], { env, cwd: root });
+  let child;
   let output = '';
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { output += chunk; });
-  child.on('error', error => { output += error.message; });
+  let address;
+  const start = async () => {
+    output = '';
+    child = spawn(binary, ['serve', '--hostname', '127.0.0.1', '--port', '0'], { env, cwd: root });
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    child.on('error', error => { output += error.message; });
+    address = await eventually(() => {
+      if (child.exitCode !== null) throw new Error(output);
+      return output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+    }, 'isolated server did not listen');
+  };
   const stop = async () => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
     const exited = once(child, 'exit');
     child.kill();
     await exited;
   };
   t.after(stop);
-  const address = await eventually(() => {
-    if (child.exitCode !== null) throw new Error(output);
-    return output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-  }, 'isolated server did not listen');
-  async function api(path, body) {
-    const response = await fetch(`${address}${path}`, { method: body === undefined ? 'GET' : 'POST',
+  await start();
+  async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
+    const response = await fetch(`${address}${path}`, { method,
       headers: { 'content-type': 'application/json',
         authorization: `Basic ${Buffer.from('opencode:synthetic-instance-password').toString('base64')}` },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -128,12 +261,13 @@ export async function fixture(t, options = {}) {
     assert.ok(response.ok, `${response.status}: ${text}`);
     return text ? JSON.parse(text) : undefined;
   }
-  return { root, projects, captureDirectory, configFile, api, stop, output: () => output,
-    simulationLog: () => simulationLog,
+  return { root, projects, captureDirectory, configFile, api, stop,
+    packageDirectory: plugin, packageManifest: packaged.manifest, url: () => address,
+    restart: async () => { await stop(); await start(); }, output: () => output,
+    simulationURL, simulationLog,
     plugins: async (directory = projects[0]) => (await api(`/api/plugin?location[directory]=${encodeURIComponent(directory)}`)).data };
 }
 
-// An independent consumer: only documented JSONL, never a recorder import or server database.
 export async function records(directory) {
   let names;
   try { names = await readdir(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }

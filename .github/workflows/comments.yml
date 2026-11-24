@@ -1,0 +1,22 @@
+name: Comments
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  no-comments:
+    runs-on: ubuntu-latest
+    env:
+      COMMENT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint:comments
+      - if: env.COMMENT_BASE != '' && env.COMMENT_BASE != '0000000000000000000000000000000000000000'
+        run: node scripts/lint-comments.mjs --base "$COMMENT_BASE"
+      - run: node --test test/comments.test.mjs

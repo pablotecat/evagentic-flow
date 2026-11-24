@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,10 @@ test('preparación comprueba OpenCode V2 y persiste un contrato inspeccionable',
   assert.equal(ready?.type, 'recorder.ready');
   assert.equal(ready?.runtimeVersion, '2.1.2');
   assert.equal(ready?.coverage.replay, false);
+  await instance.api('/api/location/reload', {});
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'Recarga sana.', resume: false });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .filter(row => row.type === 'recorder.ready').length === 2, 'healthy cleanup incorrectly latched a failure');
 });
 
 test('el encargo y la respuesta persisten sin cliente y tras finalizar la instancia', { timeout: 90000 }, async t => {
@@ -29,7 +33,6 @@ test('el encargo y la respuesta persisten sin cliente y tras finalizar la instan
   const { data: prompt } = await instance.api(`/api/session/${session.id}/prompt`, {
     text: 'Encargo autorizado. clave synthetic-secret-42.',
     metadata: { authorization: 'synthetic-metadata-secret' } });
-  // No event client, browser or export is connected while the model streams its reply.
   const evidence = await eventually(async () => {
     const all = await records(instance.captureDirectory);
     return all.some(row => row.type === 'session.text.ended') && all;
@@ -120,18 +123,195 @@ test('seleccionar cualquiera de dos proyectos solo cambia configuración y exclu
   }
 });
 
-test('un destino no escribible no se presenta como preparado', { timeout: 90000 }, async t => {
-  const instance = await fixture(t, { config: async ({ root }) => {
+test('un destino no escribible avisa y bloquea el encargo antes de comenzar', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true, config: async ({ root }) => {
     const blocked = join(root, 'blocked');
     await writeFile(blocked, 'Not a directory');
     return { captureDirectory: blocked };
   } });
   const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[0] } });
-  await instance.api(`/api/session/${session.id}/prompt`, { text: 'Preparation only', resume: false });
+  await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No comenzar sin captura.' }), /500:/);
   const plugin = await eventually(async () => (await instance.plugins()).find(row => row.id === 'evagentic.recorder'),
     'failed recorder was not reported');
-  assert.equal(plugin.state.status, 'failed');
+  assert.equal(plugin.state.status, 'active');
+  const { data } = await instance.api(`/api/session/${session.id}`);
+  assert.match(data.title, /Fallo del registrador/);
+  assert.equal(data.metadata.evagenticRecorder.status, 'failed');
+  assert.equal(data.metadata.evagenticRecorder.reason, 'preparation-failure');
+  assert.equal(data.metadata.evagenticRecorder.interruption.stop, 'unconfirmed');
+  assert.equal(data.metadata.evagenticRecorder.pilotReady, false);
+  assert.ok(!instance.simulationLog().includes('"event":"request"'), 'model ran despite failed preparation');
   assert.deepEqual(await records(instance.captureDirectory), []);
+});
+
+test('un fallo de escritura avisa, interrumpe sin navegador y conserva la evidencia', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true, projectIndex: 1 });
+  const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[1] } });
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING Flujo en Proyecto' });
+  const evidence = await eventually(async () => {
+    const all = await records(instance.captureDirectory);
+    return all.some(row => row.type === 'session.text.delta') && all;
+  }, 'controlled execution did not start');
+  const preserved = join(instance.root, 'preserved');
+  await rename(instance.captureDirectory, preserved);
+  await writeFile(instance.captureDirectory, 'Synthetic unavailable capture destination');
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'Barrera de escritura.', resume: false });
+  const notice = await eventually(async () => {
+    const { data } = await instance.api(`/api/session/${session.id}`);
+    return data.metadata?.evagenticRecorder?.interruption.stop === 'confirmed' && data.metadata.evagenticRecorder;
+  }, 'public recorder failure notice was not published');
+  assert.match(notice.notice, /Revisar antes de volver a ejecutar/);
+  assert.equal(notice.interruption.requested, true);
+  assert.equal(notice.interruption.result, 'accepted');
+  assert.equal(notice.reviewRequired, true);
+  assert.equal(notice.pilotReady, false);
+  await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+  const stopped = (await instance.api(`/api/session/${session.id}`)).data;
+  assert.equal(stopped.outcome, 'interrupted');
+  await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No reanudar sin revisión.' }),
+    /500:/);
+  assert.deepEqual((await records(preserved)).slice(0, evidence.length), evidence);
+  await unlink(instance.captureDirectory);
+  await rename(preserved, instance.captureDirectory);
+  const beforeReload = await records(instance.captureDirectory);
+  await instance.api('/api/location/reload', {});
+  await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No ignorar el fallo tras recargar.' }), /500:/);
+  assert.deepEqual(await records(instance.captureDirectory), beforeReload);
+  const excluded = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${excluded.id}/prompt`, { text: 'Proyecto fuera del alcance.' });
+  await instance.api(`/api/experimental/session/${excluded.id}/wait`, {});
+  assert.equal((await instance.api(`/api/session/${excluded.id}`)).data.outcome, 'succeeded');
+  const inspected = execFileSync(process.execPath, [fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url)),
+    instance.captureDirectory, session.id], { encoding: 'utf8' });
+  assert.ok(inspected.includes('SYNTHETIC_LONG_RUNNING Flujo en Proyecto'));
+});
+
+test('el fallo del agente registrado y los límites de cobertura no averían el registrador', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[0] } });
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_AGENT_FAILURE' });
+  await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+  const evidence = await eventually(async () => {
+    const all = await records(instance.captureDirectory);
+    return all.some(row => row.type === 'session.execution.failed') && all;
+  }, 'agent failure was not captured');
+  assert.ok(evidence.some(row => row.status === 'omitted' && row.omissions.includes('event-payload-not-captured')));
+  assert.ok(!evidence.some(row => row.type === 'recorder.failed'));
+  assert.equal((await instance.api(`/api/session/${session.id}`)).data.metadata?.evagenticRecorder, undefined);
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'Encargo admitido tras fallo del agente.', resume: false });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.content?.text === 'Encargo admitido tras fallo del agente.'), 'recorder incorrectly blocked the flow');
+  assert.ok(instance.simulationLog().includes('"statusCode":400'), 'agent failure did not cross real HTTP');
+});
+
+test('un error real de herramienta se registra sin solicitar la parada del flujo', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[0] } });
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_TOOL_FAILURE' });
+  await instance.api(`/api/experimental/session/${session.id}/wait`, {});
+  const messages = (await instance.api(`/api/session/${session.id}/message`)).data;
+  const tool = messages.flatMap(message => message.content ?? []).find(part => part.type === 'tool');
+  assert.equal(tool.state.metadata.error, true);
+  assert.deepEqual(tool.state.content, [{ type: 'text', text: 'Error: Synthetic tool failure' }]);
+  const evidence = await eventually(async () => {
+    const all = await records(instance.captureDirectory);
+    return all.some(row => row.type === 'session.tool.success') && all;
+  }, 'real tool failure was not captured');
+  const result = evidence.find(row => row.type === 'session.tool.success');
+  assert.equal(result.tool.reportedError, true);
+  assert.equal(result.tool.outcome, 'error');
+  assert.deepEqual(result.tool.output, [{ type: 'text', text: 'Error: Synthetic tool failure' }]);
+  assert.ok(!evidence.some(row => row.type === 'recorder.failed'));
+  assert.equal((await instance.api(`/api/session/${session.id}`)).data.metadata?.evagenticRecorder, undefined);
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'Barrera tras fallo de herramienta.', resume: false });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.content?.text === 'Barrera tras fallo de herramienta.'), 'tool failure incorrectly blocked the recorder');
+});
+
+test('la configuración inválida avisa también a una sesión nueva sin admitir trabajo', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true, config: { version: 999 } });
+  for (let index = 0; index < 2; index++) {
+    const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[0] } });
+    await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No comenzar sin configuración válida.' }), /500:/);
+    const { data } = await instance.api(`/api/session/${session.id}`);
+    assert.match(data.title, /Fallo del registrador/);
+    assert.equal(data.metadata.evagenticRecorder.reviewRequired, true);
+    assert.equal(data.metadata.evagenticRecorder.pilotReady, false);
+  }
+  assert.deepEqual(await records(instance.captureDirectory), []);
+  assert.ok(!instance.simulationLog().includes('"event":"request"'));
+});
+
+test('perder una sesión en la adquisición interrumpe la ejecución simple y conserva el diagnóstico', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[0] } });
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING adquisición' });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.type === 'session.text.delta'), 'controlled execution did not start');
+  const removed = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${removed.id}`, undefined, 'DELETE');
+  const state = await eventually(async () => {
+    const { data } = await instance.api(`/api/session/${session.id}`);
+    return data.metadata?.evagenticRecorder?.interruption.stop === 'confirmed' && data.metadata.evagenticRecorder;
+  }, 'acquisition failure did not interrupt the observed execution');
+  assert.equal(state.reason, 'event-stream-or-persistence-failure');
+  const evidence = await eventually(async () => {
+    const all = await records(instance.captureDirectory);
+    return all.some(row => row.type === 'recorder.failed') && all;
+  }, 'acquisition failure diagnosis was not preserved');
+  assert.ok(evidence.some(row => row.content?.text === 'SYNTHETIC_LONG_RUNNING adquisición'));
+  assert.equal((await instance.api(`/api/session/${session.id}`)).data.outcome, 'interrupted');
+});
+
+test('perder la ruta del proyecto no impide interrumpir el trabajo ya observado', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true, projectAlias: true });
+  const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[0] } });
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING ruta perdida' });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.type === 'session.text.delta'), 'controlled execution did not start');
+  await unlink(instance.projects[0]);
+  await instance.api(`/api/session/${session.id}`, { title: 'Evento tras perder la ruta.' }, 'PATCH');
+  await eventually(async () => {
+    const { data } = await instance.api(`/api/session/${session.id}`);
+    return data.metadata?.evagenticRecorder?.interruption.stop === 'confirmed';
+  }, 'previously observed execution was not interrupted after losing its path');
+});
+
+test('una admisión en curso no despacha modelos después de fallar la captura', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true, admissionGate: true });
+  const session = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING admisión' });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.type === 'session.text.delta'), 'controlled execution did not start');
+  const plugins = await instance.plugins();
+  assert.equal(plugins.find(plugin => plugin.id === 'synthetic.admission')?.state.status, 'active', JSON.stringify(plugins));
+  const pending = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+  const admission = instance.api(`/api/session/${pending.id}/prompt`, { text: 'SYNTHETIC_HELD_ADMISSION' })
+    .then(value => ({ value }), error => ({ error }));
+  await eventually(() => readFile(join(instance.root, 'admission-entered')), 'admission did not reach the public delaying hook');
+  await rename(instance.captureDirectory, join(instance.root, 'preserved'));
+  await writeFile(instance.captureDirectory, 'Synthetic destination failure');
+  await instance.api(`/api/session/${session.id}`, { title: 'Barrera de fallo.' }, 'PATCH');
+  await eventually(async () => (await instance.api(`/api/session/${session.id}`)).data.metadata
+    ?.evagenticRecorder?.interruption.stop === 'confirmed', 'capture failure did not stop the running execution');
+  await writeFile(join(instance.root, 'admission-release'), 'release');
+  await admission;
+  await instance.api(`/api/experimental/session/${pending.id}/wait`, {});
+  const dispatches = await (await fetch(`${instance.simulationURL}/control/held-admissions`)).json();
+  assert.equal(dispatches.count, 0, 'in-flight admission escaped the failed-recorder guard');
+});
+
+test('un cierre sin limpieza exige revisión aunque no pudiera guardar el fallo final', { timeout: 90000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { data: session } = await instance.api('/api/session', { location: { directory: instance.projects[0] } });
+  await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING cierre abrupto' });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.type === 'session.text.delta'), 'controlled execution did not start');
+  await instance.restart();
+  const evidence = await records(instance.captureDirectory);
+  await assert.rejects(instance.api(`/api/session/${session.id}/prompt`, { text: 'No ignorar el cierre sin limpieza.' }), /500:/);
+  assert.deepEqual(await records(instance.captureDirectory), evidence);
+  assert.equal((await instance.api(`/api/session/${session.id}`)).data.metadata.evagenticRecorder.reviewRequired, true);
 });
 
 test('un secreto en un identificador suministrado por el cliente no se persiste', { timeout: 90000 }, async t => {
