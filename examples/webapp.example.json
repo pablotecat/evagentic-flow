@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "opencodeURL": "http://127.0.0.1:43717",
+  "opencodePassword": "synthetic-opencode-password",
+  "projectDirectory": "C:/synthetic/project-a",
+  "captureDirectory": "C:/synthetic/captures",
+  "dataDirectory": "C:/synthetic/webapp-data"
+}

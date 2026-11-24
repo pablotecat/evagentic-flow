@@ -15,8 +15,9 @@
     "comments:inventory": "node scripts/lint-comments.mjs --inventory",
     "typecheck": "tsc --noEmit",
     "verify:pilot": "npm run build && node --test --test-concurrency=1 test/pilot.test.mjs",
-    "test": "npm run lint && npm run build && node --test --test-concurrency=1 test/*.test.mjs"
+    "test": "npm run lint && npm run build && node --test --test-concurrency=1 test/*.test.mjs",
+    "webapp": "node webapp/server.mjs"
   },
   "dependencies": { "@opencode/plugin": "2.1.2" },
-  "devDependencies": { "@types/node": "^26.0.0", "typescript": "^6.0.0" }
+  "devDependencies": { "@types/node": "^26.0.0", "playwright": "^1.65.1", "typescript": "^6.0.0" }
 }
