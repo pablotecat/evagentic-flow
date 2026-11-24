@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import net from 'node:net';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { eventually, fixture, records } from './support/instance.mjs';
-import { launchWebapp } from './support/webapp.mjs';
+import { appFetch, launchWebapp } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
 
 const upload = async (page, text) => {
@@ -16,6 +18,27 @@ const awaitStatus = (page, fragment, timeout = 180000) =>
   page.waitForFunction(value =>
     document.querySelector('#execution-status')?.textContent?.includes(value) ?? false,
     fragment, { timeout });
+
+const freePort = () => new Promise((resolve, reject) => {
+  const probe = net.createServer();
+  probe.once('error', reject);
+  probe.listen(0, '127.0.0.1', () => {
+    const { port } = probe.address();
+    probe.close(() => resolve(port));
+  });
+});
+
+const hashCapture = async directory => {
+  const names = (await readdir(directory)).filter(name => name.endsWith('.jsonl')).sort();
+  const parts = [];
+  for (const name of names) {
+    parts.push(name, createHash('sha256').update(await readFile(join(directory, name))).digest('hex'));
+  }
+  return parts.join('\n');
+};
+
+const admittedCount = async instance => (await records(instance.captureDirectory))
+  .filter(row => row.type === 'session.inbox.enqueued' && row.content?.role === 'user').length;
 
 test('el navegador lanza, observa y conserva una ejecución de Flujo en Proyecto', { timeout: 480000 }, async t => {
   const instance = await fixture(t, { simulation: true, admissionGate: true,
@@ -112,4 +135,135 @@ test('el navegador lanza, observa y conserva una ejecución de Flujo en Proyecto
   await page.locator('#history button').first().click();
   await page.waitForFunction(() => document.querySelector('[aria-label="Mensajes"]')?.textContent
     ?.includes('Respuesta autorizada') ?? false, undefined, { timeout: 30000 });
+});
+
+test('la pestaña recupera el seguimiento al recargarse o cerrarse sin detener ni repetir el trabajo', { timeout: 480000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  t.after(() => app.close());
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(app.url);
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: disponible') ?? false, undefined, { timeout: 60000 });
+
+  await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+  await upload(page, 'Encargo largo del navegador. SYNTHETIC_LONG_RUNNING');
+  await awaitStatus(page, 'En ejecución');
+  assert.equal(await page.locator('.dispatch').innerText(), 'Despacho: encargo admitido.');
+  const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+  const detailed = (await appFetch(app, `/api/executions/${executionId}`)).body;
+  assert.equal(await admittedCount(instance), 1);
+
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+    undefined, { timeout: 60000 });
+  await page.locator('#history button').first().click();
+  await awaitStatus(page, 'En ejecución');
+  const board = await page.locator('#conversation').innerText();
+  assert.ok(board.includes(executionId), 'a reload lost the persistent execution identity');
+  assert.ok(board.includes(detailed.execution.sessionID), 'a reload lost the root session identity');
+  assert.ok(board.includes('Encargo largo del navegador.'));
+  assert.ok(board.includes('Evidencia hasta'));
+  assert.equal(await admittedCount(instance), 1, 'a reload dispatched the assignment again');
+
+  await browser.close();
+  await eventually(async () => (await appFetch(app, `/api/executions/${executionId}`))
+    .body.execution.status === 'succeeded', 'closing the tab stopped the work', 180000);
+  assert.equal(await admittedCount(instance), 1, 'a closed tab dispatched the assignment again');
+  const digest = await hashCapture(instance.captureDirectory);
+
+  const browserAgain = await chromium.launch();
+  t.after(() => browserAgain.close());
+  const pageAgain = await browserAgain.newPage();
+  await pageAgain.goto(app.url);
+  await pageAgain.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+    undefined, { timeout: 60000 });
+  await pageAgain.locator('#history button').first().click();
+  await awaitStatus(pageAgain, 'Finalizada técnicamente');
+  const boardAgain = await pageAgain.locator('#conversation').innerText();
+  assert.ok(boardAgain.includes(executionId));
+  assert.ok(boardAgain.includes('Respuesta autorizada'));
+  assert.equal(await admittedCount(instance), 1, 'reopening the browser dispatched work again');
+  assert.equal(await hashCapture(instance.captureDirectory), digest,
+    'querying the history after a reload and reopen altered the original capture bytes');
+});
+
+test('la caída del motor se muestra como pendiente de comprobar y reconectar no relanza el trabajo', { timeout: 480000 }, async t => {
+  const appPort = await freePort();
+  const enginePort = await freePort();
+  const instance = await fixture(t, { simulation: true, enginePort });
+  const { app, configPath } = await launchWebapp(t, instance, { appPort });
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(app.url);
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: disponible') ?? false, undefined, { timeout: 60000 });
+
+  await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+  await upload(page, 'Encargo largo desconectado. SYNTHETIC_LONG_RUNNING');
+  await awaitStatus(page, 'En ejecución');
+  const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+  const anchored = (await appFetch(app, `/api/executions/${executionId}`)).body;
+  assert.equal(await admittedCount(instance), 1);
+
+  await app.close();
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Sin conexión con la app local') ?? false, undefined, { timeout: 60000 });
+  const restarted = await startApp({ configPath, port: appPort });
+  t.after(() => restarted.close());
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: disponible') ?? false, undefined, { timeout: 60000 });
+  const resumed = (await appFetch(restarted, `/api/executions/${executionId}`)).body;
+  assert.equal(resumed.execution.status, 'running');
+  assert.equal(resumed.execution.sessionID, anchored.execution.sessionID);
+  assert.equal(resumed.execution.dispatch, 'admitted');
+  await awaitStatus(page, 'En ejecución');
+  assert.equal(await admittedCount(instance), 1, 'an app restart dispatched the assignment again');
+
+  await instance.stop();
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: no disponible · Captura: preparada') ?? false, undefined, { timeout: 60000 });
+  await awaitStatus(page, 'En ejecución');
+  await page.waitForFunction(() => document.querySelector('#engine-offline')?.textContent
+    ?.includes('desenlace pendiente de comprobar') ?? false, undefined, { timeout: 60000 });
+  const offlineBoard = await page.locator('#conversation').innerText();
+  assert.ok(offlineBoard.includes('Encargo largo desconectado.'));
+  assert.ok(offlineBoard.includes('Sin respuesta observada todavía'));
+  assert.ok(!offlineBoard.includes('Finalizada técnicamente'));
+  const digest = await hashCapture(instance.captureDirectory);
+  assert.equal(await admittedCount(instance), 1);
+
+  await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+  await upload(page, 'No debe despacharse con el desenlace por comprobar.');
+  await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent
+    ?.includes('ocupado') ?? false, undefined, { timeout: 60000 });
+
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: no disponible') ?? false, undefined, { timeout: 60000 });
+  await page.locator('#history button').first().click();
+  await awaitStatus(page, 'En ejecución');
+  await page.waitForFunction(() => document.querySelector('#engine-offline')?.textContent
+    ?.includes('desenlace pendiente de comprobar') ?? false, undefined, { timeout: 60000 });
+  assert.equal(await hashCapture(instance.captureDirectory), digest,
+    'reloading without an engine altered the original capture bytes');
+
+  await instance.restart();
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: disponible') ?? false, undefined, { timeout: 60000 });
+  await awaitStatus(page, 'En ejecución');
+  await page.waitForFunction(() => document.querySelector('#engine-offline') === null,
+    undefined, { timeout: 60000 });
+  assert.equal(await admittedCount(instance), 1, 'a reconnection re-sent the assignment');
+  assert.equal(await hashCapture(instance.captureDirectory), digest,
+    'reconnecting altered the original capture bytes');
+
+  await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+  await upload(page, 'Sigue ocupado hasta verificar el desenlace.');
+  await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent
+    ?.includes('ocupado') ?? false, undefined, { timeout: 60000 });
+  assert.equal(await hashCapture(instance.captureDirectory), digest);
 });

@@ -71,6 +71,22 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
 - **Un único envío inicial.** La conversación de una ejecución no habilita
   nuevos turnos de trabajo ni un botón «Finalizar ejecución» (aplazado a #22).
   «Nuevo encargo» abre otra conversación con otra clave; el candado decide.
+- **Seguimiento fuera de la pestaña ([#26](https://github.com/pablotecat/evagentic-flow/issues/26)).**
+  El ciclo de vida sigue perteneciendo al servidor local: recargar o cerrar
+  el navegador no detiene el trabajo ni despacha otro encargo, y reabrir
+  recupera identidad, sesión raíz y evidencia persistidas. La conexión del
+  navegador con la app se muestra como señal propia («Sin conexión con la
+  app local») separada del motor, la captura y el desenlace. Con el motor
+  inaccesible y una ejecución no terminal, la vista muestra «desenlace
+  pendiente de comprobar» y nunca éxito ni consumo; el aviso se retira al
+  volver a alcanzar el motor, sin que una reconexión acredite por sí sola
+  el desenlace ni reenvíe el encargo. El detalle histórico expone el
+  horizonte temporal de la evidencia («Evidencia hasta»: el último momento
+  observado de la captura de esa ejecución), distingue «sin filas de
+  captura» de «captura no consultable», y no reconstruye texto no capturado:
+  no hay replay ni backfill. La app puede relanzarse en el mismo puerto
+  (puerto interno opcional) para comprobar que la reconstrucción parte del
+  índice persistente, no de la memoria del navegador.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
   peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
   páginas externas no puedan despachar trabajo. No usa cookies ni acceso
@@ -93,6 +109,12 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   disponible/no disponible, envío único, respuesta y finalización técnica,
   carrera de peticiones simultáneas sin doble despacho, recarga sin relanzar,
   rechazo entre pestañas e histórico tras reinicio con y sin motor.
+  #26 añade recarga y cierre del navegador con trabajo en curso
+  (identidad, ausencia de nuevos despachos y bytes de captura preservados),
+  reinicio de la app en el mismo origen con la pestaña abierta (señal de
+  desconexión, reconciliación desde el índice sin reenvío) y caída del motor
+  en curso con aviso de desenlace pendiente, proyecto ocupado al reconectar
+  y consulta histórica sin motor.
 
 ## Límites
 

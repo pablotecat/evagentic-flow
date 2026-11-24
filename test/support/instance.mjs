@@ -234,7 +234,8 @@ export async function fixture(t, options = {}) {
   let address;
   const start = async () => {
     output = '';
-    child = spawn(binary, ['serve', '--hostname', '127.0.0.1', '--port', '0'], { env, cwd: root });
+    child = spawn(binary, ['serve', '--hostname', '127.0.0.1',
+      '--port', String(options.enginePort ?? 0)], { env, cwd: root });
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
     child.on('error', error => { output += error.message; });

@@ -35,7 +35,7 @@ export async function loadAppConfig(filename) {
   return { ...config, projectKey: await realpath(config.projectDirectory) };
 }
 
-export async function startApp({ configPath }) {
+export async function startApp({ configPath, port: requestedPort }) {
   const config = await loadAppConfig(configPath);
   const engine = createEngine({ baseURL: config.opencodeURL, password: config.opencodePassword });
   const store = createStore(config.dataDirectory);
@@ -250,8 +250,10 @@ export async function startApp({ configPath }) {
         conversation: evidence?.ok ? { entries: evidence.entries, responses: evidence.responses }
           : { entries: [], responses: [] },
         capture: evidence?.ok
-          ? { readable: true, captureIDs: evidence.captureIDs, recorderFailed: evidence.recorderFailed }
-          : { readable: false, reason: evidence?.reason ?? 'session-not-confirmed', captureIDs: [], recorderFailed: false },
+          ? { readable: true, captureIDs: evidence.captureIDs, recorderFailed: evidence.recorderFailed,
+            horizon: evidence.horizon }
+          : { readable: false, reason: evidence?.reason ?? 'session-not-confirmed',
+            captureIDs: [], recorderFailed: false, horizon: null },
       });
     }
     return json(response, 404, { error: 'not-found' });
@@ -267,7 +269,7 @@ export async function startApp({ configPath }) {
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+    server.listen(requestedPort ?? 0, '127.0.0.1', resolve);
   });
   port = server.address().port;
 

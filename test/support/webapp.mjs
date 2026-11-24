@@ -13,7 +13,7 @@ export async function launchWebapp(t, instance, options = {}) {
     dataDirectory: join(instance.root, 'webapp-data'),
     ...options.appConfig,
   }, null, 2));
-  return { app: await startApp({ configPath }), configPath };
+  return { app: await startApp({ configPath, port: options.appPort }), configPath };
 }
 
 export async function appFetch(app, path, options = {}) {

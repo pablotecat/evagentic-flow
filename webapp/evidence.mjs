@@ -47,6 +47,8 @@ export async function readSession(captureDirectory, sessionID) {
   const read = await readRows(captureDirectory);
   if (!read.ok) return { ok: false, reason: read.reason };
   const rows = read.rows.filter(row => row.sessionID === sessionID);
+  const lastObserved = rows.reduce((latest, row) =>
+    Number.isFinite(row.observedAt) && row.observedAt > latest ? row.observedAt : latest, 0);
   return {
     ok: true,
     rows: read.rows,
@@ -57,5 +59,6 @@ export async function readSession(captureDirectory, sessionID) {
       .map(row => ({ text: row.content.text })),
     captureIDs: [...new Set(rows.map(row => row.captureID).filter(Boolean))],
     recorderFailed: read.rows.some(row => row.type === 'recorder.failed'),
+    horizon: lastObserved ? new Date(lastObserved).toISOString() : null,
   };
 }

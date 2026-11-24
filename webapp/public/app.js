@@ -1,3 +1,5 @@
+const TERMINAL = ['succeeded', 'failed', 'interrupted'];
+
 const STATUS_LABELS = {
   pending: 'Pendiente de confirmación',
   running: 'En ejecución',
@@ -15,6 +17,7 @@ const DISPATCH_LABELS = {
 
 const state = {
   health: null,
+  connected: null,
   executions: [],
   selected: null,
   detail: null,
@@ -51,6 +54,10 @@ function el(tag, attributes = {}, ...children) {
 }
 
 function renderStatus() {
+  if (state.connected === false) {
+    statusLine.textContent = 'Sin conexión con la app local; datos según la última respuesta conocida.';
+    return;
+  }
   const engine = state.health?.engine?.reachable ? 'Motor: disponible' : 'Motor: no disponible';
   const capture = state.health?.capture?.status === 'prepared'
     ? 'Captura: preparada' : 'Captura: no disponible';
@@ -68,8 +75,11 @@ function renderMessages() {
   for (const response of conversation.responses) {
     messages.append(el('li', { class: 'message assistant' }, el('h3', {}, 'Respuesta'), el('p', {}, response.text)));
   }
-  if (!conversation.responses.length && detail?.execution?.status === 'running') {
-    messages.append(el('li', { class: 'message waiting' }, el('p', {}, 'Sin respuesta observada todavía.')));
+  if (!conversation.responses.length) {
+    const pending = detail?.execution?.status === 'running';
+    messages.append(el('li', { class: 'message waiting' }, el('p', {}, pending
+      ? 'Sin respuesta observada todavía; la captura puede ir por detrás del trabajo.'
+      : 'Sin respuesta observada en la captura; no se reconstruye texto no capturado.')));
   }
   return messages;
 }
@@ -135,10 +145,17 @@ function renderExecution() {
     el('dl', { class: 'identity' },
       el('dt', {}, 'Ejecución'), el('dd', {}, execution.id),
       el('dt', {}, 'Sesión raíz'), el('dd', {}, execution.sessionID ?? 'sin sesión confirmada'),
-      el('dt', {}, 'Capturas'), el('dd', {}, capture?.readable && capture.captureIDs.length
-        ? capture.captureIDs.join(', ') : 'sin evidencia de captura registrada')),
+      el('dt', {}, 'Capturas'), el('dd', {}, capture?.readable
+        ? (capture.captureIDs.length ? capture.captureIDs.join(', ') : 'sin filas de captura de esta ejecución')
+        : `no consultable: ${capture?.reason ?? 'desconocido'}`),
+      el('dt', {}, 'Evidencia hasta'), el('dd', {}, capture?.readable
+        ? (capture.horizon ?? 'sin eventos observados') : 'horizonte desconocido')),
     el('p', { class: 'notice' }, 'Este corte permite un único envío inicial por ejecución; no hay cierre manual.'),
   ];
+  if (state.health?.engine?.reachable === false && !TERMINAL.includes(execution.status)) {
+    panel.splice(2, 0, el('p', { id: 'engine-offline', class: 'notice' },
+      'Motor no disponible: desenlace pendiente de comprobar; el encargo no se reenviará.'));
+  }
   if (capture?.recorderFailed) {
     panel.splice(2, 0, el('p', { role: 'alert', class: 'error' },
       'Fallo del registrador: revisar antes de volver a ejecutar.'));
@@ -182,8 +199,12 @@ document.querySelector('#new-chat').addEventListener('click', () => {
 });
 
 async function refreshHealth() {
-  try { state.health = await api('/api/health'); }
-  catch { state.health = null; }
+  try {
+    state.health = await api('/api/health');
+    state.connected = true;
+  } catch {
+    state.connected = false;
+  }
   renderStatus();
 }
 
