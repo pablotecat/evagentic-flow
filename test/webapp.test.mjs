@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rename, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
@@ -20,7 +20,7 @@ test('la app lanza una ejecución desde su API y conserva el resultado autorizad
     const detail = await executionDetail(app, executionId);
     return detail.body.execution.status === 'succeeded' ? detail.body : undefined;
   }, 'launched execution did not reach a technical completion', 120000);
-  assert.equal(completed.execution.dispatch, 'session-confirmed');
+  assert.equal(completed.execution.dispatch, 'admitted');
   assert.notEqual(completed.execution.sessionID, executionId);
   assert.match(completed.execution.sessionID, /^ses_/);
   assert.match(completed.execution.promptMessageID, /^msg_/);
@@ -94,7 +94,9 @@ test('un desenlace sin comprobar permanece pendiente y no reenvía el trabajo', 
   assert.equal(retried.status, 200);
   assert.equal(retried.body.execution.id, held.body.execution.id);
   assert.equal(retried.body.execution.sessionID, heldSession.sessionID);
-  assert.equal(retried.body.execution.status, 'running');
+  assert.equal(retried.body.execution.status, 'pending');
+  assert.equal(retried.body.execution.dispatch, 'possibly-sent');
+  assert.equal(retried.body.execution.dispatchedAt, null);
   const rejectedAfterRestart = await createExecution(restarted, 'perdido-dos', 'Encargo durante ocupación.');
   assert.equal(rejectedAfterRestart.status, 409);
 
@@ -106,7 +108,7 @@ test('un desenlace sin comprobar permanece pendiente y no reenvía el trabajo', 
     return modelTraffic.length > 0 ? modelTraffic : undefined;
   }, 'no synthetic model traffic', 15000), /no synthetic model traffic/);
   const detail = await executionDetail(restarted, held.body.execution.id);
-  assert.equal(detail.body.execution.status, 'running');
+  assert.equal(detail.body.execution.status, 'pending');
   assert.equal(detail.body.execution.sessionID, heldSession.sessionID);
   const admitted = (await records(instance.captureDirectory)).filter(row =>
     row.type === 'session.inbox.enqueued' && row.content?.role === 'user');
@@ -120,7 +122,7 @@ test('un desenlace sin comprobar permanece pendiente y no reenvía el trabajo', 
 
   await instance.stop();
   const withoutEngine = await executionDetail(restarted, held.body.execution.id);
-  assert.equal(withoutEngine.body.execution.status, 'running');
+  assert.equal(withoutEngine.body.execution.status, 'pending');
   assert.equal(withoutEngine.body.conversation.entries.length, 0);
 });
 
@@ -176,3 +178,128 @@ test('la app rechaza peticiones ajenas y valida la creación', { timeout: 90000 
   assert.equal(page.status, 200);
   assert.ok((await page.text()).includes('Flujo en Proyecto'));
 });
+
+test('la misma clave sigue siendo idempotente al reconciliar el cierre anterior', { timeout: 180000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  t.after(() => app.close());
+  const previous = await createExecution(app, 'race-previous', 'Encargo previo sintético.');
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.type === 'session.execution.succeeded'), 'previous assignment did not finish');
+  const responses = await Promise.all(Array.from({ length: 8 }, () =>
+    createExecution(app, 'race-same-key', 'Encargo repetido tras cierre.')));
+  assert.equal(responses.filter(response => response.status === 201).length, 1);
+  assert.equal(responses.filter(response => response.status === 200).length, 7);
+  const ids = new Set(responses.map(response => response.body.execution.id));
+  assert.equal(ids.size, 1);
+  assert.ok(!ids.has(previous.body.execution.id));
+  const id = responses[0].body.execution.id;
+  await eventually(async () => (await executionDetail(app, id)).body.execution.status === 'succeeded',
+    'raced assignment did not finish');
+  const admissions = (await records(instance.captureDirectory)).filter(row => row.type === 'session.inbox.enqueued');
+  assert.equal(admissions.length, 2);
+});
+
+test('el cierre de la raíz no libera un árbol activo ni una pregunta pendiente', { timeout: 240000 }, async t => {
+  const instance = await fixture(t, { simulation: true, admissionGate: true });
+  const { app } = await launchWebapp(t, instance);
+  t.after(() => app.close());
+  const created = await createExecution(app, 'tree-root', 'SYNTHETIC_HELD_ADMISSION');
+  const id = created.body.execution.id;
+  const root = await eventually(async () => (await executionDetail(app, id)).body.execution.sessionID,
+    'missing root session');
+  await eventually(async () => readFile(join(instance.root, 'admission-entered'), 'utf8'), 'admission gate not entered');
+  const child = (await instance.api('/api/session', { parentID: root,
+    location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${child.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING' });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === child.id && row.type === 'session.text.delta'), 'child did not start');
+  await writeFile(join(instance.root, 'admission-release'), 'release');
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === root && row.type === 'session.execution.succeeded'), 'root did not finish');
+  assert.equal((await executionDetail(app, id)).body.execution.status, 'running');
+  assert.equal((await createExecution(app, 'tree-other', 'No debe despacharse.')).status, 409);
+  const form = (await instance.api(`/api/session/${root}/form`, {
+    title: 'Synthetic pending question', fields: [{ key: 'answer', type: 'string' }] })).data;
+  await instance.api(`/api/session/${child.id}/interrupt`, { resume: false });
+  await instance.api(`/api/experimental/session/${child.id}/wait`, {});
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === child.id && row.type === 'session.execution.interrupted'), 'child did not stop');
+  assert.equal((await executionDetail(app, id)).body.execution.status, 'running');
+  assert.equal((await createExecution(app, 'tree-question', 'No debe despacharse.')).status, 409);
+  await instance.api(`/api/session/${root}/form/${form.id}/reply`, { answer: { answer: 'Synthetic answer' } });
+  await eventually(async () => (await executionDetail(app, id)).body.execution.status === 'succeeded',
+    'resolved tree did not reach technical completion');
+});
+
+test('el cierre no oculta un permiso pendiente en un descendiente', { timeout: 240000 }, async t => {
+  const instance = await fixture(t, { simulation: true, syntheticTools: true, admissionGate: true });
+  const { app } = await launchWebapp(t, instance);
+  t.after(() => app.close());
+  const created = await createExecution(app, 'permission-root', 'SYNTHETIC_HELD_ADMISSION');
+  const id = created.body.execution.id;
+  const root = await eventually(async () => (await executionDetail(app, id)).body.execution.sessionID,
+    'missing root session');
+  const child = (await instance.api('/api/session', { parentID: root,
+    location: { directory: instance.projects[0] },
+    permissions: [{ action: 'synthetic.approval', resource: '*', effect: 'ask' }] })).data;
+  await instance.api(`/api/session/${child.id}/prompt`, { text: 'SYNTHETIC_HUMAN' });
+  const form = await eventually(async () => (await instance.api(`/api/session/${child.id}/form`)).data[0],
+    'missing descendant question');
+  await instance.api(`/api/session/${child.id}/form/${form.id}/reply`, {
+    answer: { [form.fields[0].key]: 'Proceed synthetic-secret-42' } });
+  const permission = await eventually(async () => (await instance.api(`/api/session/${child.id}/permission`)).data[0],
+    'missing pending permission');
+  await writeFile(join(instance.root, 'admission-release'), 'release');
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === root && row.type === 'session.execution.succeeded'), 'root did not finish');
+  assert.equal((await executionDetail(app, id)).body.execution.status, 'running');
+  assert.equal((await createExecution(app, 'permission-other', 'No debe despacharse.')).status, 409);
+  await instance.api(`/api/session/${child.id}/permission/${permission.id}/reply`, { decision: 'once' });
+  await eventually(async () => (await executionDetail(app, id)).body.execution.status === 'succeeded',
+    'approved tree did not finish');
+});
+
+for (const failureTarget of ['index', 'directory']) test(`un fallo real de ${failureTarget} no publica cierre ni libera y exige revisión incluso tras reparar y reiniciar`,
+  { timeout: 240000 }, async t => {
+    const instance = await fixture(t, { simulation: true });
+    const { app, configPath } = await launchWebapp(t, instance);
+    t.after(() => app.close());
+    const created = await createExecution(app, 'index-root', 'SYNTHETIC_LONG_RUNNING');
+    const id = created.body.execution.id;
+    await eventually(async () => (await executionDetail(app, id)).body.execution.dispatch === 'admitted',
+      'admission not confirmed');
+    const root = (await executionDetail(app, id)).body.execution.sessionID;
+    const index = join(instance.root, 'webapp-data', 'executions.json');
+    const target = failureTarget === 'index' ? index : join(instance.root, 'webapp-data');
+    const preserved = `${target}.preserved`;
+    await rename(target, preserved);
+    if (failureTarget === 'index') await mkdir(target);
+    else await writeFile(target, 'Synthetic lost data directory');
+    await instance.api(`/api/session/${root}/interrupt`, { resume: false });
+    await instance.api(`/api/experimental/session/${root}/wait`, {});
+    await eventually(async () => (await records(instance.captureDirectory))
+      .some(row => row.sessionID === root && row.type === 'session.execution.interrupted'), 'root did not stop');
+    await eventually(async () => (await executionDetail(app, id)).status === 500,
+      'failed index write was not reported');
+    const failed = await executionDetail(app, id);
+    assert.equal(failed.body.execution.status, 'running');
+    assert.equal(failed.body.execution.finishedAt, null);
+    assert.equal((await appFetch(app, '/api/health')).body.index.status, 'review-required');
+    assert.equal((await createExecution(app, 'index-other', 'No debe despacharse.')).status, 503);
+    if (failureTarget === 'index') await rmdir(target);
+    else await unlink(target);
+    await rename(preserved, target);
+    assert.equal((await executionDetail(app, id)).body.execution.status, 'running');
+    assert.equal((await createExecution(app, 'index-other', 'No debe despacharse.')).status, 503);
+    await app.close();
+    const restarted = await startApp({ configPath });
+    t.after(() => restarted.close());
+    assert.equal((await executionDetail(restarted, id)).body.execution.status, 'running');
+    assert.equal((await createExecution(restarted, 'index-other', 'No debe despacharse.')).status, 503);
+    const retry = await createExecution(restarted, 'index-root', 'SYNTHETIC_LONG_RUNNING');
+    assert.equal(retry.status, 200);
+    assert.equal(retry.body.execution.id, id);
+    const admitted = (await records(instance.captureDirectory)).filter(row => row.type === 'session.inbox.enqueued');
+    assert.equal(admitted.length, 1);
+  });

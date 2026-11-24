@@ -39,11 +39,32 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   recupera la misma ejecución sin reenviar el encargo, aunque se hubiera
   perdido la respuesta anterior. El cliente genera la clave por conversación
   y la conserva al reintentar.
-- **Despacho sin desenlace comprobado.** Si no puede confirmarse la sesión o
-  el desenlace, la ejecución queda `pending`/`running` y el proyecto no se
-  libera; nunca se reenvía el trabajo. La finalización técnica sólo se
-  registra a partir de filas `session.execution.*` de la captura; el
-  `idle` o la caída del motor no acreditan desenlace.
+- **Despacho sin desenlace comprobado.** Crear la sesión sólo acredita
+  `session-confirmed`; antes de intentar el encargo se persiste `possibly-sent`.
+  Ambos conservan `pending`, sin fecha de admisión. Sólo la respuesta pública
+  de admisión o una fila `session.inbox.enqueued` con identidad de mensaje
+  acreditan `admitted` y `running`. Si se pierde la respuesta, se reconcilia
+  la captura, sin reenviar el trabajo. La finalización exige la última fase
+  pública terminal por secuencia de cada sesión conocida del árbol, además de
+  comprobar por API pública ausencia de actividad, formularios y permisos.
+  Se vuelve a enumerar el árbol antes de cerrar; un descendiente ausente,
+  evidencia insuficiente, avería de captura o motor inaccesible conserva la
+  exclusión. `idle` o caída del motor no acreditan desenlace.
+- **Transiciones persistidas antes de publicarlas.** La reconciliación y la
+  reserva de nuevas claves se serializan en el servidor; no se encola trabajo.
+  Una carrera que atraviesa el cierre anterior sigue recuperando la misma
+  ejecución. El estado candidato se escribe antes de modificar la vista en
+  memoria o liberar el proyecto. Al abrir el índice se arma previamente
+  `index-review-required`, y sólo un cierre sano de la app lo retira. Una avería
+  bloquea nuevas escrituras y lanzamientos, sin una cola de promesas rechazada
+  ni reintentos automáticos. Reparar la ruta no acredita revisión; el marcador
+  conserva el bloqueo tras reiniciar, incluso al restaurar el directorio que
+  se perdió. Un cierre abrupto también exige revisión conservadora. La salud pública del índice indica
+  `review-required` y los nuevos lanzamientos reciben `503`. El histórico y
+  las claves ya existentes siguen consultables si el índice es legible.
+  La revisión manual debe contrastar índice, marcador y captura antes de
+  retirar el marcador con la app detenida; no hay desbloqueo automático ni UI
+  de recuperación en este corte.
 - **Cierre técnico no es aceptación.** El estado expone desenlace técnico
   observado y salud de captura por separado; la evaluación queda fuera de este
   corte y no se muestran puntuaciones.

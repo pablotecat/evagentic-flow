@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { eventually, fixture, records } from './support/instance.mjs';
@@ -61,13 +61,16 @@ test('el navegador lanza, observa y conserva una ejecución de Flujo en Proyecto
 
   await page.getByRole('button', { name: 'Nuevo encargo' }).click();
   await upload(page, 'SYNTHETIC_HELD_ADMISSION');
-  await awaitStatus(page, 'En ejecución', 60000);
+  await eventually(async () => readFile(join(instance.root, 'admission-entered'), 'utf8'), 'admission gate not entered');
+  await awaitStatus(page, 'Pendiente de confirmación', 60000);
+  const heldAdmissions = (await records(instance.captureDirectory)).filter(row => row.type === 'session.inbox.enqueued');
+  assert.equal(heldAdmissions.length, 2, 'creating the held session was mistaken for admission');
 
   await page.reload();
   await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 2,
     undefined, { timeout: 60000 });
   await page.locator('#history button').first().click();
-  await awaitStatus(page, 'En ejecución', 60000);
+  await awaitStatus(page, 'Pendiente de confirmación', 60000);
 
   const page2 = await browser.newPage();
   await page2.goto(app.url);

@@ -9,6 +9,13 @@ const EXECUTION_PREFIX = 'session.execution.';
 const cache = new Map();
 const TTL = 700;
 
+export function latestLifecycle(rows) {
+  const events = rows.filter(row => row.type?.startsWith(EXECUTION_PREFIX));
+  if (!events.length || events.some(row => row.sourceSequence === null
+    || row.sourceAggregateID !== events[0].sourceAggregateID)) return null;
+  return events.reduce((latest, row) => row.sourceSequence > latest.sourceSequence ? row : latest).lifecycle?.phase;
+}
+
 const runReader = (captureDirectory, sessionID) => new Promise(resolve => {
   const child = spawn(process.execPath, [reader, captureDirectory, ...(sessionID ? [sessionID] : [])]);
   let output = '';
@@ -37,18 +44,18 @@ export async function readRows(captureDirectory, sessionID = null) {
 }
 
 export async function readSession(captureDirectory, sessionID) {
-  const read = await readRows(captureDirectory, sessionID);
+  const read = await readRows(captureDirectory);
   if (!read.ok) return { ok: false, reason: read.reason };
-  const rows = read.rows;
+  const rows = read.rows.filter(row => row.sessionID === sessionID);
   return {
     ok: true,
+    rows: read.rows,
+    admission: rows.find(row => row.type === ENTRY && row.messageID),
     entries: rows.filter(row => row.type === ENTRY && row.content?.role === 'user')
       .map(row => ({ text: row.content.text })),
     responses: rows.filter(row => row.type === RESPONSE && row.content?.role === 'assistant')
       .map(row => ({ text: row.content.text })),
-    lifecycle: rows.filter(row => typeof row.type === 'string' && row.type.startsWith(EXECUTION_PREFIX))
-      .map(row => ({ phase: row.type.slice(EXECUTION_PREFIX.length) })),
     captureIDs: [...new Set(rows.map(row => row.captureID).filter(Boolean))],
-    recorderFailed: rows.some(row => row.type === 'recorder.failed'),
+    recorderFailed: read.rows.some(row => row.type === 'recorder.failed'),
   };
 }

@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createEngine } from './engine.mjs';
 import { createStore, isTerminal } from './store.mjs';
-import { readRows, readSession } from './evidence.mjs';
+import { latestLifecycle, readRows, readSession } from './evidence.mjs';
 
 const TERMINAL_PHASES = ['succeeded', 'failed', 'interrupted'];
 const CONFIG_KEYS = ['version', 'opencodeURL', 'opencodePassword', 'projectDirectory', 'captureDirectory', 'dataDirectory'];
@@ -46,6 +46,12 @@ export async function startApp({ configPath }) {
   let closing = false;
   let closed = false;
   let port;
+  let operations = Promise.resolve();
+  const exclusive = task => {
+    const pending = operations.then(task);
+    operations = pending.catch(() => {});
+    return pending;
+  };
 
   const publicExecution = execution => ({
     id: execution.id,
@@ -65,15 +71,41 @@ export async function startApp({ configPath }) {
   };
 
   const reconcile = async execution => {
-    if (isTerminal(execution) || !execution.sessionID) return;
+    if (store.failed() || isTerminal(execution) || !execution.sessionID) return;
     const evidence = await readSession(config.captureDirectory, execution.sessionID);
     if (!evidence.ok) return;
-    const phase = evidence.lifecycle.map(item => item.phase).find(phase => TERMINAL_PHASES.includes(phase));
-    if (!phase) return;
-    execution.status = phase;
-    execution.finishedAt = Date.now();
+    if (evidence.admission && execution.dispatch !== 'admitted') {
+      await store.update(execution, { dispatch: 'admitted', status: 'running',
+        promptMessageID: evidence.admission.messageID, dispatchedAt: evidence.admission.observedAt });
+    }
+    const phase = latestLifecycle(evidence.rows.filter(row => row.sessionID === execution.sessionID));
+    if (!TERMINAL_PHASES.includes(phase) || !evidence.admission || evidence.recorderFailed) return;
+    const knownIDs = new Set([execution.sessionID]);
+    for (let size = -1; size !== knownIDs.size;) {
+      size = knownIDs.size;
+      for (const row of evidence.rows) {
+        if (row.sessionID && knownIDs.has(row.parentSessionID)) knownIDs.add(row.sessionID);
+        if (row.childSessionID && knownIDs.has(row.sessionID)) knownIDs.add(row.childSessionID);
+      }
+    }
+    let scope;
+    try { scope = await engine.scope(config.projectDirectory, execution.sessionID, knownIDs); }
+    catch { return; }
+    if (!scope.clear) return;
+    for (const sessionID of scope.sessionIDs) {
+      const rows = evidence.rows.filter(row => row.sessionID === sessionID);
+      if (!TERMINAL_PHASES.includes(latestLifecycle(rows))) return;
+      const pending = new Set();
+      for (const row of rows.sort((a, b) => (a.sourceSequence ?? 0) - (b.sourceSequence ?? 0))) {
+        if (!row.interaction?.requestID) continue;
+        const key = `${row.interaction.kind}:${row.interaction.requestID}`;
+        if (row.interaction.phase === 'requested') pending.add(key);
+        else pending.delete(key);
+      }
+      if (pending.size) return;
+    }
+    await store.update(execution, { status: phase, finishedAt: Date.now() });
     releaseIfHeld(execution);
-    await store.save();
   };
 
   const dispatch = async (execution, text) => {
@@ -81,24 +113,24 @@ export async function startApp({ configPath }) {
     try {
       session = await engine.createSession({ location: { directory: config.projectDirectory },
         title: `Flujo en Proyecto · ${execution.id.slice(0, 8)}` }, lifecycle.signal);
-      execution.sessionID = session?.id ?? null;
-      execution.dispatch = 'session-confirmed';
-      execution.status = 'running';
-      execution.dispatchedAt = Date.now();
-      await store.save();
+      if (!session?.id) return;
+      await exclusive(() => store.update(execution, { sessionID: session.id, dispatch: 'session-confirmed' }));
     } catch {
-      if (!lifecycle.signal.aborted) {
-        execution.status = 'pending';
-        execution.dispatch = 'unconfirmed';
-        await store.save();
-      }
       return;
     }
     let prompt;
-    try { prompt = await engine.prompt(session.id, text, lifecycle.signal); }
+    try {
+      await exclusive(() => store.update(execution, { dispatch: 'possibly-sent' }));
+      prompt = await engine.prompt(session.id, text, lifecycle.signal);
+    }
     catch { prompt = null; }
-    execution.promptMessageID = prompt?.id ?? null;
-    if (!lifecycle.signal.aborted) await store.save();
+    if (prompt?.id && !lifecycle.signal.aborted) {
+      await exclusive(() => {
+        if (isTerminal(execution) || execution.dispatch === 'admitted') return;
+        return store.update(execution, { dispatch: 'admitted', status: 'running',
+          promptMessageID: prompt.id, dispatchedAt: Date.now() });
+      });
+    }
   };
 
   const json = (response, code, body) => {
@@ -152,6 +184,7 @@ export async function startApp({ configPath }) {
         engine: engineHealth.ok ? { reachable: true, version: engineHealth.data?.version ?? null }
           : { reachable: false, version: null },
         capture,
+        index: { status: store.failed() ? 'review-required' : 'available' },
       });
     }
     if (url.pathname === '/api/executions' && request.method === 'POST') {
@@ -167,6 +200,7 @@ export async function startApp({ configPath }) {
         await reconcile(existing);
         return json(response, 200, { execution: publicExecution(existing) });
       }
+      if (store.failed()) return json(response, 503, { error: 'index-review-required' });
       if (locks.has(config.projectKey)) {
         const owned = store.byId(locks.get(config.projectKey));
         if (owned) await reconcile(owned);
@@ -196,7 +230,7 @@ export async function startApp({ configPath }) {
         store.remove(execution);
         throw error;
       }
-      if (!closing) dispatch(execution, body.text);
+      if (!closing) dispatch(execution, body.text).catch(error => console.error('App dispatch state could not be persisted:', error));
       return json(response, 201, { execution: publicExecution(execution) });
     }
     if (url.pathname === '/api/executions' && request.method === 'GET') {
@@ -224,7 +258,7 @@ export async function startApp({ configPath }) {
   }
 
   const server = createServer((request, response) => {
-    handle(request, response).catch(error => {
+    exclusive(() => handle(request, response)).catch(error => {
       console.error(error);
       if (!response.headersSent) json(response, 500, { error: 'internal' });
       else response.end();
@@ -246,7 +280,8 @@ export async function startApp({ configPath }) {
       server.close(() => resolve());
       server.closeAllConnections();
     });
-    await store.drain();
+    await operations;
+    await store.close();
   };
 
   return { url: `http://127.0.0.1:${port}`, port, close, config };
