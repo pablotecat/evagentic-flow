@@ -49,6 +49,7 @@ test('el navegador lanza, observa y conserva una ejecución de Flujo en Proyecto
   await page.getByRole('button', { name: 'Nuevo encargo' }).click();
   await upload(page, 'Encargo sintético del navegador. clave synthetic-secret-42.');
   await awaitStatus(page, 'Finalizada técnicamente');
+  assert.equal(await page.locator('.dispatch').innerText(), 'Despacho: encargo admitido.');
   const messages = await page.locator('[aria-label="Mensajes"]').innerText();
   assert.ok(messages.includes('Encargo sintético del navegador. clave [REDACTED].'));
   assert.ok(messages.includes('Respuesta autorizada. clave [REDACTED].'));
@@ -71,6 +72,8 @@ test('el navegador lanza, observa y conserva una ejecución de Flujo en Proyecto
     undefined, { timeout: 60000 });
   await page.locator('#history button').first().click();
   await awaitStatus(page, 'Pendiente de confirmación', 60000);
+  assert.equal(await page.locator('.dispatch').innerText(),
+    'Despacho: envío posible; admisión sin confirmar. El encargo no se reenviará automáticamente.');
 
   const page2 = await browser.newPage();
   await page2.goto(app.url);

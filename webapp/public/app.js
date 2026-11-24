@@ -6,6 +6,13 @@ const STATUS_LABELS = {
   interrupted: 'Interrumpida',
 };
 
+const DISPATCH_LABELS = {
+  admitted: 'Despacho: encargo admitido.',
+  'session-confirmed': 'Despacho: sesión raíz confirmada; admisión del encargo sin confirmar.',
+  'possibly-sent': 'Despacho: envío posible; admisión sin confirmar. El encargo no se reenviará automáticamente.',
+  unconfirmed: 'Despacho: sin confirmar; el encargo no se reenviará automáticamente.',
+};
+
 const state = {
   health: null,
   executions: [],
@@ -123,9 +130,7 @@ function renderExecution() {
   const panel = [
     el('h2', {}, `Ejecución ${execution.id.slice(0, 8)}`),
     el('p', { id: 'execution-status' }, `Estado: ${STATUS_LABELS[execution.status] ?? execution.status}`),
-    el('p', { class: 'dispatch' }, execution.dispatch === 'session-confirmed'
-      ? `Despacho: sesión raíz confirmada${execution.promptMessageID ? ' y encargo admitido' : ''}.`
-      : 'Despacho: sin confirmar; el encargo no se reenviará automáticamente.'),
+    el('p', { class: 'dispatch' }, DISPATCH_LABELS[execution.dispatch] ?? DISPATCH_LABELS.unconfirmed),
     renderMessages(),
     el('dl', { class: 'identity' },
       el('dt', {}, 'Ejecución'), el('dd', {}, execution.id),
