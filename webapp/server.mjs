@@ -3,6 +3,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createEngine } from './engine.mjs';
 import { createStore, isTerminal } from './store.mjs';
 import { latestLifecycle, readRows, readSession } from './evidence.mjs';
@@ -53,6 +54,28 @@ export async function startApp({ configPath, port: requestedPort }) {
     return pending;
   };
 
+  const modelName = (model, variant) => `${model.name}${variant ? ` #${variant}` : ''}`;
+  const modelValue = (providerID, modelID, variant) => `${providerID}/${modelID}`
+    + `${variant && variant !== 'default' ? `#${variant}` : ''}`;
+  const publicModel = model => (model ? {
+    value: modelValue(model.providerID, model.modelID ?? model.id, model.variant),
+    providerID: model.providerID,
+    modelID: model.modelID ?? model.id,
+    variant: model.variant ?? null,
+  } : null);
+
+  const publicOptions = options => ({
+    agents: options.agents.map(agent => ({ id: agent.id, name: agent.name, description: agent.description ?? null, mode: agent.mode })),
+    models: options.models.flatMap(model => (model.variants?.length ? model.variants : [undefined]).map(variant => ({
+      value: modelValue(model.providerID, model.modelID ?? model.id, variant?.id),
+      name: modelName(model, variant?.id),
+      providerID: model.providerID,
+      modelID: model.modelID ?? model.id,
+      variant: variant?.id ?? null,
+    }))),
+    commands: options.commands.map(command => ({ name: command.name, description: command.description ?? null })),
+  });
+
   const publicExecution = execution => ({
     id: execution.id,
     requestKey: execution.requestKey,
@@ -64,10 +87,111 @@ export async function startApp({ configPath, port: requestedPort }) {
     finishedAt: execution.finishedAt,
     sessionID: execution.sessionID,
     promptMessageID: execution.promptMessageID,
+    requestedAgent: execution.requestedAgent ?? null,
+    requestedModel: execution.requestedModel ?? null,
+    requestedCommand: execution.requestedCommand ?? null,
+    knownAgent: execution.knownAgent ?? null,
+    knownAgentSource: execution.knownAgentSource ?? null,
+    knownModel: publicModel(execution.knownModel),
+    knownModelSource: execution.knownModelSource ?? null,
+    selectionObservedAt: execution.selectionObservedAt ?? null,
   });
 
   const releaseIfHeld = execution => {
     if (locks.get(execution.project) === execution.id) locks.delete(execution.project);
+  };
+
+  const observeSelection = async (execution, sessionID) => {
+    const deadline = Date.now() + 5000;
+    let knownAgent = null;
+    let knownModel = null;
+    while (Date.now() < deadline && !lifecycle.signal.aborted) {
+      try {
+        const [session, messages] = await Promise.all([engine.session(sessionID, lifecycle.signal),
+          engine.messages(sessionID, lifecycle.signal)]);
+        const switched = messages.filter(message => message.type === 'agent-switched')
+          .sort((a, b) => (b.time?.created ?? 0) - (a.time?.created ?? 0))[0];
+        knownAgent = session?.agent ?? switched?.agent ?? null;
+        knownModel = session?.model ?? null;
+        const agentReady = !execution.requestedAgent || knownAgent === execution.requestedAgent;
+        const modelReady = !execution.requestedModel
+          || (knownModel && publicModel(knownModel)?.value === execution.requestedModel);
+        if (agentReady && modelReady) break;
+      } catch { }
+      await delay(250);
+    }
+    try {
+      await exclusive(() => store.update(execution, { knownAgent, knownAgentSource: knownAgent ? 'public-session' : null,
+        knownModel, knownModelSource: knownModel ? 'public-session' : null, selectionObservedAt: Date.now() }));
+    } catch { }
+  };
+
+  const dispatch = async (execution, text) => {
+    let session;
+    try {
+      session = await engine.createSession({ location: { directory: config.projectDirectory },
+        title: `Flujo en Proyecto · ${execution.id.slice(0, 8)}` }, lifecycle.signal);
+      if (!session?.id) return;
+      await exclusive(() => store.update(execution, { sessionID: session.id, dispatch: 'session-confirmed' }));
+    } catch {
+      return;
+    }
+    const failClosed = async dispatchReason => {
+      await exclusive(async () => {
+        if (isTerminal(execution) || execution.dispatch === 'admitted') return;
+        await store.update(execution, { status: 'failed', dispatch: dispatchReason, finishedAt: Date.now() });
+        releaseIfHeld(execution);
+      });
+    };
+    if (execution.requestedAgent || execution.requestedModel || execution.requestedCommand) {
+      let listed;
+      try { listed = publicOptions(await engine.options(config.projectDirectory, lifecycle.signal)); }
+      catch { return; }
+      const missingAgent = execution.requestedAgent
+        && !listed.agents.some(agent => agent.id === execution.requestedAgent);
+      const modelEntry = execution.requestedModel
+        ? listed.models.find(model => model.value === execution.requestedModel) : null;
+      const missingCommand = execution.requestedCommand
+        && !listed.commands.some(command => command.name === execution.requestedCommand.name);
+      if (missingAgent || missingCommand || (execution.requestedModel && !modelEntry)) {
+        return failClosed('selection-unavailable');
+      }
+      if (execution.requestedAgent) {
+        try {
+          const result = await engine.setAgent(session.id, execution.requestedAgent, lifecycle.signal);
+          if (!result.ok) return failClosed('selection-unavailable');
+        } catch { return; }
+      }
+      if (execution.requestedModel) {
+        try {
+          const result = await engine.setModel(session.id, {
+            id: modelEntry.modelID, providerID: modelEntry.providerID,
+            ...(modelEntry.variant ? { variant: modelEntry.variant } : {}),
+          }, lifecycle.signal);
+          if (!result.ok) return failClosed('selection-unavailable');
+        } catch { return; }
+      }
+      await observeSelection(execution, session.id);
+    }
+    let prompt = null;
+    try {
+      await exclusive(() => store.update(execution, { dispatch: 'possibly-sent' }));
+      if (execution.requestedCommand) {
+        const result = await engine.runCommand(session.id, execution.requestedCommand.name,
+          execution.requestedCommand.arguments, lifecycle.signal);
+        if (result.status === 404) return await failClosed('command-unavailable');
+        return;
+      }
+      prompt = await engine.prompt(session.id, text, lifecycle.signal);
+    }
+    catch { prompt = null; }
+    if (prompt?.id && !lifecycle.signal.aborted) {
+      await exclusive(() => {
+        if (isTerminal(execution) || execution.dispatch === 'admitted') return;
+        return store.update(execution, { dispatch: 'admitted', status: 'running',
+          promptMessageID: prompt.id, dispatchedAt: Date.now() });
+      });
+    }
   };
 
   const reconcile = async execution => {
@@ -99,31 +223,6 @@ export async function startApp({ configPath, port: requestedPort }) {
     }
     await store.update(execution, { status: phase, finishedAt: Date.now() });
     releaseIfHeld(execution);
-  };
-
-  const dispatch = async (execution, text) => {
-    let session;
-    try {
-      session = await engine.createSession({ location: { directory: config.projectDirectory },
-        title: `Flujo en Proyecto · ${execution.id.slice(0, 8)}` }, lifecycle.signal);
-      if (!session?.id) return;
-      await exclusive(() => store.update(execution, { sessionID: session.id, dispatch: 'session-confirmed' }));
-    } catch {
-      return;
-    }
-    let prompt;
-    try {
-      await exclusive(() => store.update(execution, { dispatch: 'possibly-sent' }));
-      prompt = await engine.prompt(session.id, text, lifecycle.signal);
-    }
-    catch { prompt = null; }
-    if (prompt?.id && !lifecycle.signal.aborted) {
-      await exclusive(() => {
-        if (isTerminal(execution) || execution.dispatch === 'admitted') return;
-        return store.update(execution, { dispatch: 'admitted', status: 'running',
-          promptMessageID: prompt.id, dispatchedAt: Date.now() });
-      });
-    }
   };
 
   const json = (response, code, body) => {
@@ -180,13 +279,59 @@ export async function startApp({ configPath, port: requestedPort }) {
         index: { status: store.failed() ? 'review-required' : 'available' },
       });
     }
+    if (url.pathname === '/api/options' && request.method === 'GET') {
+      const health = await engine.info();
+      if (!health.ok) {
+        return json(response, 200, { state: 'engine-unreachable', engine: { reachable: false, version: null },
+          agents: null, models: null, commands: null });
+      }
+      try {
+        const listed = publicOptions(await engine.options(config.projectDirectory));
+        return json(response, 200, { state: 'ready', engine: { reachable: true,
+          version: health.data?.version ?? null }, ...listed });
+      } catch {
+        return json(response, 200, { state: 'unavailable', engine: { reachable: true, version: null },
+          agents: null, models: null, commands: null });
+      }
+    }
     if (url.pathname === '/api/executions' && request.method === 'POST') {
       let body;
       try { body = JSON.parse(await readBody(request)); }
       catch { return json(response, 400, { error: 'invalid-json' }); }
-      if (typeof body?.requestKey !== 'string' || body.requestKey.length < 1 || body.requestKey.length > 200
-        || typeof body?.text !== 'string' || body.text.length < 1 || body.text.length > 20000) {
+      const text = typeof body?.text === 'string' ? body.text : null;
+      const hasCommandField = body?.command !== undefined && body?.command !== null;
+      const command = hasCommandField && typeof body.command === 'object'
+        && typeof body.command.name === 'string' && typeof body.command.arguments === 'string' ? body.command : null;
+      const agent = typeof body?.agent === 'string' ? body.agent : null;
+      const model = typeof body?.model === 'string' ? body.model : null;
+      const validCommand = command && command.name.length >= 1 && command.name.length <= 100
+        && command.arguments.length >= 0 && command.arguments.length <= 20000;
+      const validSelections = (agent === null || (agent.length >= 1 && agent.length <= 100))
+        && (model === null || (model.length >= 1 && model.length <= 150));
+      const validRequest = typeof body?.requestKey === 'string' && body.requestKey.length >= 1
+        && body.requestKey.length <= 200 && (text !== null) !== (command !== null)
+        && (!hasCommandField || validCommand)
+        && (text === null || (text.length >= 1 && text.length <= 20000))
+        && validSelections;
+      if (!validRequest) {
         return json(response, 400, { error: 'invalid-request' });
+      }
+      if (agent || model || command) {
+        const health = await engine.info();
+        if (health.ok) {
+          let listed;
+          try { listed = publicOptions(await engine.options(config.projectDirectory)); }
+          catch { return json(response, 503, { error: 'options-unavailable' }); }
+          if (agent && !listed.agents.some(entry => entry.id === agent)) {
+            return json(response, 422, { error: 'selection-unavailable', kind: 'agent', option: agent });
+          }
+          if (model && !listed.models.some(entry => entry.value === model)) {
+            return json(response, 422, { error: 'selection-unavailable', kind: 'model', option: model });
+          }
+          if (command && !listed.commands.some(entry => entry.name === command.name)) {
+            return json(response, 422, { error: 'selection-unavailable', kind: 'command', option: command.name });
+          }
+        }
       }
       const existing = store.byKey(body.requestKey);
       if (existing) {
@@ -213,6 +358,14 @@ export async function startApp({ configPath, port: requestedPort }) {
         promptMessageID: null,
         dispatchedAt: null,
         finishedAt: null,
+        requestedAgent: agent,
+        requestedModel: model,
+        requestedCommand: command,
+        knownAgent: null,
+        knownAgentSource: null,
+        knownModel: null,
+        knownModelSource: null,
+        selectionObservedAt: null,
       };
       locks.set(config.projectKey, execution.id);
       try {
@@ -223,7 +376,7 @@ export async function startApp({ configPath, port: requestedPort }) {
         store.remove(execution);
         throw error;
       }
-      if (!closing) dispatch(execution, body.text).catch(error => console.error('App dispatch state could not be persisted:', error));
+      if (!closing) dispatch(execution, text).catch(error => console.error('App dispatch state could not be persisted:', error));
       return json(response, 201, { execution: publicExecution(execution) });
     }
     if (url.pathname === '/api/executions' && request.method === 'GET') {

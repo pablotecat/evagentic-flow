@@ -133,3 +133,7 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
 - La salud de captura resume la última declaración global
   `recorder.ready`/`recorder.failed` del destino configurado; no es una
   garantía de cobertura de la ejecución concreta.
+- El corte [#27](https://github.com/pablotecat/evagentic-flow/issues/27) añade la
+  selección de agente y modelo, la ejecución de comandos públicos con argumentos
+  y el rechazo explícito de opciones desaparecidas:
+  [ADR 0011](0011-opciones-y-comandos-publicos.md).

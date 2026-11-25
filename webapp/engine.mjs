@@ -1,3 +1,5 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
 export function createEngine({ baseURL, password }) {
   const authorization = password ? `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}` : null;
   const send = async (path, { method = 'GET', body, timeout = 10000, signal } = {}) => {
@@ -15,10 +17,68 @@ export function createEngine({ baseURL, password }) {
     const text = await response.text();
     return { ok: response.ok, status: response.status, data: text ? JSON.parse(text) : null };
   };
+  const located = directory => `location[directory]=${encodeURIComponent(directory)}`;
   return {
     async info() {
       try { return await send('/api/info', { timeout: 3000 }); }
       catch { return { ok: false, status: 0, data: null }; }
+    },
+    async agents(directory, signal) {
+      const result = await send(`/api/agent?${located(directory)}`, { signal });
+      if (!result.ok) throw new Error(`agents unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async models(directory, signal) {
+      const result = await send(`/api/model?${located(directory)}`, { signal });
+      if (!result.ok) throw new Error(`models unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async commands(directory, signal) {
+      const result = await send(`/api/command?${located(directory)}`, { signal });
+      if (!result.ok) throw new Error(`commands unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async options(directory, signal) {
+      const resolve = await send(`/api/location?${located(directory)}`, { signal });
+      if (!resolve.ok) throw new Error(`location unavailable: ${resolve.status}`);
+      const deadline = Date.now() + 5000;
+      let stable = null;
+      let previous = null;
+      do {
+        const listed = await Promise.all([
+          this.agents(directory, signal), this.models(directory, signal), this.commands(directory, signal)]);
+        stable = listed;
+        const snapshot = JSON.stringify([
+          listed[0].map(agent => agent.id).sort(),
+          listed[1].map(model => `${model.providerID}/${model.modelID ?? model.id}`
+            + (model.variants ?? []).map(variant => variant.id).join('+')).sort(),
+          listed[2].map(command => command.name).sort(),
+        ]);
+        if (previous !== null && snapshot === previous) break;
+        previous = snapshot;
+        await delay(250);
+      } while (Date.now() < deadline && !signal?.aborted);
+      return { agents: stable[0], models: stable[1], commands: stable[2] };
+    },
+    async session(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}`, { signal });
+      if (!result.ok) throw new Error(`session unavailable: ${result.status}`);
+      return result.data?.data ?? null;
+    },
+    async messages(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}/message`, { signal });
+      if (!result.ok) throw new Error(`messages unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async setAgent(sessionID, agent, signal) {
+      return send(`/api/session/${sessionID}/agent`, { method: 'POST', body: { agent }, timeout: 30000, signal });
+    },
+    async setModel(sessionID, model, signal) {
+      return send(`/api/session/${sessionID}/model`, { method: 'POST', body: { model }, timeout: 30000, signal });
+    },
+    async runCommand(sessionID, name, text, signal) {
+      return send(`/api/session/${sessionID}/command`, { method: 'POST', body: { name, text },
+        timeout: 300000, signal });
     },
     async createSession(payload, signal) {
       const result = await send('/api/session', { method: 'POST', body: payload, timeout: 30000, signal });

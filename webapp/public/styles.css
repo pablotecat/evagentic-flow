@@ -55,6 +55,24 @@ main {
   border-radius: 6px;
 }
 
+#composer label {
+  display: block;
+  font-size: 0.85rem;
+  color: #45505e;
+  margin-top: 0.5rem;
+}
+
+#composer select {
+  display: block;
+  width: 100%;
+  margin: 0.25rem 0 0;
+  padding: 0.35rem;
+  font: inherit;
+  border: 1px solid #b8c0cc;
+  border-radius: 6px;
+  background: white;
+}
+
 #composer button {
   padding: 0.45rem 1.1rem;
   border-radius: 6px;

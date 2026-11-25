@@ -30,4 +30,10 @@ export const createExecution = (app, requestKey, text) => appFetch(app, '/api/ex
   body: JSON.stringify({ requestKey, text }),
 });
 
+export const launchExecution = (app, body) => appFetch(app, '/api/executions', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
 export const executionDetail = (app, id) => appFetch(app, `/api/executions/${id}`);

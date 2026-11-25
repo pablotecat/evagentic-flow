@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { join } from 'node:path';
@@ -287,4 +287,75 @@ test('la caída del motor se muestra como pendiente de comprobar y reconectar no
   await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent
     ?.includes('ocupado') ?? false, undefined, { timeout: 60000 });
   assert.equal(await hashCapture(instance.captureDirectory), digest);
+});
+
+test('el chat presenta opciones de la instancia y lanza un comando con el agente y modelo elegidos', { timeout: 480000 }, async t => {
+  const instance = await fixture(t, {
+    simulation: true,
+    syntheticCommands: true,
+    config: { secrets: ['synthetic-secret-42'] },
+    serverConfig: {
+      agents: {
+        'synthetic-choice': {
+          mode: 'all',
+          description: 'Agente sintético de selección',
+          system: 'Instrucciones sintéticas del agente elegido.',
+        },
+      },
+    },
+  });
+  const { app } = await launchWebapp(t, instance);
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(app.url);
+
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: disponible') ?? false, undefined, { timeout: 60000 });
+  await page.waitForFunction(() => document.querySelector('#agent option[value="synthetic-choice"]') !== null,
+    undefined, { timeout: 60000 });
+  await page.waitForFunction(() => document.querySelector('#model option[value="synthetic/synthetic#low"]') !== null,
+    undefined, { timeout: 60000 });
+  await page.waitForFunction(() => document.querySelector('#command option[value="synthetic-echo"]') !== null,
+    undefined, { timeout: 60000 });
+
+  await page.getByLabel('Agente').selectOption('synthetic-choice');
+  await page.getByLabel('Modelo').selectOption('synthetic/synthetic#low');
+  await page.getByLabel('Comando').selectOption('synthetic-echo');
+  await upload(page, 'argumento-navegador valor-dos');
+  await awaitStatus(page, 'Finalizada técnicamente', 240000);
+
+  const board = await page.locator('#conversation').innerText();
+  assert.ok(board.includes('Elegido: synthetic-choice'), 'the board lost the requested agent');
+  assert.ok(board.includes('Conocido: synthetic-choice'), 'the board lost the observed agent');
+  assert.ok(board.includes('API pública de la sesión'), 'the board lost the selection provenance');
+  assert.ok(board.includes('synthetic/synthetic#low'));
+  assert.ok(board.includes('synthetic-echo'));
+  const messages = await page.locator('[aria-label="Mensajes"]').innerText();
+  assert.ok(messages.includes('Encargo sintético de comando: argumento-navegador valor-dos'));
+  assert.ok(messages.includes('Respuesta autorizada'));
+  assert.ok(!messages.includes('synthetic-secret-42'));
+  assert.equal(await admittedCount(instance), 1, 'the browser dispatched the command more than once');
+  const sessions = (await instance.api(
+    `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
+  assert.equal(sessions.filter(session => (session.title ?? '').startsWith('Flujo en Proyecto ·')).length, 1,
+    'the browser created more than one root session');
+
+  await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+  await page.waitForFunction(() => document.querySelector('#command option[value="synthetic-echo"]') !== null,
+    undefined, { timeout: 60000 });
+  await page.getByLabel('Comando').selectOption('synthetic-echo');
+  await rm(join(instance.root, 'config/opencode/commands/synthetic-echo.md'));
+  await eventually(async () => {
+    const options = await appFetch(app, '/api/options');
+    return options.body.commands.some(command => command.name === 'synthetic-echo') ? undefined : options.body;
+  }, 'the deleted synthetic command stayed listed in the app', 30000);
+  await upload(page, 'este comando ya no debe estar disponible');
+  await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent
+    ?.includes('ya no está disponible') ?? false, undefined, { timeout: 60000 });
+  await page.waitForFunction(() => document.querySelectorAll('#history button').length === 1,
+    undefined, { timeout: 60000 });
+  assert.equal(await admittedCount(instance), 1, 'a vanished option dispatched work');
+  await page.waitForFunction(() => document.querySelector('#command option[value="synthetic-echo"]') === null,
+    undefined, { timeout: 60000 });
 });

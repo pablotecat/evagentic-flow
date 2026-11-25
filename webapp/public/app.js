@@ -13,6 +13,8 @@ const DISPATCH_LABELS = {
   'session-confirmed': 'Despacho: sesión raíz confirmada; admisión del encargo sin confirmar.',
   'possibly-sent': 'Despacho: envío posible; admisión sin confirmar. El encargo no se reenviará automáticamente.',
   unconfirmed: 'Despacho: sin confirmar; el encargo no se reenviará automáticamente.',
+  'selection-unavailable': 'Despacho: opción elegida no disponible; no se envió el encargo ni se sustituyó por otra.',
+  'command-unavailable': 'Despacho: comando no disponible; no se envió el encargo ni se sustituyó por otro.',
 };
 
 const state = {
@@ -25,6 +27,11 @@ const state = {
   requestKey: crypto.randomUUID(),
   sending: false,
   error: null,
+  options: null,
+  optionsLoading: false,
+  agent: '',
+  model: '',
+  command: '',
 };
 
 const statusLine = document.querySelector('#status');
@@ -84,13 +91,79 @@ function renderMessages() {
   return messages;
 }
 
+function renderOptionSelect(name, id, entries, value, placeholder, placeholderEmpty) {
+  const select = el('select', { id, 'aria-label': name });
+  if (state.options === null) {
+    select.append(el('option', { value: '' }, 'Cargando opciones…'));
+    select.setAttribute('disabled', '');
+  } else if (state.options.state !== 'ready') {
+    select.append(el('option', { value: '' }, 'No se pudieron consultar las opciones'));
+    select.setAttribute('disabled', '');
+  } else if (!entries.length) {
+    select.append(el('option', { value: '' }, placeholderEmpty));
+    select.setAttribute('disabled', '');
+  } else {
+    select.append(el('option', { value: '' }, placeholder));
+    for (const entry of entries) {
+      select.append(el('option', { value: entry.id }, entry.label));
+    }
+  }
+  if (value) select.value = value;
+  select.addEventListener('change', event => {
+    state[id] = event.target.value;
+    if (id === 'command') {
+      const notice = document.querySelector('#composer-notice');
+      if (notice) notice.textContent = state.command
+        ? `El comando «${state.command}» se ejecuta por la interfaz pública de OpenCode; el texto son sus argumentos.`
+        : 'La conversación admite un único envío inicial en este incremento.';
+    }
+  });
+  return el('label', { for: id }, name, select);
+}
+
+function optionsStatus() {
+  if (state.optionsLoading && state.options === null) {
+    return el('p', { id: 'options-status', class: 'notice' }, 'Cargando agentes, modelos y comandos de la instancia…');
+  }
+  if (state.options === null) return null;
+  if (state.options.state === 'engine-unreachable') {
+    return el('p', { id: 'options-status', class: 'notice' }, 'Motor no disponible: no se pudieron consultar las opciones del proyecto.');
+  }
+  if (state.options.state !== 'ready') {
+    return el('p', { id: 'options-status', class: 'notice' }, 'No se pudieron consultar las opciones del proyecto.');
+  }
+  const empty = ['agents', 'models', 'commands'].filter(kind => !state.options[kind].length);
+  if (!empty.length) return null;
+  return el('p', { id: 'options-status', class: 'notice' },
+    `La instancia no expone ${empty.join(', ')} para el proyecto configurado.`);
+}
+
 function renderComposer() {
+  const entries = {
+    agents: state.options?.state === 'ready'
+      ? state.options.agents.map(agent => ({ id: agent.id, label: agent.name ?? agent.id })) : [],
+    models: state.options?.state === 'ready'
+      ? state.options.models.map(model => ({ id: model.value, label: model.name })) : [],
+    commands: state.options?.state === 'ready'
+      ? state.options.commands.map(command => ({ id: command.name,
+        label: command.name + (command.description ? ` — ${command.description}` : '') })) : [],
+  };
   const form = el('form', { id: 'composer' },
+    renderOptionSelect('Agente', 'agent', entries.agents, state.agent,
+      'Sin selección: agente por defecto de la sesión', 'Sin agentes expuestos'),
+    renderOptionSelect('Modelo', 'model', entries.models, state.model,
+      'Sin selección: modelo por defecto de la sesión', 'Sin modelos expuestos'),
+    renderOptionSelect('Comando', 'command', entries.commands, state.command,
+      'Sin comando: el texto se envía como encargo', 'La instancia no expone comandos'),
     el('label', { for: 'draft' }, 'Encargo'),
     el('textarea', { id: 'draft', 'aria-label': 'Encargo', rows: '5', maxlength: '20000' }),
     el('button', { id: 'send', type: 'submit', ...(state.sending ? { disabled: '' } : {}) }, 'Enviar'),
-    el('p', { class: 'notice' }, 'La conversación admite un único envío inicial en este incremento.'),
+    state.command
+      ? el('p', { id: 'composer-notice', class: 'notice' }, `El comando «${state.command}» se ejecuta por la interfaz pública de OpenCode; el texto son sus argumentos.`)
+      : el('p', { id: 'composer-notice', class: 'notice' }, 'La conversación admite un único envío inicial en este incremento.'),
   );
+  const status = optionsStatus();
+  if (status) form.append(status);
   if (state.error) form.append(el('p', { role: 'alert', class: 'error' }, state.error));
   form.addEventListener('input', event => {
     if (event.target.id === 'draft') state.draft = event.target.value;
@@ -107,24 +180,49 @@ async function submitDraft(event) {
   state.sending = true;
   state.error = null;
   renderComposer();
+  const body = { requestKey: state.requestKey };
+  if (state.command) body.command = { name: state.command, arguments: state.draft.trim() };
+  else body.text = state.draft.trim();
+  if (state.agent) body.agent = state.agent;
+  if (state.model) body.model = state.model;
   try {
     const { execution } = await api('/api/executions', {
       method: 'POST',
-      body: JSON.stringify({ requestKey: state.requestKey, text: state.draft.trim() }),
+      body: JSON.stringify(body),
     });
     state.selected = execution.id;
     state.detail = null;
     state.draft = '';
+    state.agent = '';
+    state.model = '';
+    state.command = '';
     state.requestKey = crypto.randomUUID();
     state.error = null;
   } catch (error) {
-    state.error = error?.body?.error === 'project-busy'
-      ? 'El proyecto está ocupado por otra ejecución. Espera a su desenlace antes de lanzar otro encargo.'
-      : 'No se pudo lanzar la ejecución. Reintenta el mismo encargo: un envío repetido no duplica el trabajo.';
+    const unavailable = error?.status === 422 && error?.body?.error === 'selection-unavailable';
+    state.error = unavailable
+      ? `La opción elegida (${error?.body?.kind}: ${error?.body?.option}) ya no está disponible para este proyecto. No se ha lanzado nada; las opciones se han vuelto a consultar.`
+      : error?.body?.error === 'project-busy'
+        ? 'El proyecto está ocupado por otra ejecución. Espera a su desenlace antes de lanzar otro encargo.'
+        : 'No se pudo lanzar la ejecución. Reintenta el mismo encargo: un envío repetido no duplica el trabajo.';
+    if (unavailable) {
+      state.options = null;
+      refreshOptions();
+    }
   } finally {
     state.sending = false;
     renderConversation();
   }
+}
+
+async function refreshOptions() {
+  if (state.optionsLoading) return;
+  state.optionsLoading = true;
+  if (state.options === null) renderConversation();
+  try { state.options = await api('/api/options'); }
+  catch { state.options = null; }
+  state.optionsLoading = false;
+  if (state.selected === null) renderConversation();
 }
 
 function renderExecution() {
@@ -137,6 +235,21 @@ function renderExecution() {
     return;
   }
   const capture = detail.capture;
+  const selectionRows = [];
+  const knownAgent = execution.knownAgent
+    ? `${execution.knownAgent} (procedencia: API pública de la sesión)`
+    : execution.requestedAgent ? 'sin confirmar todavía' : 'sin selección';
+  const knownModel = execution.knownModel
+    ? `${execution.knownModel.value} (procedencia: API pública de la sesión)`
+    : execution.requestedModel ? 'sin confirmar todavía' : 'sin selección';
+  selectionRows.push(el('dt', {}, 'Agente'),
+    el('dd', {}, `Elegido: ${execution.requestedAgent ?? 'ninguno'} · Conocido: ${knownAgent}`));
+  selectionRows.push(el('dt', {}, 'Modelo'),
+    el('dd', {}, `Elegido: ${execution.requestedModel ?? 'ninguno'} · Conocido: ${knownModel}`));
+  selectionRows.push(el('dt', {}, 'Comando'),
+    el('dd', {}, execution.requestedCommand
+      ? `${execution.requestedCommand.name} · argumentos: ${execution.requestedCommand.arguments}`
+      : 'encargo directo sin comando'));
   const panel = [
     el('h2', {}, `Ejecución ${execution.id.slice(0, 8)}`),
     el('p', { id: 'execution-status' }, `Estado: ${STATUS_LABELS[execution.status] ?? execution.status}`),
@@ -144,6 +257,7 @@ function renderExecution() {
     renderMessages(),
     el('dl', { class: 'identity' },
       el('dt', {}, 'Ejecución'), el('dd', {}, execution.id),
+      ...selectionRows,
       el('dt', {}, 'Sesión raíz'), el('dd', {}, execution.sessionID ?? 'sin sesión confirmada'),
       el('dt', {}, 'Capturas'), el('dd', {}, capture?.readable
         ? (capture.captureIDs.length ? capture.captureIDs.join(', ') : 'sin filas de captura de esta ejecución')
@@ -209,8 +323,12 @@ document.querySelector('#new-chat').addEventListener('click', () => {
   state.detail = null;
   state.error = null;
   state.draft = '';
+  state.agent = '';
+  state.model = '';
+  state.command = '';
   state.requestKey = crypto.randomUUID();
   renderConversation();
+  refreshOptions();
 });
 
 async function refreshHealth() {
@@ -238,8 +356,10 @@ async function refreshExecutions() {
 
 async function tick() {
   await refreshHealth();
-  if (state.selected === null) await refreshExecutions();
-  else await refreshDetail();
+  if (state.selected === null) {
+    await refreshExecutions();
+    if (state.options === null && !state.optionsLoading) await refreshOptions();
+  } else await refreshDetail();
 }
 
 renderConversation();

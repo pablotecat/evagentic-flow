@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rename, rmdir, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rename, rm, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import { execFile } from 'node:child_process';
 import { eventually, fixture, records } from './support/instance.mjs';
-import { appFetch, createExecution, executionDetail, launchWebapp } from './support/webapp.mjs';
+import { appFetch, createExecution, executionDetail, launchExecution, launchWebapp } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
 
 test('el cleanup cierra la app incluso si una aserción falla antes del cierre explícito', async () => {
@@ -335,3 +335,127 @@ for (const failureTarget of ['index', 'directory']) test(`un fallo real de ${fai
     const admitted = (await records(instance.captureDirectory)).filter(row => row.type === 'session.inbox.enqueued');
     assert.equal(admitted.length, 1);
   });
+
+const selectionFixtureOptions = {
+  simulation: true,
+  syntheticCommands: true,
+  config: { secrets: ['synthetic-secret-42'] },
+  serverConfig: {
+    agents: {
+      'synthetic-choice': {
+        mode: 'all',
+        description: 'Agente sintético de selección',
+        system: 'Instrucciones sintéticas del agente elegido.',
+      },
+    },
+  },
+};
+
+test('la app expone opciones de la instancia y lanza un encargo con agente, modelo y comando elegidos', { timeout: 300000 }, async t => {
+  const instance = await fixture(t, selectionFixtureOptions);
+  const { app } = await launchWebapp(t, instance);
+
+  const options = await appFetch(app, '/api/options');
+  assert.equal(options.status, 200);
+  assert.equal(options.body.state, 'ready');
+  assert.ok(options.body.agents.some(agent => agent.id === 'synthetic-choice'));
+  assert.ok(options.body.agents.some(agent => agent.id === 'build'));
+  assert.ok(options.body.models.some(model => model.value === 'synthetic/synthetic#low'));
+  assert.ok(options.body.commands.some(command => command.name === 'synthetic-echo'));
+  assert.ok(options.body.commands.some(command => command.name === 'review'));
+
+  const created = await launchExecution(app, { requestKey: 'corte-27-uno',
+    agent: 'synthetic-choice', model: 'synthetic/synthetic#low',
+    command: { name: 'synthetic-echo', arguments: 'argumento-alfa valor-beta' } });
+  assert.equal(created.status, 201);
+  const id = created.body.execution.id;
+  assert.equal(created.body.execution.requestedAgent, 'synthetic-choice');
+  assert.equal(created.body.execution.requestedModel, 'synthetic/synthetic#low');
+  assert.equal(created.body.execution.requestedCommand.name, 'synthetic-echo');
+
+  const completed = await eventually(async () => {
+    const detail = await executionDetail(app, id);
+    return detail.body.execution.status === 'succeeded' ? detail.body : undefined;
+  }, 'launched command execution did not reach a technical completion', 120000);
+  assert.equal(completed.execution.dispatch, 'admitted');
+  assert.equal(completed.execution.knownAgent, 'synthetic-choice');
+  assert.equal(completed.execution.knownAgentSource, 'public-session');
+  assert.equal(completed.execution.knownModel.value, 'synthetic/synthetic#low');
+  assert.equal(completed.execution.knownModelSource, 'public-session');
+  assert.ok(completed.execution.selectionObservedAt);
+  assert.equal(completed.conversation.entries.length, 1);
+  assert.equal(completed.conversation.entries[0].text, 'Encargo sintético de comando: argumento-alfa valor-beta');
+  assert.equal(completed.conversation.responses.length, 1);
+  assert.match(completed.conversation.responses[0].text, /respuesta autorizada/i);
+
+  const traffic = instance.simulationLog().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    .filter(event => event.event === 'request' && event.routeKey === 'model');
+  assert.ok(traffic.length >= 1, 'no synthetic model traffic for the command execution');
+
+  const retried = await launchExecution(app, { requestKey: 'corte-27-uno',
+    agent: 'synthetic-choice', model: 'synthetic/synthetic#low',
+    command: { name: 'synthetic-echo', arguments: 'argumento-alfa valor-beta' } });
+  assert.equal(retried.status, 200);
+  assert.equal(retried.body.execution.id, id);
+  const admitted = (await records(instance.captureDirectory)).filter(row =>
+    row.type === 'session.inbox.enqueued' && row.content?.text === 'Encargo sintético de comando: argumento-alfa valor-beta');
+  assert.equal(admitted.length, 1, 'a repeated request key dispatched the command twice');
+  const sessions = (await instance.api(
+    `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
+  assert.equal(sessions.filter(session => (session.title ?? '').startsWith('Flujo en Proyecto ·')).length, 1,
+    'the idempotent retry created a second root session');
+});
+
+test('una opción elegida que no está expuesta se rechaza explícitamente sin despachar el encargo', { timeout: 300000 }, async t => {
+  const instance = await fixture(t, selectionFixtureOptions);
+  const { app } = await launchWebapp(t, instance);
+  const before = (await instance.api(
+    `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data.length;
+
+  for (const selection of [
+    { agent: 'missing-agent', body: { text: 'Encargo con agente incompatible.' } },
+    { model: 'missing/model', body: { text: 'Encargo con modelo incompatible.' } },
+    { commandName: 'missing-command', body: { command: { name: 'missing-command', arguments: 'x' } } },
+  ]) {
+    const rejected = await launchExecution(app, { requestKey: `corte-27-rechazo-${selection.agent ?? selection.model ?? selection.commandName}`,
+      ...selection.body, ...(selection.agent ? { agent: selection.agent } : {}), ...(selection.model ? { model: selection.model } : {}) });
+    assert.equal(rejected.status, 422);
+    assert.equal(rejected.body.error, 'selection-unavailable');
+  }
+
+  assert.equal((await appFetch(app, '/api/executions')).body.executions.length, 0,
+    'a rejected selection created an execution');
+  const admitted = (await records(instance.captureDirectory)).filter(row =>
+    row.type === 'session.inbox.enqueued' && row.content?.role === 'user');
+  assert.equal(admitted.length, 0, 'a rejected selection dispatched work');
+  const sessions = (await instance.api(
+    `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
+  assert.equal(sessions.length, before, 'a rejected selection created a session');
+
+  await rm(join(instance.root, 'config/opencode/commands/synthetic-echo.md'));
+  const gone = await eventually(async () => {
+    const options = await appFetch(app, '/api/options');
+    return options.body.commands.some(command => command.name === 'synthetic-echo') ? undefined : options.body.commands;
+  }, 'the deleted synthetic command stayed listed', 30000);
+  assert.ok(gone.some(command => command.name === 'review'));
+
+  const vanished = await launchExecution(app, { requestKey: 'corte-27-desaparecido',
+    command: { name: 'synthetic-echo', arguments: 'no debe despacharse' } });
+  assert.equal(vanished.status, 422);
+  assert.equal(vanished.body.error, 'selection-unavailable');
+  assert.equal(vanished.body.kind, 'command');
+  assert.equal((await appFetch(app, '/api/executions')).body.executions.length, 0,
+    'a vanished command created an execution');
+
+  const valid = await launchExecution(app, { requestKey: 'corte-27-valido',
+    command: { name: 'review', arguments: 'encargo tras la opción desaparecida' } });
+  assert.equal(valid.status, 201, 'a vanished option left the project locked');
+  await eventually(async () => (await executionDetail(app, valid.body.execution.id))
+    .body.execution.status === 'succeeded', 'execution after the vanished option did not complete', 120000);
+
+  await instance.stop();
+  const offline = await appFetch(app, '/api/options');
+  assert.equal(offline.status, 200);
+  assert.equal(offline.body.state, 'engine-unreachable');
+  assert.equal(offline.body.agents, null);
+});

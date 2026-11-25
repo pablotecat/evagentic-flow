@@ -201,6 +201,11 @@ export async function fixture(t, options = {}) {
       } });
     `);
   }
+  if (options.syntheticCommands) {
+    await mkdir(join(root, 'config/opencode/commands'));
+    await writeFile(join(root, 'config/opencode/commands/synthetic-echo.md'),
+      `---\ndescription: Encargo sintético de comando\n---\nEncargo sintético de comando: $ARGUMENTS\n`);
+  }
   const serverConfig = { $schema: 'https://opencode.ai/config.json', update: 'disable',
     snapshots: false, ...options.serverConfig };
   if (options.syntheticDefinitions) {
