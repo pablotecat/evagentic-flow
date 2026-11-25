@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { eventually, fixture, records } from './support/instance.mjs';
-import { appFetch, launchWebapp } from './support/webapp.mjs';
+import { appFetch, createExecution, launchWebapp } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
+
+const TERMINAL_STATUSES = ['succeeded', 'failed', 'interrupted'];
 
 const upload = async (page, text) => {
   await page.getByLabel('Encargo').fill(text);
@@ -389,6 +391,196 @@ async function fillPendingQuestion(page, requestID) {
   else await form.locator('input[type="text"], input[type="number"]').first().fill('Continuar synthetic-secret-42');
   await form.getByRole('button', { name: 'Responder pregunta' }).click();
 }
+
+test('el navegador detiene una ejecución delegada y conserva sus resultados parciales', { timeout: 480000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(app.url);
+  const rootAdmissions = async root => (await records(instance.captureDirectory))
+    .filter(row => row.type === 'session.inbox.enqueued' && row.sessionID === root
+      && row.content?.role === 'user').length;
+  await upload(page, 'Encargo delegado largo. SYNTHETIC_LONG_RUNNING');
+  await awaitStatus(page, 'En ejecución');
+  const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+  const root = (await appFetch(app, `/api/executions/${executionId}`)).body.execution.sessionID;
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === root && row.type === 'session.text.delta'), 'root work did not start');
+  const child = (await instance.api('/api/session', { parentID: root,
+    location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${child.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING Hijo delegado' });
+  await eventually(async () => {
+    const detail = (await appFetch(app, `/api/executions/${executionId}`)).body;
+    return detail.capture?.scope?.sessionIDs?.includes(child.id) ? detail : undefined;
+  }, 'the delegated child did not join the observed execution tree', 60000);
+  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 1);
+
+  await page.getByRole('button', { name: 'Detener' }).click();
+  await page.waitForSelector('#stop-requested', { timeout: 120000 });
+  try {
+    await awaitStatus(page, 'Interrumpida');
+  } catch (error) {
+    t.diagnostic(`stop state: ${JSON.stringify((await appFetch(app, `/api/executions/${executionId}`)).body.stop)}`);
+    const seen = (await records(instance.captureDirectory)).filter(row =>
+      row.sessionID && row.type.startsWith('session.execution.'));
+    t.diagnostic(`lifecycle rows: ${JSON.stringify(seen.map(row => `${row.sessionID}:${row.type}`))}`);
+    throw error;
+  }
+  await page.waitForFunction(() => [...document.querySelectorAll('#stop-requested li')]
+    .every(item => item.textContent.includes('Detención: confirmada'))
+    && document.querySelectorAll('#stop-requested li').length >= 2,
+  undefined, { timeout: 120000 });
+  const stopPanel = await page.locator('#stop-requested').innerText();
+  assert.ok(stopPanel.includes('Solicitud: aceptada'));
+  assert.ok(!/Detención: no confirmada/.test(stopPanel));
+  assert.ok(stopPanel.includes('no hay interrupción instantánea'));
+  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 0,
+    'a terminal execution still offered a stop action');
+  const board = await page.locator('#conversation').innerText();
+  assert.ok(board.includes('Encargo delegado largo.'));
+  const messageBoard = await page.locator('[aria-label="Mensajes"]').innerText();
+  t.diagnostic(`messages: ${JSON.stringify(messageBoard)}`);
+  assert.ok(messageBoard.includes('Sin respuesta observada') || messageBoard.includes('Respuesta'),
+    'the interrupted execution lost its partial conversation');
+  assert.ok(!board.includes('synthetic-secret-42'));
+
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+    undefined, { timeout: 60000 });
+  await page.locator('#history button').first().click();
+  await awaitStatus(page, 'Interrumpida');
+  const reconciled = await eventually(async () => {
+    const text = await page.locator('#stop-requested').innerText().catch(() => null);
+    return text && text.includes('Detención solicitada')
+      && !/Detención: no confirmada/.test(text)
+      && text.includes('Sesión raíz') && text.includes('Subejecución') ? text : undefined;
+  }, 'a reload lost the reconciled stop state', 60000);
+  assert.ok(reconciled.includes('Solicitud: sin comprobar'));
+  assert.equal(await rootAdmissions(root), 1, 'a reload re-sent a stopped assignment');
+
+  await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+  await upload(page, 'Encargo tras la detención liberada.');
+  await awaitStatus(page, 'Finalizada técnicamente', 240000);
+  assert.equal(await rootAdmissions(root), 1, 'the new encargo re-sent the stopped assignment');
+  const sessions = (await instance.api(
+    `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
+  assert.equal(sessions.filter(session =>
+    (session.title ?? '').startsWith('Flujo en Proyecto ·')).length, 2,
+    'the new encargo did not create its own execution session');
+});
+
+test('la detención con el motor caído se muestra no confirmada y recargar no confirma ni relanza', { timeout: 480000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(app.url);
+  await upload(page, 'Encargo largo sin motor. SYNTHETIC_LONG_RUNNING');
+  await awaitStatus(page, 'En ejecución');
+  const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+  assert.equal(await admittedCount(instance), 1);
+
+  await instance.stop();
+  await page.waitForFunction(() => document.querySelector('#status')?.textContent
+    ?.includes('Motor: no disponible') ?? false, undefined, { timeout: 60000 });
+  await page.getByRole('button', { name: 'Detener' }).click();
+  await page.waitForSelector('#stop-requested');
+  await page.waitForFunction(() => /Detención: no confirmada/.test(
+    document.querySelector('#stop-requested')?.innerText ?? ''), undefined, { timeout: 60000 });
+  const unconfirmed = await page.locator('#stop-requested').innerText();
+  assert.ok(unconfirmed.includes('Solicitud: fallo de la solicitud'));
+  assert.ok(!unconfirmed.includes('Detención: confirmada'),
+    'an engine failure was displayed as a confirmed stop');
+  await page.waitForFunction(() => document.querySelector('#engine-offline')?.textContent
+    ?.includes('desenlace pendiente de comprobar') ?? false, undefined, { timeout: 60000 });
+  assert.equal((await appFetch(app, `/api/executions/${executionId}`)).body.execution.status, 'running',
+    'a failed stop request released the execution');
+  assert.equal(await admittedCount(instance), 1, 'a failed stop dispatched work again');
+
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+    undefined, { timeout: 60000 });
+  await page.locator('#history button').first().click();
+  await awaitStatus(page, 'En ejecución');
+  const reloaded = await eventually(async () => {
+    const text = await page.locator('#stop-requested').innerText().catch(() => null);
+    return text && text.includes('Detención solicitada')
+      && text.includes('Detención: no confirmada') ? text : undefined;
+  }, 'a reload lost the unconfirmed stop state', 60000);
+  assert.ok(reloaded.includes('Solicitud: sin comprobar'),
+    'a reload invented a stop request result it cannot verify');
+  assert.equal(await admittedCount(instance), 1, 'a reload re-sent the assignment');
+
+  await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+  await upload(page, 'No debe lanzarse con desenlace pendiente.');
+  await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent
+    ?.includes('ocupado') ?? false, undefined, { timeout: 60000 });
+  assert.equal(await admittedCount(instance), 1);
+});
+
+test('el fallo de persistencia del registrador se avisa en el navegador y no desbloquea el proyecto', { timeout: 480000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(app.url);
+  await upload(page, 'Encargo persistente. SYNTHETIC_LONG_RUNNING');
+  await awaitStatus(page, 'En ejecución');
+  const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+  const root = (await appFetch(app, `/api/executions/${executionId}`)).body.execution.sessionID;
+  const digest = await hashCapture(instance.captureDirectory);
+
+  const preserved = join(instance.root, 'preserved');
+  await rename(instance.captureDirectory, preserved);
+  await writeFile(instance.captureDirectory, 'Synthetic persistence failure');
+  await instance.api(`/api/session/${root}`, { title: 'Fallo sintético de persistencia' }, 'PATCH');
+  const failure = await eventually(async () => {
+    const text = await page.locator('#recorder-failure').innerText().catch(() => null);
+    return text && text.includes('Fallo del registrador')
+      && text.includes('Estado de captura: no consultable') ? text : undefined;
+  }, 'the recorder failure notice did not surface with an unreadable capture', 30000);
+  assert.ok(failure.includes('Revisión requerida'));
+  assert.ok(failure.includes('no hay desbloqueo automático'));
+  assert.ok(failure.includes('Motivo público declarado'), 'the public session notice was not surfaced');
+  const detail = (await appFetch(app, `/api/executions/${executionId}`)).body;
+  assert.ok(!TERMINAL_STATUSES.includes(detail.execution.status),
+    'a recorder failure produced an unobserved terminal state');
+  assert.notEqual((await createExecution(app, 'persistencia-bloqueo', 'No debe lanzarse.')).status, 201,
+    'a recorder failure released the project');
+
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+    undefined, { timeout: 60000 });
+  await page.locator('#history button').first().click();
+  await page.waitForSelector('#recorder-failure');
+  await awaitStatus(page, 'En ejecución');
+
+  await unlink(instance.captureDirectory);
+  await rename(preserved, instance.captureDirectory);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+    undefined, { timeout: 60000 });
+  await page.locator('#history button').first().click();
+  await page.waitForSelector('#recorder-failure');
+  const repaired = await eventually(async () => {
+    const text = await page.locator('#recorder-failure').innerText().catch(() => null);
+    return text && text.includes('Fallo del registrador')
+      && text.includes('Estado de captura: consultable') ? text : undefined;
+  }, 'the repaired capture path was not reported as readable', 30000);
+  assert.ok(repaired.includes('Motivo público declarado'),
+    'repairing the path hid the public failure notice');
+  const afterRepair = (await appFetch(app, `/api/executions/${executionId}`)).body;
+  assert.ok(!TERMINAL_STATUSES.includes(afterRepair.execution.status),
+    'repairing the capture path released the project without new evidence');
+  assert.notEqual((await createExecution(app, 'persistencia-reparada', 'No debe lanzarse.')).status, 201,
+    'the app unlocked the durable guard by repairing the path');
+  assert.equal(await hashCapture(instance.captureDirectory), digest,
+    'the recorder failure scenario altered the preserved capture bytes');
+});
 
 test('el navegador responde preguntas y permisos nativos y reconstruye las pendientes al recargar',
   { timeout: 480000 }, async t => {

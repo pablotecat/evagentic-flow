@@ -128,6 +128,30 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   runtime no aporta. Mientras hay pendientes, la ejecución se muestra en
   marcha con su identidad y un aviso propio de espera; el cierre técnico
   existente ya exige formularios y permisos despejados.
+- **Detención y fallo del registrador en la webapp ([#30](https://github.com/pablotecat/evagentic-flow/issues/30)).**
+  Solicitar la detención es un contrato propio (`POST
+  /api/executions/{id}/stop`, rechazado con 409 si la ejecución ya es
+  terminal o no tiene sesión raíz confirmada) que sólo actúa sobre el
+  árbol de sesiones acreditado de esa ejecución: la captura observada y
+  el cierre público de descendientes dentro del proyecto configurado;
+  nunca sobre sesiones ajenas al árbol. Por cada sesión se pide
+  `session.interrupt` con `resume: false` y se confirma sólo con un
+  desenlace público `interrupted` posterior a la solicitud, igual que el
+  registrador: una petición aceptada, `not-running` y los errores se
+  muestran como no confirmados, sin confirmación global ficticia. La
+  oleada reenumera y reintenta reactivaciones y descendientes nuevos con
+  plazo acotado; no promete parada instantánea, pausa ni reversión de
+  efectos externos. Del índice sólo se persiste metadata permitida
+  (`stopRequested`, `stopRequestedAt`); el desenlace por sesión se
+  reconcilia en cada consulta desde la evidencia pública, sin relanzar el
+  encargo ni convertir una desconexión en confirmación. El fallo del
+  registrador se presenta con aviso, estado de captura y revisión
+  requerida, a partir de la metadata pública `evagenticRecorder` de la
+  sesión raíz y de las declaraciones `recorder.failed` de la captura;
+  se conservan el bloqueo durable y la exclusión del proyecto, sin
+  desbloqueo automático por recargar o reparar la ruta. Una ejecución
+  interrumpida conserva en el histórico sus resultados parciales y su
+  estado real, sin puntuaciones ni juez.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
   peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
   páginas externas no puedan despachar trabajo. No usa cookies ni acceso
@@ -171,6 +195,16 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   Un formulario público booleano obligatorio comprueba `false` sin tocar la
   casilla. La rama de permisos de la raíz extrae el valor del `JSHandle`, lo
   libera y exige haber respondido al menos un permiso real antes del cierre.
+  #30 añade detención confirmada sobre un árbol con descendiente delegado
+  (resultados por sesión y estado real con resultados parciales tras
+  recargar), detención no confirmada con el motor caído (la recarga no
+  confirma ni relanza) y avería real de persistencia de la captura con
+  aviso, revisión requerida y bloqueo conservado tras recargar y reparar
+  la ruta. En `test/webapp.test.mjs` la API de detención comprueba el
+  alcance verificado, el aislamiento de sesiones ajenas, los rechazos de
+  ejecución terminal o sin sesión, la metadata permitida del índice y la
+  liberación sólo tras desenlace observado. Los rótulos por sesión que no
+  son deterministas en el motor real se comprueban en `test/browser-ui.test.mjs`.
 - `test/browser-ui.test.mjs`: comprobación pura de renderizado en Chromium,
   sin motor ni registrador sustituidos. Verifica borradores distintos para
   tipo, sesión y solicitud, y el aviso de error de lectura. No acredita por
@@ -205,3 +239,11 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   omitir una respuesta de permiso en #29, pero no demuestra la causa del fallo
   anterior de #26 ni permite descartarlo como inocuo. La pérdida de HTTP
   probada aquí es app–navegador; no reproduce una pérdida motor–app.
+- En OpenCode 2.1.2 la interrupción de una sesión que espera resultados de
+  subagentes puede reactivar su propio turno cuando los descendientes
+  abortan: se observaron filas `session.execution.started` posteriores a
+  `session.execution.interrupted` en un árbol delegado real. La oleada de
+  detención de #30 reintenta esas reactivaciones con plazo acotado y la
+  confirmación por sesión expone la evidencia pública vigente, pero no
+  garantiza una parada estable del árbol del runtime; el desenlace
+  observado prevalece sobre la solicitud aceptada.

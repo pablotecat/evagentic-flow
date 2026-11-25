@@ -95,6 +95,7 @@ export async function startApp({ configPath, port: requestedPort }) {
     knownModel: publicModel(execution.knownModel),
     knownModelSource: execution.knownModelSource ?? null,
     selectionObservedAt: execution.selectionObservedAt ?? null,
+    stop: { requested: execution.stopRequested === true, requestedAt: execution.stopRequestedAt ?? null },
   });
 
   const releaseIfHeld = execution => {
@@ -250,6 +251,121 @@ export async function startApp({ configPath, port: requestedPort }) {
     }
     await store.update(execution, { status: phase, finishedAt: Date.now() });
     releaseIfHeld(execution);
+  };
+
+  const interruptedSince = (session, requestedAt) => session?.outcome === 'interrupted'
+    && (session?.time?.idle ?? 0) >= requestedAt;
+
+  const stopTargets = async execution => {
+    const evidence = await readSession(config.captureDirectory, execution.sessionID);
+    const known = evidence.ok ? [execution.sessionID, ...evidence.scope.sessionIDs]
+      : [execution.sessionID];
+    try {
+      const tree = await engine.tree(config.projectDirectory, execution.sessionID, known, lifecycle.signal);
+      return new Set(tree.ids);
+    } catch {
+      return new Set(known);
+    }
+  };
+
+  const confirmStop = async (sessionID, requestedAt) => {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !lifecycle.signal.aborted) {
+      const session = await engine.session(sessionID, lifecycle.signal).catch(() => null);
+      if (interruptedSince(session, requestedAt)) return true;
+      if (session?.outcome && session.outcome !== 'interrupted') return false;
+      await delay(200);
+    }
+    return false;
+  };
+
+  const stopSession = async (sessionID, requestedAt) => {
+    const entry = { sessionID, result: 'error', stop: 'unconfirmed' };
+    try {
+      const current = await engine.session(sessionID, lifecycle.signal);
+      if (interruptedSince(current, requestedAt)) {
+        return { sessionID, result: 'already-interrupted', stop: 'confirmed' };
+      }
+      const response = await engine.interrupt(sessionID, lifecycle.signal);
+      if (!response.ok) return entry;
+      entry.result = response.data?.interrupted === true ? 'accepted' : 'not-running';
+    } catch {
+      return entry;
+    }
+    if (entry.result === 'accepted') await engine.wait(sessionID, lifecycle.signal).catch(() => {});
+    if (entry.result === 'accepted' || entry.result === 'not-running') {
+      if (await confirmStop(sessionID, requestedAt)) entry.stop = 'confirmed';
+    }
+    return entry;
+  };
+
+  const stopWave = async execution => {
+    const requestedAt = execution.stopRequestedAt;
+    const reported = new Map();
+    const deadline = Date.now() + 60000;
+    while (!lifecycle.signal.aborted) {
+      const targets = await stopTargets(execution);
+      const active = await engine.activeMap(lifecycle.signal).catch(() => null);
+      if (active === null) {
+        for (const sessionID of targets) {
+          if (!reported.has(sessionID)) reported.set(sessionID, { sessionID, result: 'error', stop: 'unconfirmed' });
+        }
+        return [...reported.values()];
+      }
+      const actionable = [];
+      for (const sessionID of targets) {
+        const prior = reported.get(sessionID);
+        const session = await engine.session(sessionID, lifecycle.signal).catch(() => null);
+        if (session && interruptedSince(session, requestedAt) && !active[sessionID]) {
+          if (!prior) reported.set(sessionID, { sessionID, result: 'already-interrupted', stop: 'confirmed' });
+          continue;
+        }
+        if (prior && prior.result !== 'error' && !active[sessionID]) continue;
+        actionable.push(sessionID);
+      }
+      if (!actionable.length) return [...reported.values()];
+      const entries = await Promise.all(actionable.map(sessionID => stopSession(sessionID, requestedAt)));
+      for (const entry of entries) if (entry) reported.set(entry.sessionID, entry);
+      if (Date.now() >= deadline) return [...reported.values()];
+    }
+    return [...reported.values()];
+  };
+
+  const stopState = async execution => {
+    const state = { requested: true, requestedAt: execution.stopRequestedAt,
+      sessions: [], readError: null };
+    for (const sessionID of await stopTargets(execution)) {
+      try {
+        const session = await engine.session(sessionID, lifecycle.signal);
+        state.sessions.push({ sessionID, outcome: session?.outcome ?? null,
+          stop: interruptedSince(session, execution.stopRequestedAt) ? 'confirmed' : 'unconfirmed' });
+      } catch {
+        state.readError = 'engine-unreachable';
+        state.sessions.push({ sessionID, outcome: null, stop: 'unconfirmed' });
+      }
+    }
+    return state;
+  };
+
+  const recorderState = async execution => {
+    if (!execution.sessionID) return { readable: false, reason: 'session-not-confirmed' };
+    try {
+      const session = await engine.session(execution.sessionID, lifecycle.signal);
+      const metadata = session?.metadata?.evagenticRecorder;
+      if (!metadata) return { readable: true, status: null, source: 'public-session-metadata' };
+      return {
+        readable: true,
+        source: 'public-session-metadata',
+        status: typeof metadata.status === 'string' ? metadata.status : null,
+        reason: typeof metadata.reason === 'string' ? metadata.reason : null,
+        notice: typeof metadata.notice === 'string' ? metadata.notice : null,
+        reviewRequired: metadata.reviewRequired === true,
+        pilotReady: metadata.pilotReady === true,
+        interruption: metadata.interruption ?? null,
+      };
+    } catch {
+      return { readable: false, reason: 'engine-unreachable' };
+    }
   };
 
   const json = (response, code, body) => {
@@ -420,8 +536,12 @@ export async function startApp({ configPath, port: requestedPort }) {
       const evidence = execution.sessionID
         ? await readSession(config.captureDirectory, execution.sessionID) : null;
       const live = evidence?.ok ? await livePending(evidence.interactions.pending) : null;
+      const stop = (execution.stopRequested && execution.sessionID)
+        ? await stopState(execution) : { requested: false };
       return json(response, 200, {
         execution: publicExecution(execution),
+        stop,
+        recorder: await recorderState(execution),
         conversation: evidence?.ok ? { entries: evidence.entries, responses: evidence.responses }
           : { entries: [], responses: [] },
         capture: evidence?.ok
@@ -501,6 +621,20 @@ export async function startApp({ configPath, port: requestedPort }) {
       } catch { return json(response, 503, { error: 'reply-unconfirmed' }); }
       if (!result.ok) return json(response, 502, { error: 'reply-unconfirmed', engineStatus: result.status });
       return json(response, 200, { interaction: { kind, sessionID, requestID, phase: 'replied' } });
+    }
+    const stop = url.pathname.match(/^\/api\/executions\/([^/]+)\/stop$/);
+    if (stop && request.method === 'POST') {
+      const execution = store.byId(stop[1]);
+      if (!execution) return json(response, 404, { error: 'unknown-execution' });
+      if (isTerminal(execution)) return json(response, 409, { error: 'execution-terminal' });
+      if (!execution.sessionID) return json(response, 409, { error: 'session-not-confirmed' });
+      const requestedAt = execution.stopRequested ? execution.stopRequestedAt : Date.now();
+      if (!execution.stopRequested) {
+        await store.update(execution, { stopRequested: true, stopRequestedAt: requestedAt });
+      }
+      const sessions = await stopWave(execution);
+      await reconcile(execution);
+      return json(response, 200, { stop: { requested: true, requestedAt, sessions } });
     }
     return json(response, 404, { error: 'not-found' });
   }

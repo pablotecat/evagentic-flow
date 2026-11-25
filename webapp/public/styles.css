@@ -282,3 +282,52 @@ aside {
   border-color: #b23c3c;
   background: #b23c3c;
 }
+
+#stop-requested {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #d5dae2;
+  border-radius: 8px;
+  background: #faf6ec;
+}
+
+#stop-requested h3 {
+  margin: 0 0 0.35rem;
+}
+
+#stop-requested ul {
+  list-style: none;
+  margin: 0.35rem 0;
+  padding: 0;
+  font-size: 0.85rem;
+  color: #45505e;
+  word-break: break-all;
+}
+
+#stop-requested p[role='alert'] {
+  margin: 0.35rem 0 0;
+}
+
+#stop {
+  padding: 0.45rem 1.1rem;
+  margin: 0.5rem 0;
+  border-radius: 6px;
+  border: 1px solid #b23c3c;
+  background: #b23c3c;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+#stop:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+#recorder-failure h3 {
+  margin: 0 0 0.35rem;
+}
+
+#recorder-failure p {
+  margin: 0.2rem 0;
+}

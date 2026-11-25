@@ -48,3 +48,42 @@ test('UI pura: borradores aislados por tipo, sesión y solicitud y errores de le
   assert.ok(error.includes('No se pudieron leer las solicitudes pendientes de child'));
   assert.ok(error.includes('su vigencia no está comprobada'));
 });
+
+test('UI pura: la detención distingue solicitud, desenlace por sesión y fallo del registrador', async t => {
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(new URL('../webapp/public/index.html', import.meta.url).href);
+  await page.addScriptTag({ content: await readFile(new URL('../webapp/public/app.js', import.meta.url), 'utf8') });
+  await page.evaluate(() => {
+    const execution = { id: 'synthetic-id-111111', sessionID: 'ses_root', status: 'running', dispatch: 'admitted' };
+    state.detail = {
+      execution,
+      stop: { requested: true, requestedAt: 1, readError: null, sessions: [
+        { sessionID: 'ses_root', outcome: 'interrupted', stop: 'confirmed' },
+        { sessionID: 'ses_child', outcome: 'succeeded', stop: 'unconfirmed' },
+      ] },
+      recorder: { readable: true, status: 'failed', reason: 'synthetic-reason',
+        reviewRequired: true, pilotReady: false, source: 'public-session-metadata' },
+      capture: { readable: true, recorderFailed: true, captureIDs: [], scope: { sessionIDs: [] },
+        horizon: null, gaps: [], omissions: [] },
+    };
+    state.stopRequest = { requested: true, requestedAt: 1, sessions: [
+      { sessionID: 'ses_root', result: 'accepted', stop: 'confirmed' },
+      { sessionID: 'ses_child', result: 'not-running', stop: 'unconfirmed' },
+    ] };
+    state.health = { engine: { reachable: true } };
+    renderExecution();
+  });
+  const stopPanel = await page.locator('#stop-requested').innerText();
+  assert.ok(stopPanel.includes('Detención solicitada'));
+  assert.ok(stopPanel.includes('Sesión raíz · Solicitud: aceptada · Detención: confirmada'));
+  assert.ok(stopPanel.includes('Subejecución ses_child · Solicitud: sesión no activa · Detención: no confirmada'));
+  assert.ok(stopPanel.includes('no hay interrupción instantánea'));
+  await page.locator('#stop').waitFor();
+  const recorder = await page.locator('#recorder-failure').innerText();
+  assert.ok(recorder.includes('Fallo del registrador'));
+  assert.ok(recorder.includes('fallo del registrador declarado en la captura'));
+  assert.ok(recorder.includes('Motivo público declarado: synthetic-reason'));
+  assert.ok(recorder.includes('no hay desbloqueo automático'));
+});

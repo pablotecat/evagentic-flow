@@ -715,3 +715,108 @@ test('responder con el motor caído falla de forma explícita sin conceder permi
     assert.notEqual((await createExecution(app, 'intervencion-otro', 'No debe lanzarse.')).status, 201,
       'a failed reply released the project');
   });
+
+const stopCall = (app, executionId) => appFetch(app, `/api/executions/${executionId}/stop`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: '{}',
+});
+
+test('la detención interrumpe el árbol delegado verificado sin tocar sesiones ajenas', { timeout: 300000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  const created = await createExecution(app, 'detencion-arbol', 'Encargo raíz largo. SYNTHETIC_LONG_RUNNING');
+  assert.equal(created.status, 201);
+  const id = created.body.execution.id;
+  const root = await eventually(async () => (await executionDetail(app, id)).body.execution.sessionID,
+    'root session was not confirmed');
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === root && row.type === 'session.text.delta'), 'root work did not start');
+  const child = (await instance.api('/api/session', { parentID: root,
+    location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${child.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING Hijo delegado' });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === child.id && row.type === 'session.text.delta'), 'child work did not start');
+  const foreign = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${foreign.id}/prompt`, { text: 'SYNTHETIC_LONG_RUNNING Sesión ajena al alcance' });
+  const finished = (await instance.api('/api/session', { parentID: root,
+    location: { directory: instance.projects[0] } })).data;
+  await instance.api(`/api/session/${finished.id}/prompt`, { text: 'Hijo delegado que termina solo' });
+  await eventually(async () => (await records(instance.captureDirectory))
+    .some(row => row.sessionID === finished.id && row.type === 'session.execution.succeeded'),
+    'the finished child did not complete before the stop');
+
+  assert.equal((await stopCall(app, 'urn:not-an-execution')).status, 404);
+  assert.equal((await stopCall(app, 'urn:not-an-execution')).body.error, 'unknown-execution');
+
+  const stopped = await stopCall(app, id);
+  assert.equal(stopped.status, 200);
+  const entries = new Map(stopped.body.stop.sessions.map(entry => [entry.sessionID, entry]));
+  assert.deepEqual(new Set(entries.keys()), new Set([root, child.id, finished.id]),
+    'the stop scope did not match the verified execution tree');
+  for (const entry of [entries.get(root), entries.get(child.id)]) {
+    assert.ok(['accepted', 'not-running', 'already-interrupted'].includes(entry.result),
+      `unexpected stop request result: ${entry.result}`);
+    assert.equal(entry.stop, 'confirmed', `a stopped session remained unconfirmed: ${entry.sessionID}`);
+  }
+  assert.equal(entries.get(finished.id).result, 'not-running');
+  assert.equal(entries.get(finished.id).stop, 'unconfirmed',
+    'a session ended on its own was presented as stopped by the request');
+  assert.equal(((await instance.api(`/api/session/${child.id}`)).data).outcome, 'interrupted');
+  const foreignData = (await instance.api(`/api/session/${foreign.id}`)).data;
+  assert.notEqual(foreignData.outcome, 'interrupted', 'the app interrupted a foreign session');
+  assert.equal(foreignData.metadata?.evagenticRecorder, undefined);
+
+  const detail = await eventually(async () => {
+    const body = (await executionDetail(app, id)).body;
+    const finishedEntry = (body.stop.sessions ?? []).find(session => session.sessionID === finished.id);
+    return body.execution.status === 'interrupted'
+      && (body.stop.sessions ?? []).every(session => session.sessionID === finished.id
+        ? session.stop === 'unconfirmed' : session.stop === 'confirmed')
+      && body.stop.sessions.length === 3 ? body : undefined;
+  }, 'a stopped execution did not reach an observed, confirmed stop state', 120000);
+  assert.equal(detail.execution.stop.requested, true);
+  assert.ok(detail.execution.stop.requestedAt);
+  assert.equal(detail.stop.requested, true);
+  assert.equal(detail.conversation.entries.length, 1);
+  assert.ok(detail.conversation.entries[0].text.includes('Encargo raíz largo.'));
+  assert.ok(detail.execution.finishedAt, 'the interrupted execution lost its real terminal timestamp');
+  assert.ok(detail.conversation.responses.length <= 1, 'an interrupted execution invented final responses');
+  const indexPath = join(instance.root, 'webapp-data', 'executions.json');
+  const indexText = await readFile(indexPath, 'utf8');
+  assert.ok(indexText.includes('"stopRequested": true'), 'the stop request was not persisted as metadata');
+  assert.ok(!indexText.includes('Encargo raíz largo.'), 'the index persisted stop content out of the capture');
+
+  assert.equal((await stopCall(app, id)).status, 409);
+  assert.equal((await stopCall(app, id)).body.error, 'execution-terminal');
+  const next = await createExecution(app, 'detencion-despues', 'Encargo tras liberar la detención.');
+  assert.equal(next.status, 201, 'a confirmed and reconciled stop did not release the project');
+});
+
+test('la detención sin sesión confirmada no interrumpe nada y lo dice', { timeout: 90000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'webapp-stop-'));
+  const projectDirectory = join(root, 'project');
+  await mkdir(projectDirectory, { recursive: true });
+  const socket = net.createServer(client => client.destroy());
+  await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => socket.close(resolve)));
+  const deadPort = socket.address().port;
+  const configPath = join(root, 'webapp.local.json');
+  await writeFile(configPath, JSON.stringify({ version: 1,
+    opencodeURL: `http://127.0.0.1:${deadPort}`, opencodePassword: 'synthetic-opencode-password',
+    projectDirectory, captureDirectory: join(root, 'captures'), dataDirectory: join(root, 'data') }));
+  const app = await startApp({ configPath });
+  t.after(() => app.close());
+  const created = await createExecution(app, 'detencion-sin-sesion', 'Encargo sintético.');
+  assert.equal(created.status, 201);
+  await eventually(async () => (await executionDetail(app, created.body.execution.id))
+    .body.execution.sessionID === null, 'the execution did not stay without a session');
+  const stop = await stopCall(app, created.body.execution.id);
+  assert.equal(stop.status, 409);
+  assert.equal(stop.body.error, 'session-not-confirmed');
+  const indexText = await readFile(join(root, 'data', 'executions.json'), 'utf8');
+  assert.ok(!indexText.includes('stopRequested'), 'a rejected stop request persisted stop metadata');
+  assert.equal((await createExecution(app, 'detencion-sin-sesion', 'Encargo repetido.')).status, 200);
+  assert.equal((await createExecution(app, 'detencion-distinta', 'Encargo distinto.')).status, 409,
+    'a stop without a confirmed session must not release the project');
+});

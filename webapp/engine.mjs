@@ -84,6 +84,33 @@ export function createEngine({ baseURL, password }) {
       return send(`/api/session/${sessionID}/form/${requestID}/reply`, {
         method: 'POST', body: { answer }, timeout: 30000, signal });
     },
+    async interrupt(sessionID, signal) {
+      return send(`/api/session/${sessionID}/interrupt`, {
+        method: 'POST', body: { resume: false }, timeout: 30000, signal });
+    },
+    async wait(sessionID, signal) {
+      return send(`/api/experimental/session/${sessionID}/wait`, {
+        method: 'POST', body: {}, timeout: 30000, signal });
+    },
+    async tree(directory, rootID, knownIDs, signal) {
+      const result = await send(`/api/session?directory=${encodeURIComponent(directory)}`, { signal });
+      if (!result.ok) throw new Error('cannot verify execution scope');
+      const sessions = result.data?.data;
+      if (!Array.isArray(sessions)) throw new Error('unknown execution scope');
+      const ids = new Set([rootID, ...knownIDs]);
+      for (let size = -1; size !== ids.size;) {
+        size = ids.size;
+        for (const session of sessions) if (ids.has(session.parentID)) ids.add(session.id);
+      }
+      return { sessions, ids: [...ids] };
+    },
+    async activeMap(signal) {
+      const result = await send('/api/session/active', { signal });
+      if (!result.ok) throw new Error('cannot verify active sessions');
+      const active = result.data?.data;
+      if (!active || typeof active !== 'object') throw new Error('unknown active sessions');
+      return active;
+    },
     async replyPermission(sessionID, requestID, decision, signal) {
       return send(`/api/session/${sessionID}/permission/${requestID}/reply`, {
         method: 'POST', body: { decision }, timeout: 30000, signal });
@@ -114,17 +141,12 @@ export function createEngine({ baseURL, password }) {
         if (!result.ok) throw new Error('cannot verify execution scope');
         return result.data?.data;
       };
-      const [sessions, active] = await Promise.all([
-        get(`/api/session?directory=${encodeURIComponent(directory)}`), get('/api/session/active'),
+      const [tree, active] = await Promise.all([
+        this.tree(directory, rootID, knownIDs), get('/api/session/active'),
       ]);
-      if (!Array.isArray(sessions) || !active || typeof active !== 'object') throw new Error('unknown execution scope');
-      const ids = new Set([rootID, ...knownIDs]);
-      for (let size = -1; size !== ids.size;) {
-        size = ids.size;
-        for (const session of sessions) if (ids.has(session.parentID)) ids.add(session.id);
-      }
-      const scoped = sessions.filter(session => ids.has(session.id));
-      if (scoped.length !== ids.size) throw new Error('known session unavailable');
+      if (!active || typeof active !== 'object') throw new Error('unknown execution scope');
+      const scoped = tree.sessions.filter(session => tree.ids.includes(session.id));
+      if (scoped.length !== tree.ids.length) throw new Error('known session unavailable');
       const clear = await Promise.all(scoped.map(async session => {
         const [forms, permissions] = await Promise.all([
           get(`/api/session/${session.id}/form`), get(`/api/session/${session.id}/permission`),
@@ -136,10 +158,11 @@ export function createEngine({ baseURL, password }) {
         get(`/api/session?directory=${encodeURIComponent(directory)}`), get('/api/session/active'),
       ]);
       if (!Array.isArray(verified) || !finalActive || typeof finalActive !== 'object') throw new Error('unknown final scope');
-      const stable = !verified.some(session => ids.has(session.parentID) && !ids.has(session.id))
-        && [...ids].every(id => verified.some(session => session.id === id
+      const stable = !verified.some(session => tree.ids.includes(session.parentID)
+          && !tree.ids.includes(session.id))
+        && tree.ids.every(id => verified.some(session => session.id === id
           && ['succeeded', 'failed', 'interrupted'].includes(session.outcome)) && !finalActive[id]);
-      return { sessionIDs: [...ids], clear: clear.every(Boolean) && stable };
+      return { sessionIDs: tree.ids, clear: clear.every(Boolean) && stable };
     },
   };
 }

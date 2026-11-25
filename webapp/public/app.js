@@ -32,6 +32,19 @@ const INTERACTION_ERRORS = {
   'reply-unconfirmed': 'Respuesta posiblemente enviada: no se pudo confirmar el resultado. El permiso pudo aplicarse; pendiente de reconciliar con la evidencia y el motor. No se repetirá automáticamente.',
 };
 
+const STOP_ERRORS = {
+  'execution-terminal': 'La ejecución ya está cerrada; la detención ya no aplica.',
+  'session-not-confirmed': 'Todavía no hay sesión confirmada para detener; no se ha interrumpido nada.',
+  unknown: 'No se pudo procesar la detención; el desenlace queda sin confirmar y el encargo no se reenvía.',
+};
+
+const STOP_REQUEST_LABELS = {
+  accepted: 'aceptada',
+  'not-running': 'sesión no activa',
+  error: 'fallo de la solicitud',
+  'already-interrupted': 'interrumpida antes de esta solicitud',
+};
+
 const state = {
   health: null,
   connected: null,
@@ -50,6 +63,9 @@ const state = {
   interactionAnswers: {},
   interactionError: null,
   replying: false,
+  stopping: false,
+  stopError: null,
+  stopRequest: null,
 };
 
 const statusLine = document.querySelector('#status');
@@ -279,6 +295,55 @@ async function replyInteraction(payload) {
   }
 }
 
+async function requestStop() {
+  if (state.stopping || state.selected === null) return;
+  state.stopping = true;
+  state.stopError = null;
+  renderConversation();
+  try {
+    const body = await api(`/api/executions/${state.selected}/stop`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    state.stopRequest = body.stop;
+  } catch (error) {
+    state.stopError = STOP_ERRORS[error?.body?.error] ?? STOP_ERRORS.unknown;
+  } finally {
+    state.stopping = false;
+  }
+  await refreshDetail();
+}
+
+function renderStop(execution) {
+  if (!execution) return [];
+  const stop = state.detail?.stop;
+  const sections = [];
+  if (stop?.requested) {
+    const requested = state.stopRequest?.sessions ?? [];
+    sections.push(el('section', { id: 'stop-requested', 'aria-label': 'Detención' },
+      el('h3', {}, 'Detención solicitada'),
+      el('p', { class: 'notice' },
+        'La detención actúa sólo sobre el alcance verificado de esta ejecución. Una solicitud aceptada no es una detención confirmada: no hay interrupción instantánea, pausa, reanudación ni reversión de efectos externos, y el encargo no se reenvía.'),
+      el('ul', {}, ...(stop.sessions ?? []).map(session => {
+        const request = requested.find(item => item.sessionID === session.sessionID);
+        return el('li', {}, `${sessionLabel(execution, session.sessionID)} · Solicitud: ${
+          request ? STOP_REQUEST_LABELS[request.result] ?? request.result : 'sin comprobar'} · Detención: ${
+          session.stop === 'confirmed' ? 'confirmada' : 'no confirmada'}`);
+      })),
+      stop.readError ? el('p', { role: 'alert', class: 'error' },
+        'No se pudo comprobar el desenlace público de la detención; se mantiene no confirmada y el trabajo no se relanza.') : null));
+  }
+  if (!TERMINAL.includes(execution.status) && execution.sessionID) {
+    const button = el('button', { id: 'stop', type: 'button', ...(state.stopping ? { disabled: '' } : {}) }, 'Detener');
+    button.addEventListener('click', requestStop);
+    sections.push(button);
+  }
+  if (state.stopError) {
+    sections.push(el('p', { role: 'alert', class: 'error' }, state.stopError));
+  }
+  return sections;
+}
+
 function renderOptionSelect(name, id, entries, value, placeholder, placeholderEmpty) {
   const select = el('select', { id, 'aria-label': name });
   if (state.options === null) {
@@ -444,6 +509,7 @@ function renderExecution() {
     el('p', { class: 'dispatch' }, DISPATCH_LABELS[execution.dispatch] ?? DISPATCH_LABELS.unconfirmed),
     renderMessages(),
     ...renderInteractions(),
+    ...renderStop(execution),
     el('dl', { class: 'identity' },
       el('dt', {}, 'Ejecución'), el('dd', {}, execution.id),
       ...selectionRows,
@@ -461,9 +527,19 @@ function renderExecution() {
     panel.splice(2, 0, el('p', { id: 'engine-offline', class: 'notice' },
       'Motor no disponible: desenlace pendiente de comprobar; el encargo no se reenviará.'));
   }
-  if (capture?.recorderFailed) {
-    panel.splice(2, 0, el('p', { role: 'alert', class: 'error' },
-      'Fallo del registrador: revisar antes de volver a ejecutar.'));
+  const recorder = detail.recorder;
+  const recorderFailed = capture?.recorderFailed
+    || (recorder?.readable === true && recorder.status === 'failed');
+  if (recorderFailed) {
+    const captureState = capture?.readable
+      ? (capture.recorderFailed ? 'fallo del registrador declarado en la captura' : 'consultable')
+      : `no consultable (${capture?.reason ?? 'desconocido'})`;
+    panel.splice(2, 0, el('section', { id: 'recorder-failure', role: 'alert', 'aria-label': 'Fallo del registrador', class: 'error' },
+      el('h3', {}, 'Fallo del registrador'),
+      el('p', {}, `Aviso: revisar antes de volver a ejecutar. Estado de captura: ${captureState}.`),
+      el('p', {}, 'Revisión requerida según la evidencia pública del motor. Se conserva el bloqueo durable de la captura: no hay desbloqueo automático, ni por recargar ni por reparar la ruta.'),
+      recorder?.readable === true && recorder.reason
+        ? el('p', { class: 'notice' }, `Motivo público declarado: ${recorder.reason}.`) : null));
   }
   if (capture?.gaps?.length) {
     panel.push(el('section', { 'aria-label': 'Lagunas conocidas' },
@@ -502,6 +578,8 @@ function renderHistory() {
       state.error = null;
       state.interactionError = null;
       state.interactionAnswers = {};
+      state.stopError = null;
+      state.stopRequest = null;
       renderConversation();
       refreshDetail();
     });
@@ -515,6 +593,8 @@ document.querySelector('#new-chat').addEventListener('click', () => {
   state.error = null;
   state.interactionError = null;
   state.interactionAnswers = {};
+  state.stopError = null;
+  state.stopRequest = null;
   state.draft = '';
   state.agent = '';
   state.model = '';
