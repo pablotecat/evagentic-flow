@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rename, rm, unlink, writeFile, mkdir, symlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -895,4 +895,144 @@ test('la vista mantiene desconocida una llamada sin desenlace y distingue skills
     const reloadedText = await page.locator('[aria-label="Skills observadas"]').textContent();
     assert.ok(reloadedText.includes('transformed'), 'the observed skills were not rebuilt after a reload');
     assert.equal(await admittedCount(instance), 2, 'browsing the trace dispatched work');
+  });
+
+test('el navegador consulta entregables de raíz y subejecuciones y preserva los bytes de la captura',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticDeliverables: true,
+      config: { secrets: ['synthetic-deliverable-secret', 'synthetic-secret-42'] },
+      serverConfig: { experimental: { subagent_depth: 3 }, agents: { 'synthetic-branch': { mode: 'all',
+        description: 'Synthetic branching agent',
+        permissions: [{ action: 'subagent', resource: 'synthetic-branch', effect: 'allow' }] } } } });
+    await mkdir(join(instance.projects[0], 'directory'));
+    await writeFile(join(instance.projects[0], 'binary.bin'), Buffer.from([0, 255, 1, 2]));
+    await writeFile(join(instance.projects[1], 'outside.txt'), 'synthetic-outside-deliverable');
+    await symlink(instance.projects[1], join(instance.projects[0], 'escape'),
+      process.platform === 'win32' ? 'junction' : 'dir');
+    const { app } = await launchWebapp(t, instance);
+    const browser = await chromium.launch();
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(app.url);
+    await upload(page, 'Encargo con entregables delegados. SYNTHETIC_DELIVERABLE_TREE');
+    await awaitStatus(page, 'Fallida', 300000);
+    const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+    const root = (await appFetch(app, `/api/executions/${executionId}`)).body.execution.sessionID;
+    const overview = (await appFetch(app, `/api/executions/${executionId}/deliverables`)).body;
+    assert.equal(overview.sessions.length, 4);
+    const produceSession = overview.sessions.find(group => group.sessionID !== root
+      && group.deliverables.some(item => item.value?.content?.includes('Synthetic produced result'))).sessionID;
+    assert.ok(produceSession, 'no child session captured a deliverable snapshot');
+
+    await page.waitForFunction(() => document.querySelectorAll('#deliverables .deliverable-sessions > li').length === 4,
+      undefined, { timeout: 120000 });
+    const panel = () => page.locator('#deliverables').innerText();
+    let deliverablesText = await panel();
+    assert.ok(deliverablesText.includes('consultadas una a una'));
+    assert.ok(deliverablesText.includes('una consulta de raíz no incluye descendientes'));
+    assert.ok(deliverablesText.includes('La finalidad global no está acreditada'));
+    assert.ok(deliverablesText.includes('no acredita que este contenido sea el resultado final del flujo'));
+    assert.ok(deliverablesText.includes('Resultados parciales de una ejecución fallida o interrumpida'));
+    assert.ok(deliverablesText.includes('Sesión raíz'));
+    assert.ok(deliverablesText.includes('Subejecución'));
+    assert.ok(deliverablesText.includes('Sin entregables capturados para esta sesión'));
+    assert.ok(deliverablesText.includes('lectura posterior al evento o hook'));
+    assert.ok(deliverablesText.includes('Contenido no adquirido'));
+    assert.ok(deliverablesText.includes('deliverable-reference-unavailable'));
+    assert.ok(deliverablesText.includes('deliverable-outside-project'));
+    assert.ok(deliverablesText.includes('file-read-is-not-runtime-version'));
+    assert.ok(deliverablesText.includes('SHA-256 (redacted-json-utf8)'));
+    assert.ok(deliverablesText.includes('llamada call_synthetic_deliverable'));
+    assert.ok(deliverablesText.includes('Fuente: opencode.session.tool.content'));
+    assert.ok(deliverablesText.includes('no acredita qué bytes produjo o utilizó la acción original'));
+    assert.ok(!deliverablesText.includes('Aprobado'), 'a partial result was shown as acceptance');
+    assert.ok(!deliverablesText.includes('éxito observado'), 'a partial result was labeled as success');
+    assert.ok(!deliverablesText.includes('synthetic-deliverable-secret'), 'deliverables leaked a secret');
+    assert.ok(!deliverablesText.includes('synthetic-deliverable-token'), 'deliverables leaked a token');
+    assert.ok(!deliverablesText.includes('synthetic-outside-deliverable'), 'an outside file was read');
+
+    for (let index = 0; index < await page.locator('#deliverables details > summary').count(); index++) {
+      await page.locator('#deliverables details > summary').nth(index).click();
+    }
+    const contents = await page.locator('#deliverables pre').allInnerTexts();
+    assert.ok(contents.some(text => text === 'Synthetic produced result. [REDACTED]\n[REDACTED]'),
+      'the captured deliverable content was not preserved verbatim');
+
+    await page.locator(`#trace .tree-node button[data-session="${root}"]`).click();
+    await page.waitForFunction(() => document.querySelectorAll('#deliverables .deliverable-sessions > li').length === 1
+      && document.querySelector('#deliverables')?.textContent?.includes('Consulta de una sola sesión'),
+    undefined, { timeout: 120000 });
+    deliverablesText = await panel();
+    assert.ok(deliverablesText.includes('no incluye los entregables de sus descendientes'));
+    assert.ok(!deliverablesText.includes(produceSession), 'the root query mixed a child deliverable');
+    await page.locator(`#trace .tree-node button[data-session="${produceSession}"]`).click();
+    await page.waitForFunction(sessionID => document.querySelector('#deliverables li[data-session]')
+      ?.dataset?.session === sessionID
+      && document.querySelectorAll('#deliverables .deliverable-sessions > li').length === 1,
+    produceSession, { timeout: 120000 });
+    deliverablesText = await panel();
+    assert.ok(deliverablesText.includes('Snapshots conservados: 1'));
+    assert.ok(!deliverablesText.includes(`Subejecución ${root}`), 'the child query mixed the root session');
+
+    let digestBefore = await hashCapture(instance.captureDirectory);
+    let admissionsBefore = await admittedCount(instance);
+    await writeFile(join(instance.projects[0], 'result.txt'), 'Synthetic later unobserved revision.');
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
+    await page.locator(`#history button[data-id="${executionId}"]`).click();
+    await awaitStatus(page, 'Fallida', 60000);
+    await page.locator(`#trace .tree-node button[data-session="${root}"]`).click();
+    await page.waitForFunction(() => document.querySelectorAll('#deliverables .deliverable-sessions > li').length === 1,
+      undefined, { timeout: 120000 });
+    await page.locator('#deliverables details > summary').first().click();
+    let preserved = await page.locator('#deliverables pre').first().innerText();
+    assert.equal(preserved, 'Synthetic produced result. [REDACTED]\n[REDACTED]',
+      'changing the original file altered the conserved snapshot');
+    await rm(join(instance.projects[0], 'result.txt'));
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
+    await page.locator(`#history button[data-id="${executionId}"]`).click();
+    await awaitStatus(page, 'Fallida', 60000);
+    await page.locator(`#trace .tree-node button[data-session="${root}"]`).click();
+    await page.waitForFunction(() => document.querySelectorAll('#deliverables .deliverable-sessions > li').length === 1,
+      undefined, { timeout: 120000 });
+    await page.locator('#deliverables details > summary').first().click();
+    preserved = await page.locator('#deliverables pre').first().innerText();
+    assert.equal(preserved, 'Synthetic produced result. [REDACTED]\n[REDACTED]',
+      'deleting the original file altered the conserved snapshot');
+
+    await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+    await upload(page, 'Encargo corto sin entregables.');
+    await awaitStatus(page, 'Finalizada técnicamente', 300000);
+    const secondId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+    assert.notEqual(secondId, executionId);
+    await page.waitForFunction(() => document.querySelectorAll('#deliverables .deliverable-sessions > li').length === 1,
+      undefined, { timeout: 120000 });
+    const secondText = await panel();
+    assert.ok(secondText.includes('Sin entregables capturados para esta sesión'));
+    assert.ok(!secondText.includes(root), 'the second execution mixed the first tree');
+    assert.ok(!secondText.includes(produceSession), 'the second execution mixed a child of the first tree');
+
+    digestBefore = await hashCapture(instance.captureDirectory);
+    admissionsBefore = await admittedCount(instance);
+    await instance.stop();
+    await page.goto(app.url);
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 2,
+      undefined, { timeout: 60000 });
+    await page.locator(`#history button[data-id="${executionId}"]`).click();
+    await awaitStatus(page, 'Fallida', 60000);
+    await page.locator(`#trace .tree-node button[data-session="${root}"]`).click();
+    await page.waitForFunction(() => document.querySelectorAll('#deliverables .deliverable-sessions > li').length === 1,
+      undefined, { timeout: 120000 });
+    assert.ok((await page.locator('#status').innerText()).includes('Motor: no disponible'));
+    await page.locator('#deliverables details > summary').first().click();
+    preserved = await page.locator('#deliverables pre').first().innerText();
+    assert.equal(preserved, 'Synthetic produced result. [REDACTED]\n[REDACTED]',
+      'the offline query altered the conserved snapshot');
+    assert.equal(await admittedCount(instance), admissionsBefore,
+      'consulting deliverables with the engine down dispatched work');
+    assert.equal(await hashCapture(instance.captureDirectory), digestBefore,
+      'browsing deliverables altered captured evidence');
   });

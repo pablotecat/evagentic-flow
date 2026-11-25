@@ -120,3 +120,86 @@ test('UI pura: una traza tardía no se pinta bajo otra selección', async t => {
   assert.equal(result.afterExecution, 'b');
   assert.equal(result.afterSession, null);
 });
+
+test('UI pura: los entregables distinguen adquisición, ausencia y finalidad desconocida', async t => {
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(new URL('../webapp/public/index.html', import.meta.url).href);
+  await page.addScriptTag({ content: await readFile(new URL('../webapp/public/app.js', import.meta.url), 'utf8') });
+  const deliverable = (sessionID, value, extra = {}) => ({
+    source: 'opencode.session.tool.content', identity: null, status: 'captured', value,
+    sha256: 'a'.repeat(64), hashBasis: 'redacted-json-utf8', observationTime: 1500, sessionID,
+    messageID: 'msg_synthetic', eventID: 'evt_synthetic', omissions: [], redactions: [],
+    evidence: { captureID: 'cap-synthetic', arrival: 3, observedAt: 2000 }, ...extra });
+  const group = (sessionID, deliverables, responses = []) => ({ sessionID,
+    isRoot: sessionID === 'ses_root', entries: [], responses, deliverables });
+  await page.evaluate(([first]) => {
+    const execution = { id: 'synthetic-id-111111', sessionID: 'ses_root', status: 'interrupted', dispatch: 'admitted' };
+    state.detail = { execution, interactions: { pending: [], resolved: [] },
+      capture: { readable: true, captureIDs: [], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root', 'ses_child', 'ses_empty'] }, gaps: [], omissions: [] } };
+    state.deliverables = first;
+    renderExecution();
+  }, [{
+    readable: true, selectedSessionID: 'ses_root',
+    query: { mode: 'known-sessions-explicit', sessions: ['ses_root', 'ses_child', 'ses_empty'] },
+    sessions: [
+      group('ses_root', [
+        deliverable('ses_root', { path: 'input.txt', content: 'Contenido del propio evento.',
+          acquisition: 'runtime-content', role: 'input', roleSource: 'public-file-boundary',
+          sourceTimeBasis: 'runtime-event-created', finality: null, callID: null, sourceTime: 1000 },
+          { source: 'opencode.session.inbox.files' }),
+        deliverable('ses_root', { path: 'result.txt', content: null, acquisition: 'not-acquired',
+          role: 'output', roleSource: 'public-file-boundary', sourceTimeBasis: 'runtime-event-created',
+          finality: null, callID: 'call_a', sourceTime: 3000 },
+          { omissions: ['deliverable-format-not-supported'] }),
+      ], [{ text: 'Respuesta parcial autorizada.' }]),
+      group('ses_child', [
+        deliverable('ses_child', { path: 'child.txt', content: 'Contenido leído después.',
+          acquisition: 'post-event-file-read', role: 'output', roleSource: 'public-file-boundary',
+          sourceTimeBasis: 'runtime-event-created', finality: null, callID: 'call_b', sourceTime: 5000 },
+          { omissions: ['file-read-is-not-runtime-version'] }),
+        deliverable('ses_child', null, { status: 'unrecognized', sha256: null, value: undefined,
+          omissions: ['redacted-observation-shape'] }),
+      ]),
+      group('ses_empty', []),
+    ],
+    scope: { kind: 'observed-session-tree', rootSessionID: 'ses_root',
+      sessionIDs: ['ses_root', 'ses_child', 'ses_empty'] },
+    horizon: null,
+  }]);
+  let panel = await page.locator('#deliverables').innerText();
+  assert.ok(panel.includes('reúne explícitamente las sesiones conocida'));
+  assert.ok(panel.includes('consultadas una a una'));
+  assert.ok(panel.includes('una consulta de raíz no incluye descendientes'));
+  assert.ok(panel.includes('contenido capturado del propio evento del runtime'));
+  assert.ok(panel.includes('lectura posterior al evento o hook'));
+  assert.ok(panel.includes('Contenido no adquirido'));
+  assert.ok(panel.includes('Proyección no reconocida'));
+  assert.ok(panel.includes('Sin entregables capturados para esta sesión'));
+  assert.ok(panel.includes('SHA-256 (redacted-json-utf8)'));
+  assert.ok(panel.includes('no acredita qué bytes produjo o utilizó la acción original'));
+  assert.ok(panel.includes('La finalidad global no está acreditada'));
+  assert.ok(panel.includes('no acredita que este contenido sea el resultado final del flujo'));
+  assert.ok(panel.includes('Resultados parciales de una ejecución fallida o interrumpida'));
+  assert.ok(panel.includes('no equivale a éxito ni a aceptación'));
+  assert.ok(panel.includes('Respuesta parcial autorizada.'));
+  assert.ok(panel.includes('ninguna observada en la captura'));
+  for (let index = 0; index < await page.locator('#deliverables details > summary').count(); index++) {
+    await page.locator('#deliverables details > summary').nth(index).click();
+  }
+  const contents = await page.locator('#deliverables pre').allInnerTexts();
+  assert.deepEqual(contents, ['Contenido del propio evento.', 'Contenido leído después.']);
+
+  await page.evaluate(() => {
+    state.deliverables = { ...state.deliverables, query: { mode: 'selected-session',
+      sessions: ['ses_root'] }, sessions: [state.deliverables.sessions[0]] };
+    state.detail.execution.status = 'failed';
+    renderExecution();
+  });
+  panel = await page.locator('#deliverables').innerText();
+  assert.ok(panel.includes('Consulta de una sola sesión (ses_root)'));
+  assert.ok(panel.includes('no incluye los entregables de sus descendientes'));
+  assert.ok(panel.includes('Resultados parciales de una ejecución fallida o interrumpida'));
+});

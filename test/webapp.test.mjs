@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rename, rm, rmdir, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rename, rm, rmdir, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
@@ -856,6 +856,9 @@ const runReader = (instance, sessionID, mode) => execFileSync(process.execPath,
 const traceOf = (app, executionId, sessionID) => appFetch(app,
   `/api/executions/${executionId}/trace${sessionID ? `?session=${sessionID}` : ''}`);
 
+const deliverablesOf = (app, executionId, sessionID) => appFetch(app,
+  `/api/executions/${executionId}/deliverables${sessionID ? `?session=${sessionID}` : ''}`);
+
 test('la traza expone árbol, intervalos y herramientas de la delegación anidada sin mezclar ejecuciones',
   { timeout: 480000 }, async t => {
     const instance = await fixture(t, { simulation: true, modelCost: { input: 1, output: 2 },
@@ -1051,4 +1054,164 @@ test('la traza mantiene desconocidas una llamada sin desenlace y una relación s
     assert.equal(recoveredTrace.tools.attempts.filter(attempt => attempt.incident?.kind === 'tool-error').length, 1);
     assert.equal(recoveredTrace.tools.attempts[0].callID, 'call_synthetic_action_1');
     assert.equal(recoveredTrace.tools.attempts[1].callID, 'call_synthetic_action_2');
+  });
+
+test('los entregables consultan snapshots por sesión del árbol acreditado sin mezclar ejecuciones',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticDeliverables: true,
+      config: { secrets: ['synthetic-deliverable-secret', 'synthetic-secret-42'] },
+      serverConfig: { experimental: { subagent_depth: 3 }, agents: { 'synthetic-branch': { mode: 'all',
+        description: 'Synthetic branching agent',
+        permissions: [{ action: 'subagent', resource: 'synthetic-branch', effect: 'allow' }] } } } });
+    const directory = instance.projects[0];
+    await mkdir(join(directory, 'directory'));
+    await writeFile(join(directory, 'binary.bin'), Buffer.from([0, 255, 1, 2]));
+    await writeFile(join(instance.projects[1], 'outside.txt'), 'synthetic-outside-deliverable');
+    await symlink(instance.projects[1], join(directory, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const { app } = await launchWebapp(t, instance);
+    const created = await createExecution(app, 'entregables-arbol',
+      'Encargo con entregables delegados. SYNTHETIC_DELIVERABLE_TREE');
+    assert.equal(created.status, 201);
+    const executionId = created.body.execution.id;
+    const completed = await eventually(async () => {
+      const body = (await executionDetail(app, executionId)).body;
+      return body.execution.sessionID && body.execution.status === 'failed' ? body : undefined;
+    }, 'the deliverable execution did not fail with partial results', 300000);
+    const root = completed.execution.sessionID;
+    assert.equal(completed.execution.dispatch, 'admitted');
+    assert.equal(completed.capture.scope.sessionIDs.length, 4,
+      'the synthetic deliverable tree did not expose root and three children');
+
+    const overview = await eventually(async () => {
+      const body = (await deliverablesOf(app, executionId)).body;
+      return body?.readable === true && body.sessions?.length === 4 ? body : undefined;
+    }, 'the deliverables overview did not gather the known sessions', 120000);
+    assert.equal(overview.query.mode, 'known-sessions-explicit');
+    assert.deepEqual(overview.query.sessions, completed.capture.scope.sessionIDs);
+    const bySession = new Map(overview.sessions.map(group => [group.sessionID, group]));
+    const readerDeliverables = sessionID => runReader(instance, sessionID, '--deliverables');
+    for (const group of overview.sessions) {
+      const reader = readerDeliverables(group.sessionID);
+      assert.equal(group.deliverables.length, reader.length,
+        `the webapp diverged from the independent reader for ${group.sessionID}`);
+      for (const deliverable of group.deliverables) {
+        const row = reader.find(reader => reader.sha256 === deliverable.sha256
+          || (reader.value?.path === deliverable.value?.path && reader.observationTime === deliverable.observationTime));
+        assert.ok(row, `a webapp deliverable of ${group.sessionID} was not backed by the reader`);
+      }
+    }
+    const rootGroup = bySession.get(root);
+    assert.equal(rootGroup.isRoot, true);
+    assert.equal(rootGroup.deliverables.length, 1);
+    const rootDeliverable = rootGroup.deliverables[0];
+    assert.equal(rootDeliverable.source, 'opencode.session.tool.content');
+    assert.equal(rootDeliverable.value.content, 'Synthetic produced result. [REDACTED]\n[REDACTED]');
+    assert.equal(rootDeliverable.value.acquisition, 'post-event-file-read');
+    assert.equal(rootDeliverable.value.role, 'output');
+    assert.equal(rootDeliverable.value.finality, null);
+    assert.equal(rootDeliverable.value.callID, 'call_synthetic_deliverable');
+    assert.equal(rootDeliverable.value.path, 'result.txt');
+    assert.match(rootDeliverable.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(rootDeliverable.hashBasis, 'redacted-json-utf8');
+    assert.ok(rootDeliverable.evidence.captureID && rootDeliverable.evidence.arrival >= 1);
+    assert.ok(rootDeliverable.omissions.includes('file-read-is-not-runtime-version'));
+    assert.equal(rootGroup.responses.length, 0,
+      'the failed root must expose an absent response, not a reconstructed one');
+    const responded = overview.sessions.find(group => group.responses.length > 0);
+    assert.ok(responded && responded.responses.some(item => item.text.includes('[REDACTED].')),
+      'no session preserved an authorized filtered response');
+
+    const produceSession = overview.sessions.find(group => group.sessionID !== root
+      && group.deliverables.some(item => item.value?.content !== null && item.value?.content !== undefined
+        && item.value.content.includes('Synthetic produced result')))?.sessionID;
+    assert.ok(produceSession, 'no child session produced a deliverable snapshot');
+    const emptySession = overview.sessions.find(group => !group.isRoot
+      && group.deliverables.length === 0 && group.responses.length > 0)?.sessionID;
+    assert.ok(emptySession, 'no child session with an explicit deliverable absence');
+    const limitsGroup = overview.sessions.find(group => group.deliverables.some(item =>
+      item.value?.acquisition === 'not-acquired')) ?? undefined;
+    assert.ok(limitsGroup, 'no child session exposed not-acquired deliverable references');
+    const escape = limitsGroup.deliverables.find(item => item.value?.path === join('escape', 'outside.txt'));
+    assert.ok(escape && escape.value.content === null
+      && escape.omissions.includes('deliverable-outside-project'), 'the escaping reference was captured or resolved');
+    const missing = limitsGroup.deliverables.find(item => item.value?.path === 'missing.txt');
+    assert.ok(missing && missing.value.acquisition === 'not-acquired'
+      && missing.omissions.includes('deliverable-reference-unavailable'));
+    const binary = limitsGroup.deliverables.find(item => item.value?.path === 'binary.bin');
+    assert.ok(binary && binary.omissions.includes('deliverable-format-not-supported'));
+
+    const rootOnly = await deliverablesOf(app, executionId, root);
+    assert.equal(rootOnly.status, 200);
+    assert.equal(rootOnly.body.query.mode, 'selected-session');
+    assert.deepEqual(rootOnly.body.query.sessions, [root]);
+    assert.equal(rootOnly.body.sessions.length, 1);
+    assert.ok(!rootOnly.body.sessions.some(group => group.sessionID === produceSession),
+      'a root deliverables query included a descendant');
+    const childOnly = await deliverablesOf(app, executionId, limitsGroup.sessionID);
+    assert.equal(childOnly.status, 200);
+    assert.equal(childOnly.body.sessions.length, 1);
+    assert.equal(childOnly.body.sessions[0].sessionID, limitsGroup.sessionID);
+
+    const foreign = (await instance.api('/api/session', { location: { directory } })).data;
+    await instance.api(`/api/session/${foreign.id}/prompt`, { text: 'Sesión ajena a la ejecución.' });
+    const rejected = await deliverablesOf(app, executionId, foreign.id);
+    assert.equal(rejected.status, 404);
+    assert.equal(rejected.body.error, 'session-not-in-execution');
+    assert.equal((await deliverablesOf(app, 'urn:not-an-execution')).status, 404);
+
+    await writeFile(join(directory, 'result.txt'), 'Synthetic later unobserved revision.');
+    const afterChange = await deliverablesOf(app, executionId, root);
+    assert.equal(afterChange.body.sessions[0].deliverables[0].value.content,
+      'Synthetic produced result. [REDACTED]\n[REDACTED]');
+    assert.equal(afterChange.body.sessions[0].deliverables[0].sha256, rootDeliverable.sha256);
+    await rm(join(directory, 'result.txt'));
+    const afterDelete = await deliverablesOf(app, executionId, root);
+    assert.equal(afterDelete.body.sessions[0].deliverables[0].value.content,
+      'Synthetic produced result. [REDACTED]\n[REDACTED]');
+    assert.equal(afterDelete.body.sessions[0].deliverables[0].sha256, rootDeliverable.sha256);
+
+    const second = await createExecution(app, 'entregables-segunda', 'Encargo corto sin entregables.');
+    assert.equal(second.status, 201, 'a failed execution did not release the project');
+    const secondExecutionId = second.body.execution.id;
+    const secondRoot = await eventually(async () => {
+      const body = (await executionDetail(app, secondExecutionId)).body;
+      return body.execution.sessionID && body.execution.status === 'succeeded'
+        ? body.execution.sessionID : undefined;
+    }, 'the second execution did not finish', 300000);
+    const secondDeliverables = await eventually(async () => {
+      const body = (await deliverablesOf(app, secondExecutionId)).body;
+      return body?.readable === true && body.sessions?.length === 1 ? body : undefined;
+    }, 'the second execution did not expose its single session', 120000);
+    assert.equal(secondDeliverables.query.mode, 'known-sessions-explicit');
+    assert.equal(secondDeliverables.sessions[0].deliverables.length, 0,
+      'the second execution inherited deliverables from the first tree');
+    assert.ok(secondDeliverables.sessions[0].responses.length, 'the second execution lost its response');
+    assert.ok(!secondDeliverables.sessions.some(group => group.sessionID === root
+      || group.sessionID === produceSession));
+    const firstAgain = (await deliverablesOf(app, executionId)).body;
+    assert.ok(!firstAgain.sessions.some(group => group.sessionID === secondRoot),
+      'the first execution mixed a later execution session');
+
+    const captureBefore = JSON.stringify(await records(instance.captureDirectory));
+    await instance.stop();
+    const offline = await deliverablesOf(app, executionId);
+    assert.equal(offline.status, 200);
+    assert.equal(offline.body.readable, true);
+    assert.equal(offline.body.sessions.length, 4);
+    assert.equal(offline.body.sessions.find(group => group.sessionID === root)
+      .deliverables[0].value.content, 'Synthetic produced result. [REDACTED]\n[REDACTED]');
+    const reported = JSON.stringify(overview) + JSON.stringify(afterDelete.body)
+      + JSON.stringify(secondDeliverables);
+    for (const excluded of ['synthetic-deliverable-secret', 'synthetic-deliverable-token',
+      'synthetic-outside-deliverable', 'Synthetic later unobserved revision.']) {
+      assert.ok(!reported.includes(excluded), excluded);
+    }
+    assert.equal(JSON.stringify(await records(instance.captureDirectory)), captureBefore,
+      'consulting deliverables altered the recorder evidence');
+    const indexPath = join(instance.root, 'webapp-data', 'executions.json');
+    const storedIndex = await readFile(indexPath, 'utf8');
+    for (const excluded of ['synthetic-deliverable-secret', 'synthetic-deliverable-token',
+      'result.txt', 'Synthetic produced result.']) {
+      assert.ok(!storedIndex.includes(excluded), `the app index persisted deliverable content: ${excluded}`);
+    }
   });

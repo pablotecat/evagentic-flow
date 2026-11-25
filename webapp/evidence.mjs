@@ -236,3 +236,56 @@ export async function readTrace(captureDirectory, rootSessionID, requestedSessio
     horizon,
   };
 }
+
+export async function readDeliverables(captureDirectory, rootSessionID, requestedSessionID = null) {
+  const selectedSessionID = requestedSessionID || rootSessionID;
+  if (selectedSessionID.startsWith('--')) return { ok: false, notInExecution: true };
+  const session = await readSession(captureDirectory, rootSessionID);
+  if (!session.ok) return { ok: false, reason: session.reason };
+  if (selectedSessionID !== rootSessionID && !session.scope.sessionIDs.includes(selectedSessionID)) {
+    return { ok: false, notInExecution: true };
+  }
+  const targetSessions = requestedSessionID ? [selectedSessionID] : session.scope.sessionIDs;
+  const reads = await Promise.all(targetSessions
+    .map(sessionID => readMode(captureDirectory, sessionID, '--deliverables')));
+  for (const read of reads) {
+    if (!read.ok) return { ok: false, reason: read.reason };
+  }
+  const reference = row => ({ captureID: row.captureID, arrival: row.arrival, observedAt: row.observedAt });
+  const texts = (sessionID, type, role) => session.rows
+    .filter(row => row.type === type && row.sessionID === sessionID && row.content?.role === role)
+    .map(row => ({ text: row.content.text }));
+  const sessions = targetSessions.map((sessionID, index) => ({
+    sessionID,
+    isRoot: sessionID === rootSessionID,
+    entries: texts(sessionID, ENTRY, 'user'),
+    responses: texts(sessionID, RESPONSE, 'assistant'),
+    deliverables: reads[index].rows.map(row => ({
+      source: row.source,
+      identity: row.identity ?? null,
+      status: row.status,
+      value: row.status === 'captured' ? row.value : null,
+      sha256: row.sha256 ?? null,
+      hashBasis: row.hashBasis ?? null,
+      observationTime: row.observationTime,
+      sessionID: row.sessionID,
+      messageID: row.messageID ?? null,
+      eventID: row.eventID ?? null,
+      omissions: row.omissions ?? [],
+      redactions: row.redactions ?? [],
+      evidence: reference(row),
+    })),
+  }));
+  return {
+    ok: true,
+    readable: true,
+    selectedSessionID,
+    query: {
+      mode: requestedSessionID ? 'selected-session' : 'known-sessions-explicit',
+      sessions: targetSessions,
+    },
+    sessions,
+    scope: session.scope,
+    horizon: session.horizon,
+  };
+}

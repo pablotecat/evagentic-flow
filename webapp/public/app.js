@@ -46,6 +46,18 @@ const STOP_REQUEST_LABELS = {
   'already-interrupted': 'interrumpida antes de esta solicitud',
 };
 
+const DELIVERABLE_ROLE_LABELS = {
+  input: 'entrada en la frontera pública',
+  intermediate: 'intermedio en la frontera pública',
+  output: 'salida en la frontera de la herramienta',
+};
+
+const DELIVERABLE_ACQUISITION_LABELS = {
+  'runtime-content': 'contenido capturado del propio evento del runtime',
+  'post-event-file-read': 'lectura posterior al evento o hook',
+  'not-acquired': 'no adquirido',
+};
+
 const state = {
   health: null,
   connected: null,
@@ -69,6 +81,7 @@ const state = {
   stopRequest: null,
   trace: null,
   selectedSession: null,
+  deliverables: null,
 };
 
 const statusLine = document.querySelector('#status');
@@ -452,6 +465,7 @@ async function submitDraft(event) {
     state.detail = null;
     state.trace = null;
     state.selectedSession = null;
+    state.deliverables = null;
     state.draft = '';
     state.agent = '';
     state.model = '';
@@ -509,8 +523,10 @@ function selectSession(sessionID) {
   if (state.selectedSession === sessionID) return;
   state.selectedSession = sessionID;
   state.trace = null;
+  state.deliverables = null;
   renderConversation();
   refreshTrace();
+  refreshDeliverables();
 }
 
 async function refreshTrace() {
@@ -523,6 +539,19 @@ async function refreshTrace() {
   catch { trace = { readable: false, reason: 'trace-unavailable' }; }
   if (state.selected !== executionID || state.selectedSession !== sessionID) return;
   state.trace = trace;
+  renderConversation();
+}
+
+async function refreshDeliverables() {
+  const executionID = state.selected;
+  const sessionID = state.selectedSession;
+  if (executionID === null) return;
+  const query = sessionID ? `?session=${encodeURIComponent(sessionID)}` : '';
+  let body;
+  try { body = await api(`/api/executions/${executionID}/deliverables${query}`); }
+  catch { body = { readable: false, reason: 'deliverables-unavailable' }; }
+  if (state.selected !== executionID || state.selectedSession !== sessionID) return;
+  state.deliverables = body;
   renderConversation();
 }
 
@@ -770,6 +799,79 @@ function renderTraceCoverage(trace) {
       horizons));
 }
 
+function renderDeliverableItem(group, item) {
+  const value = item.value;
+  const rows = [
+    el('p', {}, `Ruta: ${value?.path ?? 'no expuesta o no admitida'}`),
+    el('p', {}, `Papel: ${value ? DELIVERABLE_ROLE_LABELS[value.role] ?? value.role : 'desconocido'}`
+      + ` (procedencia del papel: ${value?.roleSource ?? 'desconocida'})`),
+    el('p', {}, `Adquisición: ${DELIVERABLE_ACQUISITION_LABELS[value?.acquisition] ?? value?.acquisition ?? 'desconocida'}`),
+    el('p', { class: 'notice' }, `Fuente: ${item.source ?? 'desconocida'} · mensaje ${item.messageID ?? 'desconocido'}`
+      + ` · llamada ${value?.callID ?? 'no expuesta'} · evidencia: ${evidenceText(item.evidence)}`),
+    el('p', { class: 'notice' }, `Momentos: frontera ${formatMs(value?.sourceTime ?? null)}`
+      + ` (${value?.sourceTimeBasis ?? 'base desconocida'}) · observación ${formatMs(item.observationTime)}`),
+    el('p', { class: 'notice' }, `SHA-256 (${item.hashBasis ?? 'base desconocida'}): ${item.sha256 ?? 'no disponible'}`),
+  ];
+  if (item.status !== 'captured') {
+    rows.push(el('p', { class: 'notice' },
+      'Proyección no reconocida: la captura conservó el registro, pero no contenido, forma ni hash; no se reconstruye contenido no capturado.'));
+  } else if (value.content === null) {
+    rows.push(el('p', { class: 'notice' },
+      'Contenido no adquirido: la captura conserva la referencia y su motivo, no unos bytes ni una versión.'));
+  } else {
+    rows.push(el('details', {}, el('summary', {}, 'Contenido conservado (filtrado)'),
+      el('pre', {}, value.content)));
+    if (value.acquisition === 'post-event-file-read') {
+      rows.push(el('p', { class: 'notice' },
+        'Lectura posterior al hecho: no acredita qué bytes produjo o utilizó la acción original.'));
+    }
+    if (value.acquisition === 'runtime-content') {
+      rows.push(el('p', { class: 'notice' },
+        'Contenido observado del propio evento del runtime, no una lectura del archivo actual.'));
+    }
+  }
+  if (item.omissions?.length) rows.push(el('p', { class: 'notice' }, `Omisiones: ${item.omissions.join(', ')}`));
+  if (item.redactions?.length) rows.push(el('p', { class: 'notice' }, `Filtrados: ${item.redactions.join(', ')}`));
+  return el('li', { 'data-session': group.sessionID }, ...rows);
+}
+
+function renderDeliverables(execution) {
+  const head = el('h3', {}, 'Resultados y entregables');
+  const wrap = children => [el('section', { id: 'deliverables', 'aria-label': 'Resultados y entregables' },
+    head, ...children)];
+  const body = state.deliverables;
+  if (!body) return wrap([
+    el('p', { class: 'notice' }, 'Consultando las respuestas autorizadas y los snapshots conservados en la captura…')]);
+  if (!body.readable) return wrap([
+    el('p', { class: 'notice' },
+      `Los entregables no están consultables (${body.reason ?? 'desconocido'}); no se reconstruye contenido no capturado.`)]);
+  const groups = body.sessions.map(group => el('li', { 'data-session': group.sessionID },
+    el('h4', {}, sessionLabel(execution, group.sessionID)),
+    el('p', { class: 'notice' }, `Respuestas autorizadas: ${group.responses.length
+      ? group.responses.map(response => response.text).join(' | ') : 'ninguna observada en la captura'}`),
+    el('p', {}, `Snapshots conservados: ${group.deliverables.length}`),
+    ...group.deliverables.length
+      ? [el('ul', {}, ...group.deliverables.map(item => renderDeliverableItem(group, item)))]
+      : [el('p', { class: 'notice' },
+        'Sin entregables capturados para esta sesión; la ausencia no acredita que no existieran archivos en el proyecto.')]));
+  return wrap([
+    el('p', { class: 'notice' },
+      'Se consulta la versión conservada en la captura, no el archivo actual: cambiar o eliminar el original no altera lo mostrado. La app no recorre el proyecto ni abre sus archivos.'),
+    el('p', { class: 'notice' },
+      'Cada snapshot conserva contenido filtrado, procedencia, momento y hash de la proyección conservada. La finalidad global no está acreditada: un papel de salida en una herramienta no acredita que este contenido sea el resultado final del flujo.'),
+    body.query?.mode === 'selected-session'
+      ? el('p', { class: 'notice' },
+        `Consulta de una sola sesión (${body.selectedSessionID}): no incluye los entregables de sus descendientes.`)
+      : el('p', { class: 'notice' },
+        'Vista de conjunto: reúne explícitamente las sesiones conocidas del árbol acreditado, consultadas una a una; una consulta de raíz no incluye descendientes.'),
+    ...['failed', 'interrupted'].includes(execution.status)
+      ? [el('p', { class: 'notice' },
+        'Resultados parciales de una ejecución fallida o interrumpida: consultarlos no equivale a éxito ni a aceptación.')]
+      : [],
+    el('ul', { class: 'deliverable-sessions' }, ...groups),
+  ]);
+}
+
 function traceSection() {
   const detail = state.detail;
   const execution = detail?.execution;
@@ -822,6 +924,7 @@ function renderExecution() {
     el('p', { id: 'execution-status' }, `Estado: ${STATUS_LABELS[execution.status] ?? execution.status}`),
     el('p', { class: 'dispatch' }, DISPATCH_LABELS[execution.dispatch] ?? DISPATCH_LABELS.unconfirmed),
     renderMessages(),
+    ...renderDeliverables(execution),
     ...renderInteractions(),
     ...renderStop(execution),
     ...traceSection(),
@@ -903,9 +1006,11 @@ function renderHistory() {
       state.stopRequest = null;
       state.trace = null;
       state.selectedSession = null;
+      state.deliverables = null;
       renderConversation();
       refreshDetail();
       refreshTrace();
+      refreshDeliverables();
     });
     historyList.append(el('li', {}, button));
   }
@@ -921,6 +1026,7 @@ document.querySelector('#new-chat').addEventListener('click', () => {
   state.stopRequest = null;
   state.trace = null;
   state.selectedSession = null;
+  state.deliverables = null;
   state.draft = '';
   state.agent = '';
   state.model = '';
@@ -959,7 +1065,7 @@ async function tick() {
     await refreshExecutions();
     if (state.options === null && !state.optionsLoading) await refreshOptions();
   } else {
-    await Promise.allSettled([refreshDetail(), refreshTrace()]);
+    await Promise.allSettled([refreshDetail(), refreshTrace(), refreshDeliverables()]);
     renderConversation();
   }
 }

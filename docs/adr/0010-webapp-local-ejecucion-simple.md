@@ -191,6 +191,33 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   se actualiza en el ciclo de sondeo existente y se reconstruye tras una
   recarga o con el motor caído desde la captura persistida, sin replay ni
   relleno de lagunas.
+- **Resultados y snapshots de entregables ([#32](https://github.com/pablotecat/evagentic-flow/issues/32)).**
+  La ejecución expone sus resultados con `GET /api/executions/{id}/deliverables`
+  (`?session=` opcional), reconstruido exclusivamente con el lector
+  independiente reutilizado como proceso hijo en su modo `--deliverables` por
+  sesión: sin sesión seleccionada, la vista de conjunto consulta una a una las
+  sesiones del árbol acreditado de esa ejecución (la consulta de una sesión en
+  `--deliverables` no incluye descendientes, igual que el lector); con
+  `?session=` se consulta esa sesión sola, y una sesión ajena al árbol
+  acreditado se rechaza con `404`. Cada grupo publica las respuestas
+  autorizadas (`session.inbox.enqueued` de usuario y `session.text.ended` de
+  asistente, ya filtradas) y los snapshots conservados con contenido filtrado
+  o su estado de ausencia (`value: null` con omisiones `deliverable-*`,
+  `acquisition: not-acquired`, o `status: unrecognized` sin contenido ni
+  hash), procedencia (`source`, `role`, `roleSource`, `acquisition`,
+  mensaje/llamada y referencia de evidencia), momentos (`observationTime`,
+  `sourceTime` con su base) y hash verificable (`sha256`,
+  `redacted-json-utf8`) de la proyección conservada por el registrador. La
+  interfaz distingue el contenido capturado del propio evento de una lectura
+  posterior y advierte que esta no acredita qué bytes produjo o utilizó la
+  acción original; `finality` permanece `null` y la vista no acredita
+  finalidad global: un papel de salida en una herramienta no es el resultado
+  final del flujo. Los resultados parciales de ejecuciones fallidas o
+  interrumpidas son consultables con su estado real y un aviso explícito de
+  que consultarlos no equivale a éxito ni aceptación; la consulta no relee
+  archivos del proyecto observado y cambiar o eliminar el original no altera
+  la versión conservada. El índice persistente no guarda contenido, rutas ni
+  hashes de entregables: todo el contenido publicado procede de la captura.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
   peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
   páginas externas no puedan despachar trabajo. No usa cookies ni acceso
@@ -260,6 +287,20 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   observado», skills observadas diferenciadas de las disponibles,
   métricas con fuente y consumo normalizado, y cobertura `not-assessed`
   presentada como distinta de una evaluación).
+- `test/browser.test.mjs` añade #32: la frontera vertical de resultados con
+  entregables sintéticos de raíz e hijos sobre una ejecución fallida real del
+  runtime (el proveedor sintético devuelve partes `file` que el adaptador
+  OpenAI-compatible rechaza, así que el árbol termina `failed` con resultados
+  parciales tal como exige el corte): conjunto explícito de sesiones,
+  selección de raíz y subejecución sin mezcla, modificación y borrado del
+  archivo original sin alterar la captura, consulta con el motor detenido,
+  omisiones y secretos excluidos sin despachar trabajo, y preservación del
+  contenido filtrado de la captura byte a byte.
+- `test/webapp.test.mjs` añade #32: contraste por sesión con el lector
+  independiente (`--deliverables`), consultas de conjunto y selección, `404`
+  de sesión ajena, ejecución fallida con resultados parciales consultables,
+  segunda ejecución aislada, contenido conservado tras cambiar/borrar el
+  original y consulta sin motor, sin que el índice persista contenido.
 - `test/browser-ui.test.mjs`: comprobación pura de renderizado en Chromium,
   sin motor ni registrador sustituidos. Verifica borradores distintos para
   tipo, sesión y solicitud, y el aviso de error de lectura. No acredita por

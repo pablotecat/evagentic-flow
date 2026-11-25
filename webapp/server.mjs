@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createEngine } from './engine.mjs';
 import { commandMetadata, createStore, isTerminal } from './store.mjs';
-import { latestLifecycle, readRows, readSession, readTrace } from './evidence.mjs';
+import { latestLifecycle, readRows, readSession, readTrace, readDeliverables } from './evidence.mjs';
 
 const TERMINAL_PHASES = ['succeeded', 'failed', 'interrupted'];
 const CONFIG_KEYS = ['version', 'opencodeURL', 'opencodePassword', 'projectDirectory', 'captureDirectory', 'dataDirectory'];
@@ -563,6 +563,20 @@ export async function startApp({ configPath, port: requestedPort }) {
         ...execution.sessionID ? { rootSessionID: execution.sessionID } : {}, readable: false, reason });
       if (!execution.sessionID) return unreadable('session-not-confirmed');
       const read = await readTrace(config.captureDirectory, execution.sessionID,
+        url.searchParams.get('session'));
+      if (read.notInExecution) return json(response, 404, { error: 'session-not-in-execution' });
+      if (!read.ok) return unreadable(read.reason);
+      return json(response, 200, { executionID: execution.id,
+        rootSessionID: execution.sessionID, ...read });
+    }
+    const deliverables = url.pathname.match(/^\/api\/executions\/([^/]+)\/deliverables$/);
+    if (deliverables && request.method === 'GET') {
+      const execution = store.byId(deliverables[1]);
+      if (!execution) return json(response, 404, { error: 'unknown-execution' });
+      const unreadable = reason => json(response, 200, { executionID: execution.id,
+        ...execution.sessionID ? { rootSessionID: execution.sessionID } : {}, readable: false, reason });
+      if (!execution.sessionID) return unreadable('session-not-confirmed');
+      const read = await readDeliverables(config.captureDirectory, execution.sessionID,
         url.searchParams.get('session'));
       if (read.notInExecution) return json(response, 404, { error: 'session-not-in-execution' });
       if (!read.ok) return unreadable(read.reason);

@@ -332,6 +332,60 @@ aside {
   margin: 0.2rem 0;
 }
 
+#deliverables {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #d5dae2;
+  border-radius: 8px;
+  background: #eaf4ee;
+}
+
+#deliverables h3 {
+  margin: 0 0 0.35rem;
+}
+
+#deliverables h4 {
+  margin: 0.6rem 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+#deliverables ul {
+  list-style: none;
+  margin: 0.25rem 0;
+  padding: 0;
+  font-size: 0.8rem;
+  color: #45505e;
+  word-break: break-all;
+}
+
+#deliverables .deliverable-sessions > li {
+  border: 1px solid #d5dae2;
+  border-radius: 6px;
+  background: white;
+  padding: 0.5rem 0.7rem;
+  margin: 0.5rem 0;
+}
+
+#deliverables pre {
+  margin: 0.25rem 0;
+  padding: 0.4rem;
+  background: #f2f4f7;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+#deliverables summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #29527a;
+}
+
+#deliverables details {
+  margin: 0.35rem 0;
+}
+
 #trace {
   margin: 0.75rem 0;
   padding: 0.6rem 0.8rem;
