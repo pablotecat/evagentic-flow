@@ -142,11 +142,11 @@ export function createEngine({ baseURL, password }) {
         return result.data?.data;
       };
       const [tree, active] = await Promise.all([
-        this.tree(directory, rootID, knownIDs), get('/api/session/active'),
+        this.tree(directory, rootID, knownIDs), this.activeMap(),
       ]);
-      if (!active || typeof active !== 'object') throw new Error('unknown execution scope');
-      const scoped = tree.sessions.filter(session => tree.ids.includes(session.id));
-      if (scoped.length !== tree.ids.length) throw new Error('known session unavailable');
+      const treeIDs = new Set(tree.ids);
+      const scoped = tree.sessions.filter(session => treeIDs.has(session.id));
+      if (scoped.length !== treeIDs.size) throw new Error('known session unavailable');
       const clear = await Promise.all(scoped.map(async session => {
         const [forms, permissions] = await Promise.all([
           get(`/api/session/${session.id}/form`), get(`/api/session/${session.id}/permission`),
@@ -154,15 +154,13 @@ export function createEngine({ baseURL, password }) {
         return Array.isArray(forms) && forms.length === 0 && Array.isArray(permissions) && permissions.length === 0
           && !active[session.id] && ['succeeded', 'failed', 'interrupted'].includes(session.outcome);
       }));
-      const [verified, finalActive] = await Promise.all([
-        get(`/api/session?directory=${encodeURIComponent(directory)}`), get('/api/session/active'),
+      const [verifiedTree, finalActive] = await Promise.all([
+        this.tree(directory, rootID, tree.ids), this.activeMap(),
       ]);
-      if (!Array.isArray(verified) || !finalActive || typeof finalActive !== 'object') throw new Error('unknown final scope');
-      const stable = !verified.some(session => tree.ids.includes(session.parentID)
-          && !tree.ids.includes(session.id))
+      const verified = verifiedTree.sessions;
+      const stable = !verified.some(session => treeIDs.has(session.parentID) && !treeIDs.has(session.id))
         && tree.ids.every(id => verified.some(session => session.id === id
-          && ['succeeded', 'failed', 'interrupted'].includes(session.outcome)) && !finalActive[id]);
-      return { sessionIDs: tree.ids, clear: clear.every(Boolean) && stable };
+          && ['succeeded', 'failed', 'interrupted'].includes(session.outcome)) && !finalActive[id]);      return { sessionIDs: tree.ids, clear: clear.every(Boolean) && stable };
     },
   };
 }

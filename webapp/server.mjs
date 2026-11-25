@@ -232,6 +232,8 @@ export async function startApp({ configPath, port: requestedPort }) {
     }
     const phase = latestLifecycle(evidence.rows.filter(row => row.sessionID === execution.sessionID));
     if (!TERMINAL_PHASES.includes(phase) || !evidence.admission || evidence.recorderFailed) return;
+    const recorder = await recorderState(execution);
+    if (!recorder.readable || recorder.status === 'failed' || recorder.reviewRequired) return;
     const knownIDs = new Set(evidence.scope.sessionIDs);
     let scope;
     try { scope = await engine.scope(config.projectDirectory, execution.sessionID, knownIDs); }
@@ -256,15 +258,18 @@ export async function startApp({ configPath, port: requestedPort }) {
   const interruptedSince = (session, requestedAt) => session?.outcome === 'interrupted'
     && (session?.time?.idle ?? 0) >= requestedAt;
 
+  const stopEntry = (sessionID, result, stop) => ({ sessionID, result, stop });
+  const stopFailed = sessionID => stopEntry(sessionID, 'error', 'unconfirmed');
+
   const stopTargets = async execution => {
     const evidence = await readSession(config.captureDirectory, execution.sessionID);
     const known = evidence.ok ? [execution.sessionID, ...evidence.scope.sessionIDs]
       : [execution.sessionID];
     try {
       const tree = await engine.tree(config.projectDirectory, execution.sessionID, known, lifecycle.signal);
-      return new Set(tree.ids);
+      return { ids: new Set(tree.ids), sessions: new Map(tree.sessions.map(item => [item.id, item])), verified: true };
     } catch {
-      return new Set(known);
+      return { ids: new Set(known), sessions: new Map(), verified: false };
     }
   };
 
@@ -280,23 +285,19 @@ export async function startApp({ configPath, port: requestedPort }) {
   };
 
   const stopSession = async (sessionID, requestedAt) => {
-    const entry = { sessionID, result: 'error', stop: 'unconfirmed' };
+    let result;
     try {
       const current = await engine.session(sessionID, lifecycle.signal);
-      if (interruptedSince(current, requestedAt)) {
-        return { sessionID, result: 'already-interrupted', stop: 'confirmed' };
-      }
+      if (interruptedSince(current, requestedAt)) return stopEntry(sessionID, 'already-interrupted', 'confirmed');
       const response = await engine.interrupt(sessionID, lifecycle.signal);
-      if (!response.ok) return entry;
-      entry.result = response.data?.interrupted === true ? 'accepted' : 'not-running';
+      if (!response.ok) return stopFailed(sessionID);
+      result = response.data?.interrupted === true ? 'accepted' : 'not-running';
     } catch {
-      return entry;
+      return stopFailed(sessionID);
     }
-    if (entry.result === 'accepted') await engine.wait(sessionID, lifecycle.signal).catch(() => {});
-    if (entry.result === 'accepted' || entry.result === 'not-running') {
-      if (await confirmStop(sessionID, requestedAt)) entry.stop = 'confirmed';
-    }
-    return entry;
+    if (result === 'accepted') await engine.wait(sessionID, lifecycle.signal).catch(() => {});
+    return stopEntry(sessionID, result,
+      await confirmStop(sessionID, requestedAt) ? 'confirmed' : 'unconfirmed');
   };
 
   const stopWave = async execution => {
@@ -307,17 +308,18 @@ export async function startApp({ configPath, port: requestedPort }) {
       const targets = await stopTargets(execution);
       const active = await engine.activeMap(lifecycle.signal).catch(() => null);
       if (active === null) {
-        for (const sessionID of targets) {
-          if (!reported.has(sessionID)) reported.set(sessionID, { sessionID, result: 'error', stop: 'unconfirmed' });
+        for (const sessionID of targets.ids) {
+          if (!reported.has(sessionID)) reported.set(sessionID, stopFailed(sessionID));
         }
         return [...reported.values()];
       }
       const actionable = [];
-      for (const sessionID of targets) {
+      for (const sessionID of targets.ids) {
         const prior = reported.get(sessionID);
-        const session = await engine.session(sessionID, lifecycle.signal).catch(() => null);
+        const session = targets.sessions.get(sessionID)
+          ?? await engine.session(sessionID, lifecycle.signal).catch(() => null);
         if (session && interruptedSince(session, requestedAt) && !active[sessionID]) {
-          if (!prior) reported.set(sessionID, { sessionID, result: 'already-interrupted', stop: 'confirmed' });
+          if (!prior) reported.set(sessionID, stopEntry(sessionID, 'already-interrupted', 'confirmed'));
           continue;
         }
         if (prior && prior.result !== 'error' && !active[sessionID]) continue;
@@ -325,18 +327,18 @@ export async function startApp({ configPath, port: requestedPort }) {
       }
       if (!actionable.length) return [...reported.values()];
       const entries = await Promise.all(actionable.map(sessionID => stopSession(sessionID, requestedAt)));
-      for (const entry of entries) if (entry) reported.set(entry.sessionID, entry);
+      for (const entry of entries) reported.set(entry.sessionID, entry);
       if (Date.now() >= deadline) return [...reported.values()];
     }
     return [...reported.values()];
   };
 
-  const stopState = async execution => {
+  const stopState = async (execution, targets) => {
     const state = { requested: true, requestedAt: execution.stopRequestedAt,
-      sessions: [], readError: null };
-    for (const sessionID of await stopTargets(execution)) {
+      sessions: [], readError: null, treeVerified: targets.verified };
+    for (const sessionID of targets.ids) {
       try {
-        const session = await engine.session(sessionID, lifecycle.signal);
+        const session = targets.sessions.get(sessionID) ?? await engine.session(sessionID, lifecycle.signal);
         state.sessions.push({ sessionID, outcome: session?.outcome ?? null,
           stop: interruptedSince(session, execution.stopRequestedAt) ? 'confirmed' : 'unconfirmed' });
       } catch {
@@ -367,7 +369,6 @@ export async function startApp({ configPath, port: requestedPort }) {
       return { readable: false, reason: 'engine-unreachable' };
     }
   };
-
   const json = (response, code, body) => {
     response.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'x-content-type-options': 'nosniff' });
     response.end(JSON.stringify(body));
@@ -537,7 +538,7 @@ export async function startApp({ configPath, port: requestedPort }) {
         ? await readSession(config.captureDirectory, execution.sessionID) : null;
       const live = evidence?.ok ? await livePending(evidence.interactions.pending) : null;
       const stop = (execution.stopRequested && execution.sessionID)
-        ? await stopState(execution) : { requested: false };
+        ? await stopState(execution, await stopTargets(execution)) : { requested: false };
       return json(response, 200, {
         execution: publicExecution(execution),
         stop,

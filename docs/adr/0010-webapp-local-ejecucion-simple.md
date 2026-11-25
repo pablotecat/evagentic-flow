@@ -149,7 +149,12 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   requerida, a partir de la metadata pública `evagenticRecorder` de la
   sesión raíz y de las declaraciones `recorder.failed` de la captura;
   se conservan el bloqueo durable y la exclusión del proyecto, sin
-  desbloqueo automático por recargar o reparar la ruta. Una ejecución
+  desbloqueo automático por recargar o reparar la ruta. La reconciliación
+  tampoco cierra ni libera si esa metadata pública declara `failed` o
+  revisión requerida, aunque la captura no contenga `recorder.failed`, ni
+  si no puede leerla. Si el árbol no puede verificarse, la detención cae al
+  alcance conocido y la interfaz avisa de que los descendientes nuevos no
+  pudieron comprobarse. Una ejecución
   interrumpida conserva en el histórico sus resultados parciales y su
   estado real, sin puntuaciones ni juez.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza

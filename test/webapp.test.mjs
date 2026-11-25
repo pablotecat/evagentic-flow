@@ -793,6 +793,33 @@ test('la detención interrumpe el árbol delegado verificado sin tocar sesiones 
   assert.equal(next.status, 201, 'a confirmed and reconciled stop did not release the project');
 });
 
+test('un fallo público del registrador sin fila de captura nunca libera el proyecto', { timeout: 300000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  const created = await createExecution(app, 'fallo-publico', 'Encargo corto antes del fallo público.');
+  assert.equal(created.status, 201);
+  const id = created.body.execution.id;
+  const root = await eventually(async () => (await executionDetail(app, id)).body.execution.sessionID,
+    'root session was not confirmed');
+  await instance.api(`/api/session/${root}`, { metadata: { evagenticRecorder: {
+    status: 'failed', reason: 'synthetic-public-failure', reviewRequired: true, pilotReady: false,
+    notice: 'Revisar antes de volver a ejecutar.', interruption: { requested: true, result: 'accepted', stop: 'confirmed' } } } }, 'PATCH');
+  await instance.api(`/api/experimental/session/${root}/wait`, {});
+  const rows = await eventually(async () => {
+    const all = await records(instance.captureDirectory);
+    return all.some(row => row.sessionID === root && row.type === 'session.execution.succeeded') && all;
+  }, 'the execution did not reach a terminal capture phase');
+  assert.ok(!rows.some(row => row.type === 'recorder.failed'), 'the failure was recorded in the capture');
+  for (let index = 0; index < 3; index++) {
+    const body = (await executionDetail(app, id)).body;
+    assert.equal(body.recorder.status, 'failed');
+    assert.equal(body.recorder.reviewRequired, true);
+    assert.ok(!['interrupted', 'succeeded', 'failed'].includes(body.execution.status),
+      `a public recorder failure closed the execution as ${body.execution.status}`);
+  }
+  assert.notEqual((await createExecution(app, 'fallo-publico-otro', 'No debe lanzarse.')).status, 201,
+    'a public recorder failure released the project');
+});
 test('la detención sin sesión confirmada no interrumpe nada y lo dice', { timeout: 90000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'webapp-stop-'));
   const projectDirectory = join(root, 'project');

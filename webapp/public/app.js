@@ -34,6 +34,7 @@ const INTERACTION_ERRORS = {
 
 const STOP_ERRORS = {
   'execution-terminal': 'La ejecución ya está cerrada; la detención ya no aplica.',
+  'unknown-execution': 'La ejecución no existe; no se ha interrumpido nada.',
   'session-not-confirmed': 'Todavía no hay sesión confirmada para detener; no se ha interrumpido nada.',
   unknown: 'No se pudo procesar la detención; el desenlace queda sin confirmar y el encargo no se reenvía.',
 };
@@ -330,6 +331,8 @@ function renderStop(execution) {
           request ? STOP_REQUEST_LABELS[request.result] ?? request.result : 'sin comprobar'} · Detención: ${
           session.stop === 'confirmed' ? 'confirmada' : 'no confirmada'}`);
       })),
+      stop.treeVerified === false ? el('p', { role: 'alert', class: 'error' },
+        'No se pudo verificar el árbol de sesiones; los descendientes nuevos no pudieron comprobarse.') : null,
       stop.readError ? el('p', { role: 'alert', class: 'error' },
         'No se pudo comprobar el desenlace público de la detención; se mantiene no confirmada y el trabajo no se relanza.') : null));
   }
@@ -537,7 +540,12 @@ function renderExecution() {
     panel.splice(2, 0, el('section', { id: 'recorder-failure', role: 'alert', 'aria-label': 'Fallo del registrador', class: 'error' },
       el('h3', {}, 'Fallo del registrador'),
       el('p', {}, `Aviso: revisar antes de volver a ejecutar. Estado de captura: ${captureState}.`),
-      el('p', {}, 'Revisión requerida según la evidencia pública del motor. Se conserva el bloqueo durable de la captura: no hay desbloqueo automático, ni por recargar ni por reparar la ruta.'),
+      el('p', {}, `${recorder?.readable === true && recorder.reviewRequired === false
+        ? 'Revisión no declarada como requerida por el motor.' : 'Revisión requerida según la evidencia pública del motor.'} Se conserva el bloqueo durable de la captura: no hay desbloqueo automático, ni por recargar ni por reparar la ruta.`),
+      recorder?.readable === true && recorder.notice ? el('p', { class: 'notice' }, recorder.notice) : null,
+      recorder?.readable === true && recorder.interruption
+        ? el('p', { class: 'notice' }, `Interrupción: ${recorder.interruption.requested ? 'solicitada' : 'no solicitada'}, detención ${
+          recorder.interruption.stop === 'confirmed' ? 'confirmada' : 'no confirmada'}.`) : null,
       recorder?.readable === true && recorder.reason
         ? el('p', { class: 'notice' }, `Motivo público declarado: ${recorder.reason}.`) : null));
   }
