@@ -67,6 +67,8 @@ const state = {
   stopping: false,
   stopError: null,
   stopRequest: null,
+  trace: null,
+  selectedSession: null,
 };
 
 const statusLine = document.querySelector('#status');
@@ -448,6 +450,8 @@ async function submitDraft(event) {
     });
     state.selected = execution.id;
     state.detail = null;
+    state.trace = null;
+    state.selectedSession = null;
     state.draft = '';
     state.agent = '';
     state.model = '';
@@ -479,6 +483,299 @@ async function refreshOptions() {
   catch { state.options = null; }
   state.optionsLoading = false;
   if (state.selected === null) renderConversation();
+}
+
+const OUTCOME_LABELS = {
+  success: 'éxito observado',
+  error: 'error observado',
+  'not-observed': 'sin desenlace observado: desconocido; puede ser trabajo en curso y no acredita fallo, éxito ni consumo cero',
+};
+
+const INTERVAL_STATE_LABELS = {
+  concluded: 'concluida',
+  failed: 'fallida',
+  interrupted: 'interrumpida',
+  unknown: 'desconocida',
+};
+
+const formatMs = value => value === null || value === undefined
+  ? 'no observado' : new Date(value).toISOString();
+
+const evidenceText = refs => (Array.isArray(refs) ? refs : [refs])
+  .map(ref => `${ref.captureID} · fila ${ref.arrival}${ref.eventID ? ` · evento ${ref.eventID}` : ''}${ref.type ? ` (${ref.type})` : ''}`)
+  .join(' | ');
+
+function selectSession(sessionID) {
+  if (state.selectedSession === sessionID) return;
+  state.selectedSession = sessionID;
+  state.trace = null;
+  renderConversation();
+  refreshTrace();
+}
+
+async function refreshTrace() {
+  if (state.selected === null) return;
+  const query = state.selectedSession ? `?session=${encodeURIComponent(state.selectedSession)}` : '';
+  try { state.trace = await api(`/api/executions/${state.selected}/trace${query}`); }
+  catch { state.trace = { readable: false, reason: 'trace-unavailable' }; }
+  renderConversation();
+}
+
+function renderTraceTree(execution, trace) {
+  const nodes = trace.tree.nodes;
+  const byID = new Map(nodes.map(node => [node.sessionID, node]));
+  const children = new Map();
+  const roots = [];
+  for (const node of nodes) {
+    const parentID = node.delegations[0]?.parentSessionID
+      ?? node.observedParents.find(id => id !== node.sessionID) ?? null;
+    if (parentID && parentID !== node.sessionID && byID.has(parentID)) {
+      if (!children.has(parentID)) children.set(parentID, []);
+      children.get(parentID).push(node);
+    } else roots.push(node);
+  }
+  const renderNode = node => {
+    const title = node.sessionID === execution.sessionID
+      ? `Sesión raíz ${node.sessionID}` : `Subejecución ${node.sessionID}`
+        + (node.isViewRoot ? ' (raíz de la vista)' : '');
+    const button = el('button', { type: 'button', 'data-session': node.sessionID,
+      ...(trace.selectedSessionID === node.sessionID ? { 'aria-current': 'true' } : {}) }, title);
+    button.addEventListener('click', () => selectSession(node.sessionID));
+    const agent = node.agentIDs.length ? `agente: ${node.agentIDs.join(', ')}` : 'agente no observado';
+    const relation = node.relation === 'view-root' ? 'raíz de la vista actual'
+      : node.relation === 'delegation-call-observed'
+        ? `hija de ${node.delegations[0].parentSessionID} por llamada observada ${
+          node.delegations[0].callID ?? 'sin id de llamada'} · evidencia: ${evidenceText(node.delegations[0].evidence)}`
+        : node.relation === 'parent-observed-call-unknown'
+          ? `padre observado ${node.observedParents.join(', ')}; llamada creadora no observada`
+          : 'relación desconocida o excluida';
+    return el('li', {}, el('div', { class: 'tree-node' }, button,
+      el('span', { class: 'tree-relation' }, `${agent} · ${relation}`)),
+      el('ul', {}, ...(children.get(node.sessionID) ?? []).map(renderNode)));
+  };
+  return el('section', { 'aria-label': 'Árbol de subejecuciones' },
+    el('h4', {}, 'Árbol de subejecuciones'),
+    el('p', { class: 'notice' },
+      'Sólo aparecen sesiones relacionadas por evidencia: una llamada de delegación observada o un padre observado. «Relación desconocida» significa relación no observada o excluida, no una asociación deducida.'),
+    el('ul', { class: 'tree', role: 'tree' }, ...roots.map(renderNode)));
+}
+
+function renderTimeline(execution, trace) {
+  const intervals = trace.timeline.intervals;
+  const waits = trace.timeline.waits;
+  const bySession = new Map();
+  for (const interval of intervals) {
+    if (!bySession.has(interval.sessionID)) bySession.set(interval.sessionID, []);
+    bySession.get(interval.sessionID).push(interval);
+  }
+  for (const wait of waits) {
+    if (!bySession.has(wait.sessionID)) bySession.set(wait.sessionID, []);
+  }
+  const finite = intervals.filter(interval => interval.startedAt !== null && interval.endedAt !== null);
+  const first = finite.length ? Math.min(...finite.map(interval => interval.startedAt)) : 0;
+  const last = finite.length ? Math.max(...finite.map(interval => interval.endedAt)) : 1;
+  const span = Math.max(last - first, 1);
+  const sessionBlock = sessionID => {
+    const track = el('div', { class: 'timeline' });
+    for (const interval of bySession.get(sessionID)) {
+      if (interval.startedAt === null || interval.endedAt === null) continue;
+      track.append(el('span', { class: `bar${interval.state === 'concluded' ? '' : ' bar-open'}`,
+        style: `left:${(((interval.startedAt - first) / span) * 100).toFixed(3)}%;`
+          + `width:${(Math.max((interval.endedAt - interval.startedAt) / span, 0.004) * 100).toFixed(3)}%` }));
+    }
+    const rows = bySession.get(sessionID).map(interval => el('li', {},
+      `Intervalo: ${INTERVAL_STATE_LABELS[interval.state] ?? interval.state ?? 'desconocida'}`
+      + ` · inicio: ${formatMs(interval.startedAt)} · fin: ${formatMs(interval.endedAt)}`
+      + ` · transcurrido: ${interval.elapsedMs === null || interval.elapsedMs === undefined
+        ? 'desconocido' : `${interval.elapsedMs} ms`}`
+      + ` · procedencia: ${interval.durationSource ?? 'desconocida'}`
+      + ` · evidencia: ${evidenceText(interval.evidence)}`));
+    for (const wait of waits.filter(item => item.sessionID === sessionID)) {
+      rows.push(el('li', {},
+        `Espera de decisión externa (${wait.kind === 'permission' ? 'permiso' : 'pregunta'})`
+        + ` · estado: ${wait.state === 'waiting-external-decision' ? 'esperando decisión externa' : wait.state ?? 'desconocido'}`
+        + ` · inicio: ${formatMs(wait.startedAt)} · fin: ${formatMs(wait.endedAt)}`
+        + ` · transcurrido: ${wait.elapsedMs === null || wait.elapsedMs === undefined
+          ? 'desconocido' : `${wait.elapsedMs} ms`}`
+        + ` · evidencia: ${evidenceText(wait.evidence)}`));
+    }
+    return el('li', {}, el('h5', {}, sessionLabel(execution, sessionID)), track, el('ul', {}, ...rows));
+  };
+  return el('section', { 'aria-label': 'Línea temporal' },
+    el('h4', {}, 'Línea temporal'),
+    el('p', { class: 'notice' },
+      'Intervalos realmente observados, por sesión: pueden solaparse, no se suman ramas concurrentes como duración total y no hay orden causal global entre diarios. Las posiciones usan el reloj público del runtime, no una cronología causal.'),
+    bySession.size
+      ? el('ul', { class: 'timeline-sessions' }, ...[...bySession.keys()].map(sessionBlock))
+      : el('p', { class: 'notice' }, 'Sin intervalos ni esperas observados en el alcance actual de la evidencia.'));
+}
+
+function renderTraceTools(execution, trace) {
+  const attempts = trace.tools.attempts;
+  const list = el('ul', {}, ...attempts.map(attempt => el('li', {},
+    el('h5', {}, `Herramienta: ${attempt.toolName ?? 'nombre no observado'}`),
+    el('p', {}, `Desenlace: ${OUTCOME_LABELS[attempt.outcome] ?? attempt.outcome ?? 'desconocido'}`),
+    el('p', {}, `Identidad: sesión ${attempt.sessionID} · mensaje ${attempt.messageID ?? 'desconocido'} · llamada ${attempt.callID ?? 'desconocida'}`),
+    el('p', {}, `Tiempos: inicio ${formatMs(attempt.startedAt)} · llamada ${formatMs(attempt.calledAt)} · fin ${formatMs(attempt.endedAt)}`),
+    attempt.input !== null || attempt.inputText !== null
+      ? el('details', {}, el('summary', {}, 'Entrada autorizada'),
+        el('pre', {}, JSON.stringify(attempt.input ?? attempt.inputText, null, 2))) : null,
+    attempt.output !== null && attempt.output !== undefined
+      ? el('details', {}, el('summary', {}, 'Resultado autorizado'),
+        el('pre', {}, JSON.stringify(attempt.output, null, 2))) : null,
+    attempt.error ? el('p', { class: 'error' },
+      `Error observado: ${attempt.error.type}: ${attempt.error.message}${attempt.error.status ? ` (HTTP ${attempt.error.status})` : ''}`) : null,
+    el('p', { class: 'notice' },
+      'Consumo: desconocido, no cero. No se agrupan reintentos por nombre, argumentos ni proximidad: este runtime no expone el enlace (retryOf y operationID desconocidos).'),
+    attempt.incident ? el('p', {}, `Incidente: ${attempt.incident.kind} (causa desconocida)`) : null,
+    el('p', {}, `Evidencia: ${evidenceText(attempt.evidence)}`),
+    attempt.omissions?.length ? el('p', { class: 'notice' }, `Omisiones: ${attempt.omissions.join(', ')}`) : null)));
+  return el('details', { 'aria-label': 'Herramientas e intentos' },
+    el('summary', {}, `Herramientas e intentos · ${sessionLabel(execution, trace.selectedSessionID)}`),
+    attempts.length ? list : el('p', { class: 'notice' }, 'Sin llamadas de herramienta observadas en la sesión seleccionada.'),
+    el('p', { class: 'notice' },
+      'La vista muestra las llamadas de la sesión seleccionada; para ver las de una subejecución, selecciónala en el árbol.'));
+}
+
+function renderTraceMetrics(trace) {
+  const metrics = trace.metrics;
+  const metricLine = (name, metric, note) => {
+    if (!metric) return `${name}: desconocido`;
+    const value = metric.value === null || metric.value === undefined ? 'desconocido'
+      : name === 'Coste' ? `${metric.value} USD (estimación del runtime; no es una factura)` : JSON.stringify(metric.value);
+    return `${name}: ${value} · estado: ${metric.status} · fuente: ${metric.source ?? 'ninguna'}`
+      + ` · alcance: ${metric.scope ?? 'desconocido'}${note ? ` · ${note}` : ''}`;
+  };
+  const steps = el('ul', {}, ...metrics.steps.map(step => el('li', {},
+    el('h5', {}, `Paso de modelo · sesión ${step.sessionID} · mensaje ${step.messageID ?? 'desconocido'}`),
+    el('p', {}, `Modelo: ${step.model?.value ? `${step.model.value.providerID}/${step.model.value.id}` : 'desconocido'} (estado ${step.model?.status ?? 'unknown'})`),
+    el('p', {}, metricLine('Tokens', step.tokens, 'valor normalizado que informa el runtime; no prueba el consumo original del proveedor')),
+    el('p', {}, metricLine('Coste', step.costUSD, 'estimación; un coste cero no demuestra gratuidad')),
+    el('p', {}, `Transcurrido: ${step.elapsedMs === null || step.elapsedMs === undefined ? 'desconocido' : `${step.elapsedMs} ms`} · desenlace: ${step.outcome ?? 'desconocido'}${step.finish ? ` · fin: ${step.finish}` : ''}`),
+    step.dispatches?.length ? el('p', { class: 'notice' },
+      `Despachos observados: ${step.dispatches.length} (${step.dispatches.map(dispatch => formatMs(dispatch.startedAt)).join(', ')}); no se atribuye consumo por proximidad.`) : null,
+    step.retries?.length ? el('p', { class: 'notice' },
+      `Reintentos de modelo observados: ${step.retries.length}; consumo y espera real por intento desconocidos.`) : null,
+    step.omissions?.length ? el('p', { class: 'notice' }, `Omisiones: ${step.omissions.join(', ')}`) : null)));
+  const measurements = el('ul', {}, ...metrics.measurements.map(item => el('li', {},
+    `${item.kind ?? 'medición'} (${item.phase ?? 'fase desconocida'}) · sesión ${item.sessionID ?? 'desconocida'}`,
+    el('p', {}, metricLine('Tokens', item.tokens, 'valor normalizado que informa el runtime')),
+    el('p', {}, metricLine('Coste', item.costUSD, 'estimación; no es una factura')))));
+  const pending = el('ul', {}, ...metrics.pendingInbox.map(item => el('li', {},
+    `Admisión sin entrega observada · estado: ${item.state ?? 'desconocido'} · sesión ${item.sessionID} · mensaje ${item.messageID}`)));
+  return el('details', { 'aria-label': 'Métricas' },
+    el('summary', {}, 'Métricas con fuente y alcance'),
+    metrics.steps.length ? steps : el('p', { class: 'notice' }, 'Sin pasos de modelo observados en el alcance.'),
+    metrics.measurements.length ? measurements : null,
+    metrics.pendingInbox.length ? pending : null,
+    metrics.coverage ? el('p', { class: 'notice' },
+      `La duración total del flujo no se expone (flowElapsedMs desconocido) y no se suman ramas concurrentes. Omisiones de métricas: ${(metrics.coverage.omissions ?? []).join(', ')}.`) : null,
+    el('p', { class: 'notice' },
+      'Un valor ausente permanece desconocido, nunca cero; el consumo es el valor normalizado de OpenCode y el coste una estimación, no una factura.'));
+}
+
+function renderTraceSkills(trace) {
+  const skills = trace.skills;
+  const observed = el('ul', {}, ...skills.observed.map(item => el('li', {},
+    el('p', {}, `Skill observada: ${item.skill.name ?? item.skill.id ?? 'identidad no expuesta'}`),
+    el('p', { class: 'notice' },
+      `Origen: ${item.skill.origin === 'successful-skill-tool-result'
+        ? 'resultado correcto de una llamada de skill' : 'evento público de activación del runtime'}`
+      + ` · sesión ${item.sessionID} · mensaje ${item.messageID ?? 'desconocido'} · llamada ${item.callID ?? 'desconocida'}`),
+    el('p', { class: 'notice' }, `SHA-256 del contenido filtrado: ${item.skill.sha256}`),
+    el('details', {}, el('summary', {}, 'Contenido autorizado'), el('pre', {}, item.skill.text)))));
+  const admitted = el('ul', {}, ...skills.admitted.map(item => el('li', {},
+    `Skill admitida ${item.value?.id ?? 'desconocida'}${item.value?.name ? ` (${item.value.name})` : ''}`
+    + ` · mensaje ${item.messageID ?? 'desconocido'} · la admisión no prueba despacho por el modelo`)));
+  const available = el('ul', {}, ...skills.available.flatMap(observation =>
+    (Array.isArray(observation.value) ? observation.value : []).map(skill => el('li', {},
+      `${skill.id}${skill.name ? ` (${skill.name})` : ''}`))));
+  const definitions = el('ul', {}, ...skills.definitions.map(item => el('li', {},
+    el('p', {}, `Definición observada (${item.source}): ${item.value?.id ?? item.identity ?? 'identidad desconocida'}${item.value?.name ? ` (${item.value.name})` : ''}`),
+    el('p', { class: 'notice' },
+      `Leída después del hecho (${new Date(item.observationTime).toISOString()}); no es una foto histórica de ninguna activación.`
+      + `${item.value?.path ? ` Ruta: ${item.value.path}.` : ''}`),
+    item.value?.content !== undefined && item.value?.content !== null
+      ? el('details', {}, el('summary', {}, 'Contenido autorizado'), el('pre', {}, item.value.content)) : null,
+    item.omissions?.length ? el('p', { class: 'notice' }, `Omisiones: ${item.omissions.join(', ')}`) : null)));
+  const environment = el('ul', {}, ...skills.environment.map(item => el('li', {},
+    (Array.isArray(item.value?.plugins) ? item.value.plugins : []).map(plugin =>
+      `${plugin.id} · fuente ${plugin.source} · versión ${plugin.version ?? 'desconocida'} · estado ${plugin.status}`).join(' · ')
+    || 'Sin plugins observados')));
+  return el('details', { 'aria-label': 'Skills y definiciones' },
+    el('summary', {}, 'Skills y definiciones'),
+    el('section', { 'aria-label': 'Skills observadas' },
+      el('h5', {}, 'Skills observadas (activación o carga efectiva)'),
+      skills.observed.length ? observed : el('p', { class: 'notice' }, 'Ninguna skill fue observada en uso.')),
+    skills.admitted.length ? el('section', { 'aria-label': 'Skills admitidas' },
+      el('h5', {}, 'Skills admitidas con el encargo'), admitted) : null,
+    el('section', { 'aria-label': 'Skills disponibles' },
+      el('h5', {}, 'Skills disponibles (disponibilidad; no prueba uso)'),
+      skills.available.length ? available : el('p', { class: 'notice' }, 'Sin observaciones de disponibilidad.'),
+      el('p', { class: 'notice' },
+        'Disponibilidad observada en un punto del hook; no garantiza selección final, permisos ni activación de las skills disponibles.')),
+    el('section', { 'aria-label': 'Definiciones observadas' },
+      el('h5', {}, 'Definiciones observadas'),
+      skills.definitions.length ? definitions : el('p', { class: 'notice' }, 'Sin definiciones observadas.')),
+    el('section', { 'aria-label': 'Entorno de plugins' },
+      el('h5', {}, 'Entorno de plugins (disponibilidad instalada)'),
+      skills.environment.length ? environment : el('p', { class: 'notice' }, 'Sin observaciones de entorno.'),
+      el('p', { class: 'notice' },
+        'El listado no atribuye cada transformación a su autor, orden ni versión local; esos datos quedan desconocidos.')));
+}
+
+function renderTraceCoverage(trace) {
+  const coverage = trace.captureDiagnostics;
+  if (!coverage) return el('section', { 'aria-label': 'Cobertura de captura' },
+    el('h4', {}, 'Diagnóstico técnico y cobertura de captura'),
+    el('p', { class: 'notice' }, 'Sin diagnóstico de cobertura disponible.'));
+  const declarations = el('ul', {}, ...(coverage.declarations ?? []).map(declaration => el('li', {},
+    `runtime ${declaration.runtimeVersion} · SDK ${declaration.sdkVersion ?? 'desconocida'}`
+    + ` · registrador ${declaration.recorderVersion ?? 'desconocida'} · orden ${declaration.coverage?.ordering ?? 'desconocido'}`)));
+  const observed = el('ul', {}, ...(coverage.observed ?? []).map(shape => el('li', {},
+    `${shape.type}${shape.stage ? ` · ${shape.stage}` : ''}${shape.status ? ` · ${shape.status}` : ''} × ${shape.count}`)));
+  const omissions = el('ul', {}, ...(coverage.omissions ?? []).map(omission => el('li', {}, omission)));
+  const diagnostics = el('ul', {}, ...(coverage.diagnostics ?? []).map(row => el('li', {},
+    `${row.type}: ${row.reason ?? 'sin motivo'} · ${row.captureID} · fila ${row.arrival}`
+    + `${row.sessionID ? ` · sesión ${row.sessionID}` : ' · sesión no identificada'}`)));
+  const horizons = el('ul', {}, ...(coverage.horizons ?? []).map(horizon => el('li', {},
+    `${horizon.captureID} · hasta la fila ${horizon.arrival} · ${new Date(horizon.observedAt).toISOString()}`)));
+  return el('section', { 'aria-label': 'Cobertura de captura y diagnósticos' },
+    el('h4', {}, 'Diagnóstico técnico y cobertura de captura'),
+    el('p', {}, `Disposición: sin evaluar (readiness: ${coverage.readiness}).`),
+    el('p', { class: 'notice' },
+      'Los diagnósticos técnicos y la cobertura de captura no son una evaluación: la ausencia de incidentes no equivale a una aceptación ni acredita el piloto.'),
+    el('p', {}, `Sesiones con evidencia en el alcance: ${coverage.sessions?.length ? coverage.sessions.join(', ') : 'ninguna'}`),
+    el('h5', {}, 'Declaraciones de preparación'),
+    (coverage.declarations?.length ?? 0) ? declarations : el('p', { class: 'notice' }, 'Sin declaraciones de preparación en el alcance.'),
+    el('details', {}, el('summary', {}, 'Tipos y etapas observados'), observed),
+    el('details', {}, el('summary', {}, 'Omisiones observadas'),
+      (coverage.omissions?.length ?? 0) ? omissions : el('p', { class: 'notice' }, 'Sin omisiones registradas.')),
+    el('details', {}, el('summary', {}, 'Diagnósticos del registrador en el alcance'),
+      (coverage.diagnostics?.length ?? 0) ? diagnostics : el('p', { class: 'notice' }, 'Sin fallos ni lagunas registrados.')),
+    el('details', {}, el('summary', {}, 'Horizonte de lectura por diario'), horizons));
+}
+
+function traceSection() {
+  const detail = state.detail;
+  const execution = detail?.execution;
+  if (!execution) return [];
+  const head = el('h3', {}, 'Traza y diagnóstico técnico');
+  const trace = state.trace;
+  if (!trace) return [el('section', { id: 'trace' }, head,
+    el('p', { class: 'notice' }, 'Consultando la traza y el diagnóstico técnico en la captura…'))];
+  if (!trace.readable) return [el('section', { id: 'trace' }, head,
+    el('p', { class: 'notice' },
+      `La traza no está consultable (${trace.reason ?? 'desconocido'}); no se reconstruye contenido no capturado.`))];
+  return [el('section', { id: 'trace' }, head,
+    el('p', { class: 'notice' },
+      'Proyección conservadora del lector independiente sobre la captura autorizada: árbol, línea temporal, herramientas, métricas, skills y cobertura tal como fueron observados, sin rellenar datos desconocidos.'),
+    renderTraceTree(execution, trace),
+    renderTimeline(execution, trace),
+    renderTraceTools(execution, trace),
+    renderTraceMetrics(trace),
+    renderTraceSkills(trace),
+    renderTraceCoverage(trace))];
 }
 
 function renderExecution() {
@@ -513,6 +810,7 @@ function renderExecution() {
     renderMessages(),
     ...renderInteractions(),
     ...renderStop(execution),
+    ...traceSection(),
     el('dl', { class: 'identity' },
       el('dt', {}, 'Ejecución'), el('dd', {}, execution.id),
       ...selectionRows,
@@ -588,8 +886,11 @@ function renderHistory() {
       state.interactionAnswers = {};
       state.stopError = null;
       state.stopRequest = null;
+      state.trace = null;
+      state.selectedSession = null;
       renderConversation();
       refreshDetail();
+      refreshTrace();
     });
     historyList.append(el('li', {}, button));
   }
@@ -603,6 +904,8 @@ document.querySelector('#new-chat').addEventListener('click', () => {
   state.interactionAnswers = {};
   state.stopError = null;
   state.stopRequest = null;
+  state.trace = null;
+  state.selectedSession = null;
   state.draft = '';
   state.agent = '';
   state.model = '';
@@ -640,7 +943,10 @@ async function tick() {
   if (state.selected === null) {
     await refreshExecutions();
     if (state.options === null && !state.optionsLoading) await refreshOptions();
-  } else await refreshDetail();
+  } else {
+    await Promise.allSettled([refreshDetail(), refreshTrace()]);
+    renderConversation();
+  }
 }
 
 renderConversation();

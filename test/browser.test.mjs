@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -716,4 +718,181 @@ test('el navegador responde preguntas y permisos nativos y reconstruye las pendi
     assert.equal(sessions.filter(session =>
       (session.title ?? '').startsWith('Flujo en Proyecto ·')).length, 1,
       'answering native interactions created another root session');
+  });
+
+test('el navegador explora el árbol, la línea temporal y el diagnóstico de una delegación anidada y concurrente',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, config: { secrets: ['synthetic-secret-42'] },
+      serverConfig: { experimental: { subagent_depth: 3 }, agents: { 'synthetic-branch': { mode: 'all',
+        description: 'Synthetic branching agent',
+        permissions: [{ action: 'subagent', resource: 'synthetic-branch', effect: 'allow' }] } } } });
+    const { app } = await launchWebapp(t, instance);
+    const browser = await chromium.launch();
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(app.url);
+    await upload(page, 'Encargo delegado anidado. SYNTHETIC_TREE_ROOT');
+    await awaitStatus(page, 'Finalizada técnicamente', 300000);
+    const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+    const root = (await appFetch(app, `/api/executions/${executionId}`)).body.execution.sessionID;
+
+    await page.waitForFunction(() => document.querySelectorAll('#trace .tree-node').length >= 4,
+      undefined, { timeout: 120000 });
+    const treeText = await page.locator('[aria-label="Árbol de subejecuciones"]').innerText();
+    assert.ok(treeText.includes(`Sesión raíz ${root}`));
+    assert.ok((treeText.match(/Subejecución/g) ?? []).length >= 3, 'the nested branches were not shown');
+    assert.ok(treeText.includes('por llamada observada call_synthetic_delegate_0'));
+    assert.ok(treeText.includes('agente: synthetic-branch'));
+    const domSessions = await page.$$eval('#trace .tree-node button',
+      buttons => buttons.map(button => button.dataset.session));
+    const readerSessions = [...new Set(execFileSync(process.execPath,
+      [fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url)),
+        instance.captureDirectory, root, '--tree'], { encoding: 'utf8' })
+      .trim().split('\n').filter(Boolean).map(JSON.parse)
+      .map(row => row.sessionID).filter(Boolean))];
+    assert.deepEqual(new Set(domSessions), new Set(readerSessions),
+      'the browser tree diverged from the independent reader');
+
+    const timelineText = await page.locator('[aria-label="Línea temporal"]').innerText();
+    assert.ok(timelineText.includes('transcurrido:'));
+    assert.ok(timelineText.includes('procedencia: opencode.event.sourceTime'));
+    assert.ok(timelineText.includes('Sesión raíz'));
+    assert.ok(timelineText.includes('Subejecución'));
+    assert.ok(timelineText.includes('pueden solaparse'));
+    assert.ok(timelineText.includes('no se suman ramas concurrentes'));
+    assert.ok(!timelineText.includes('Duración total del flujo:'));
+    assert.ok(await page.locator('#trace .bar').count() >= 4, 'the timeline bars were not drawn');
+
+    const coverageText = await page.locator('[aria-label="Cobertura de captura y diagnósticos"]').innerText();
+    assert.ok(coverageText.includes('sin evaluar (readiness: not-assessed)'));
+    assert.ok(coverageText.includes('no son una evaluación'));
+    assert.ok(coverageText.includes(root));
+    assert.ok(!coverageText.includes('Aprobado'), 'a technical diagnostic was shown as a verdict');
+
+    await page.locator('[aria-label="Herramientas e intentos"] > summary').click();
+    const toolsText = await page.locator('[aria-label="Herramientas e intentos"]').textContent();
+    assert.ok(toolsText.includes('llamada call_synthetic_delegate_0'));
+    assert.ok(toolsText.includes(`sesión ${root}`));
+    assert.ok(toolsText.includes('Consumo: desconocido, no cero'));
+    assert.ok(toolsText.includes('Evidencia:'));
+    assert.ok(!toolsText.includes('synthetic-secret-42'), 'tool details leaked a secret');
+
+    await page.locator('#trace .tree-node button').nth(1).click();
+    await page.waitForFunction(() => document.querySelectorAll('#trace .tree-node').length === 2
+      && document.querySelector('#trace')?.textContent?.includes('(raíz de la vista)'),
+    undefined, { timeout: 120000 });
+    const scopedTimeline = await page.locator('[aria-label="Línea temporal"]').innerText();
+    assert.ok(!scopedTimeline.includes(root),
+      'the sub-execution timeline mixed the root execution session');
+
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
+    await page.locator('#history button').first().click();
+    await awaitStatus(page, 'Finalizada técnicamente', 60000);
+    await page.waitForFunction(() => document.querySelectorAll('#trace .tree-node').length >= 4,
+      undefined, { timeout: 120000 });
+
+    await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+    await upload(page, 'Encargo corto tras el árbol.');
+    await awaitStatus(page, 'Finalizada técnicamente', 300000);
+    await page.waitForFunction(() => document.querySelectorAll('#trace .tree-node').length === 1,
+      undefined, { timeout: 120000 });
+    const secondText = await page.locator('[aria-label="Árbol de subejecuciones"]').innerText();
+    assert.ok(!secondText.includes(root), 'the second execution mixed the first tree');
+
+    const beforeOffline = await admittedCount(instance);
+    await instance.stop();
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 2,
+      undefined, { timeout: 60000 });
+    await page.locator('#history button').nth(1).click();
+    await awaitStatus(page, 'Finalizada técnicamente', 60000);
+    await page.waitForFunction(() => document.querySelectorAll('#trace .tree-node').length >= 4,
+      undefined, { timeout: 120000 });
+    const offlineTree = await page.locator('[aria-label="Árbol de subejecuciones"]').innerText();
+    assert.ok(offlineTree.includes(`Sesión raíz ${root}`));
+    assert.ok((await page.locator('#status').innerText()).includes('Motor: no disponible'));
+    const offlineCoverage = await page.locator('[aria-label="Cobertura de captura y diagnósticos"]').innerText();
+    assert.ok(offlineCoverage.includes('Horizonte de lectura por diario')
+      || (await page.locator('[aria-label="Cobertura de captura y diagnósticos"]').textContent())
+        .includes('Horizonte de lectura por diario'));
+    assert.equal(await admittedCount(instance), beforeOffline,
+      'the offline reconstruction dispatched work');
+  });
+
+test('la vista mantiene desconocida una llamada sin desenlace y distingue skills observadas de disponibles',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true,
+      syntheticDefinitions: true, modelCost: { input: 1, output: 2 },
+      config: { secrets: ['synthetic-secret-42'] } });
+    const { app } = await launchWebapp(t, instance);
+    const browser = await chromium.launch();
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(app.url);
+    await upload(page, 'Encargo con herramienta retenida. SYNTHETIC_ACTION_HOLD');
+    await awaitStatus(page, 'En ejecución');
+    const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+    const root = (await appFetch(app, `/api/executions/${executionId}`)).body.execution.sessionID;
+
+    await page.waitForFunction(() => document.querySelector('#trace')?.textContent
+      ?.includes('sin desenlace observado'), undefined, { timeout: 120000 });
+    await page.locator('[aria-label="Herramientas e intentos"] > summary').click();
+    const toolsText = await page.locator('[aria-label="Herramientas e intentos"]').textContent();
+    assert.ok(toolsText.includes('sin desenlace observado: desconocido'), 'the open call gained an outcome');
+    assert.ok(toolsText.includes('llamada call_synthetic_action'));
+    assert.ok(toolsText.includes(`sesión ${root}`));
+    assert.ok(toolsText.includes('Consumo: desconocido, no cero'));
+    assert.ok(toolsText.includes('No se agrupan reintentos por nombre'));
+    assert.ok(toolsText.includes('Incidente: outcome-not-observed'));
+    assert.ok(!toolsText.includes('éxito observado'));
+    assert.ok(toolsText.includes('Evidencia:'));
+    assert.ok(toolsText.includes('fila '));
+    assert.ok(!toolsText.includes('synthetic-secret-42'), 'tool details leaked a secret');
+
+    const coverageText = await page.locator('[aria-label="Cobertura de captura y diagnósticos"]').innerText();
+    assert.ok(coverageText.includes('sin evaluar (readiness: not-assessed)'));
+    assert.ok(coverageText.includes('no son una evaluación'));
+    assert.ok(!coverageText.includes('Aprobado'), 'a technical diagnostic was shown as a verdict');
+
+    await page.getByRole('button', { name: 'Detener' }).click();
+    await awaitStatus(page, 'Interrumpida', 240000);
+
+    await page.getByRole('button', { name: 'Nuevo encargo' }).click();
+    await upload(page, 'Encargo con skill. SYNTHETIC_SKILL_LOAD');
+    await awaitStatus(page, 'Finalizada técnicamente', 300000);
+    await page.locator('[aria-label="Skills y definiciones"] > summary').click();
+    const skillsBlock = page.locator('[aria-label="Skills y definiciones"]');
+    const observedText = await skillsBlock.locator('[aria-label="Skills observadas"]').textContent();
+    assert.ok(observedText.includes('transformed'));
+    assert.ok(observedText.includes('SHA-256 del contenido filtrado'));
+    assert.ok(!observedText.includes('unused'), 'an available-only skill appeared as observed');
+    const availableText = await skillsBlock.locator('[aria-label="Skills disponibles"]').textContent();
+    assert.ok(availableText.includes('unused'), 'available skills were not listed separately');
+    assert.ok(availableText.includes('no garantiza selección final'));
+    const definitionsText = await skillsBlock.locator('[aria-label="Definiciones observadas"]').textContent();
+    assert.ok(definitionsText.includes('transformed'));
+    assert.ok(definitionsText.includes('no es una foto histórica'),
+      'the definition lost its provenance caveat');
+    const environmentText = await skillsBlock.locator('[aria-label="Entorno de plugins"]').textContent();
+    assert.ok(environmentText.includes('synthetic.definitions'));
+    assert.ok(environmentText.includes('quedan desconocidos'));
+
+    await page.locator('[aria-label="Métricas"] > summary').click();
+    const metricsText = await page.locator('[aria-label="Métricas"]').textContent();
+    assert.ok(metricsText.includes('valor normalizado que informa el runtime'));
+    assert.ok(metricsText.includes('no es una factura'));
+    assert.ok(metricsText.includes('La duración total del flujo no se expone'));
+    assert.ok(metricsText.includes('nunca cero'));
+
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
+    await page.locator('#history button').first().click();
+    await awaitStatus(page, 'Finalizada técnicamente', 60000);
+    await page.locator('[aria-label="Skills y definiciones"] > summary').click();
+    const reloadedText = await page.locator('[aria-label="Skills observadas"]').textContent();
+    assert.ok(reloadedText.includes('transformed'), 'the observed skills were not rebuilt after a reload');
+    assert.equal(await admittedCount(instance), 2, 'browsing the trace dispatched work');
   });

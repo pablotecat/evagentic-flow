@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createEngine } from './engine.mjs';
 import { commandMetadata, createStore, isTerminal } from './store.mjs';
-import { latestLifecycle, readRows, readSession } from './evidence.mjs';
+import { latestLifecycle, readRows, readSession, readTrace } from './evidence.mjs';
 
 const TERMINAL_PHASES = ['succeeded', 'failed', 'interrupted'];
 const CONFIG_KEYS = ['version', 'opencodeURL', 'opencodePassword', 'projectDirectory', 'captureDirectory', 'dataDirectory'];
@@ -554,6 +554,31 @@ export async function startApp({ configPath, port: requestedPort }) {
           ? { ...live, resolved: evidence.interactions.resolved }
           : { pending: [], resolved: [], readErrors: evidence ? [{ error: 'evidence-unavailable' }] : [] },
       });
+    }
+    const trace = url.pathname.match(/^\/api\/executions\/([^/]+)\/trace$/);
+    if (trace && request.method === 'GET') {
+      const execution = store.byId(trace[1]);
+      if (!execution) return json(response, 404, { error: 'unknown-execution' });
+      if (!execution.sessionID) {
+        return json(response, 200, { executionID: execution.id, readable: false, reason: 'session-not-confirmed' });
+      }
+      const evidence = await readSession(config.captureDirectory, execution.sessionID);
+      if (!evidence.ok) {
+        return json(response, 200, { executionID: execution.id, rootSessionID: execution.sessionID,
+          readable: false, reason: evidence.reason });
+      }
+      const requested = url.searchParams.get('session');
+      if (requested && requested !== execution.sessionID
+        && !evidence.scope.sessionIDs.includes(requested)) {
+        return json(response, 404, { error: 'session-not-in-execution' });
+      }
+      const read = await readTrace(config.captureDirectory, execution.sessionID, requested);
+      if (!read.ok) {
+        return json(response, 200, { executionID: execution.id, rootSessionID: execution.sessionID,
+          readable: false, reason: read.reason });
+      }
+      return json(response, 200, { executionID: execution.id,
+        rootSessionID: execution.sessionID, ...read });
     }
     const interaction = url.pathname.match(/^\/api\/executions\/([^/]+)\/interactions$/);
     if (interaction && request.method === 'POST') {

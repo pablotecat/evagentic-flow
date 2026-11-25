@@ -331,3 +331,114 @@ aside {
 #recorder-failure p {
   margin: 0.2rem 0;
 }
+
+#trace {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #d5dae2;
+  border-radius: 8px;
+  background: white;
+}
+
+#trace h3 {
+  margin: 0 0 0.35rem;
+}
+
+#trace h4 {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.85rem;
+}
+
+#trace h5 {
+  margin: 0.5rem 0 0.15rem;
+  font-size: 0.8rem;
+  color: #45505e;
+  word-break: break-all;
+}
+
+#trace section {
+  margin: 0.35rem 0;
+}
+
+#trace details {
+  margin: 0.35rem 0;
+}
+
+#trace summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #29527a;
+}
+
+#trace pre {
+  margin: 0.25rem 0;
+  padding: 0.4rem;
+  background: #f2f4f7;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+#trace ul {
+  list-style: none;
+  margin: 0.25rem 0;
+  padding: 0;
+  font-size: 0.8rem;
+  color: #45505e;
+  word-break: break-all;
+}
+
+#trace .tree-node {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin: 0.2rem 0;
+}
+
+#trace .tree-node button {
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #b8c0cc;
+  background: white;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+#trace .tree-node button[aria-current='true'] {
+  border-color: #29527a;
+  background: #eef2f8;
+}
+
+#trace .tree-relation {
+  font-size: 0.75rem;
+  color: #66717f;
+}
+
+#trace .timeline-sessions > li {
+  margin: 0.4rem 0;
+}
+
+#trace .timeline {
+  position: relative;
+  height: 0.9rem;
+  margin: 0.2rem 0;
+  background: #eef0f4;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+#trace .bar {
+  position: absolute;
+  top: 0.1rem;
+  bottom: 0.1rem;
+  border-radius: 3px;
+  background: #2f7d4f;
+}
+
+#trace .bar-open {
+  background: #b8862f;
+}

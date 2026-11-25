@@ -157,6 +157,40 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   pudieron comprobarse. Una ejecución
   interrumpida conserva en el histórico sus resultados parciales y su
   estado real, sin puntuaciones ni juez.
+- **Árbol, línea temporal y diagnóstico técnico desde la captura ([#31](https://github.com/pablotecat/evagentic-flow/issues/31)).**
+  La ejecución expone su traza con `GET /api/executions/{id}/trace`
+  (`?session=` opcional), reconstruida exclusivamente con el lector
+  independiente reutilizado como proceso hijo en sus modos `--tree`,
+  `--tools`, `--metrics` y `--coverage` sobre la sesión raíz o la
+  subejecución seleccionada: ninguna proyección se recalcula distinta y el
+  índice no persiste contenido nuevo. Los nodos del árbol sólo representan
+  relaciones acreditadas (llamada de delegación observada o padre
+  observado): un hijo con padre pero sin llamada queda
+  `parent-observed-call-unknown` y una relación ausente permanece
+  `unknown`, nunca deducida. Seleccionar una subejecución reencuadra
+  árbol, línea temporal, herramientas y cobertura a su subárbol (las
+  herramientas son por sesión, igual que `--tools`); una sesión ajena al
+  árbol acreditado de esa ejecución se rechaza con `404` y ninguna vista
+  mezcla sesiones de otra ejecución. La línea temporal reproduce los
+  intervalos y esperas de `--metrics` con barras por sesión sobre el reloj
+  público del runtime, con aviso explícito de que pueden solaparse, no se
+  suman ramas concurrentes y no hay orden causal global entre diarios; no
+  existe campo de duración total. Los intentos conservan identidad de
+  sesión, mensaje y llamada, entrada/resultado/error autorizados y
+  referencias a evidencia; una llamada sin desenlace se muestra como
+  desconocida (no acredita fallo ni éxito) y no se agrupan reintentos por
+  nombre, argumentos ni proximidad. Las métricas conservan valor, fuente y
+  alcance: un valor ausente se muestra desconocido (nunca cero), el
+  consumo se rotula como valor normalizado del runtime (no medición del
+  proveedor) y el coste como estimación. Las skills observadas
+  (activación o carga) se separan de las meramente disponibles y de las
+  definiciones del registro y el entorno de plugins — lecturas posteriores
+  al hecho, no fotos históricas —, con contenido filtrado y hash. La
+  cobertura de captura se publica con `readiness: "not-assessed"` y con
+  avisos de que los diagnósticos técnicos no son una evaluación. La vista
+  se actualiza en el ciclo de sondeo existente y se reconstruye tras una
+  recarga o con el motor caído desde la captura persistida, sin replay ni
+  relleno de lagunas.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
   peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
   páginas externas no puedan despachar trabajo. No usa cookies ni acceso
@@ -210,6 +244,22 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   ejecución terminal o sin sesión, la metadata permitida del índice y la
   liberación sólo tras desenlace observado. Los rótulos por sesión que no
   son deterministas en el motor real se comprueban en `test/browser-ui.test.mjs`.
+- `test/webapp.test.mjs` añade #31: contraste de la traza con el lector
+  independiente en una delegación anidada y concurrente (árbol por
+  evidencia, intervalos solapados de hermanos, intentos con identidad y
+  evidencia, selección de subejecución sin mezclar, aislamiento entre
+  ejecuciones y `404` de sesión ajena) y conservación de los valores
+  desconocidos (llamada abierta sin desenlace, hijo con padre observado
+  sin llamada creadora y fallo recuperado sin agrupar reintentos por
+  nombre o argumentos).
+- `test/browser.test.mjs` añade #31: la frontera vertical de exploración
+  (árbol navegable desde el navegador y contrastado con el lector,
+  selección de subejecución sin mezclar la raíz, reconstrucción tras
+  recarga y consulta histórica con el motor caído sin despachar trabajo) y
+  la de límites de evidencia (llamada retenida mostrada «sin desenlace
+  observado», skills observadas diferenciadas de las disponibles,
+  métricas con fuente y consumo normalizado, y cobertura `not-assessed`
+  presentada como distinta de una evaluación).
 - `test/browser-ui.test.mjs`: comprobación pura de renderizado en Chromium,
   sin motor ni registrador sustituidos. Verifica borradores distintos para
   tipo, sesión y solicitud, y el aviso de error de lectura. No acredita por

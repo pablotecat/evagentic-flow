@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { eventually, fixture, records } from './support/instance.mjs';
 import { appFetch, createExecution, executionDetail, launchExecution, launchWebapp, replyInteraction } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
@@ -847,3 +848,207 @@ test('la detención sin sesión confirmada no interrumpe nada y lo dice', { time
   assert.equal((await createExecution(app, 'detencion-distinta', 'Encargo distinto.')).status, 409,
     'a stop without a confirmed session must not release the project');
 });
+
+const runReader = (instance, sessionID, mode) => execFileSync(process.execPath,
+  [fileURLToPath(new URL('../scripts/inspect.mjs', import.meta.url)), instance.captureDirectory, sessionID, mode],
+  { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(JSON.parse);
+
+const traceOf = (app, executionId, sessionID) => appFetch(app,
+  `/api/executions/${executionId}/trace${sessionID ? `?session=${sessionID}` : ''}`);
+
+test('la traza expone árbol, intervalos y herramientas de la delegación anidada sin mezclar ejecuciones',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, modelCost: { input: 1, output: 2 },
+      config: { secrets: ['synthetic-secret-42'] },
+      serverConfig: { experimental: { subagent_depth: 3 }, agents: { 'synthetic-branch': { mode: 'all',
+        description: 'Synthetic branching agent',
+        permissions: [{ action: 'subagent', resource: 'synthetic-branch', effect: 'allow' }] } } } });
+    const { app } = await launchWebapp(t, instance);
+    const created = await createExecution(app, 'traza-arbol', 'Encargo delegado anidado. SYNTHETIC_TREE_ROOT');
+    assert.equal(created.status, 201);
+    const executionId = created.body.execution.id;
+    const completed = await eventually(async () => {
+      const body = (await executionDetail(app, executionId)).body;
+      return body.execution.sessionID && body.execution.status === 'succeeded' ? body : undefined;
+    }, 'the delegated execution did not finish', 300000);
+    const root = completed.execution.sessionID;
+
+    const tree = await eventually(async () => {
+      const body = (await traceOf(app, executionId)).body;
+      return body?.readable === true && body.tree?.nodes?.length === 4 ? body : undefined;
+    }, 'the trace did not expose the four delegated sessions', 120000);
+    const readerRows = runReader(instance, root, '--tree');
+    const readerSessions = [...new Set(readerRows.map(row => row.sessionID).filter(Boolean))];
+    assert.deepEqual(new Set(tree.tree.sessionIDs), new Set(readerSessions),
+      'the trace tree diverged from the independent reader');
+    assert.deepEqual(new Set(tree.tree.sessionIDs), new Set(completed.capture.scope.sessionIDs));
+    const nodes = new Map(tree.tree.nodes.map(node => [node.sessionID, node]));
+    assert.equal(nodes.get(root).relation, 'view-root');
+    assert.ok(!nodes.get(root).delegations.length, 'an external parent was turned into a delegation link');
+    const children = [...nodes.values()].filter(node => node.observedParents.includes(root));
+    assert.equal(children.length, 2, 'the root did not expose both concurrent branches');
+    assert.ok(children.every(node => node.agentIDs.includes('synthetic-branch')));
+    assert.ok(children.every(node => node.delegations.length === 1
+      && node.delegations[0].parentSessionID === root), 'a child lacked its observed delegation call');
+    assert.ok(new Set(children.map(node => node.delegations[0].callID))
+      .has('call_synthetic_delegate_0'), 'the delegation call identity was lost');
+    const grandchild = [...nodes.values()].find(node => !node.isViewRoot
+      && node.observedParents.length === 1 && !node.observedParents.includes(root));
+    assert.ok(grandchild, 'the nested grandchild was not represented');
+    assert.equal(grandchild.relation, 'delegation-call-observed');
+    assert.equal(grandchild.delegations[0].callID, 'call_synthetic_delegate_0');
+
+    const intervals = tree.timeline.intervals;
+    assert.deepEqual(new Set(intervals.map(interval => interval.sessionID)),
+      new Set(tree.tree.sessionIDs), 'the sessions with intervals diverged from the tree');
+    const siblings = intervals.filter(interval => children
+      .some(child => child.sessionID === interval.sessionID));
+    assert.equal(new Set(siblings.map(interval => interval.sessionID)).size, 2,
+      'both concurrent branches must expose intervals');
+    const firstRound = sessionID => siblings.filter(interval => interval.sessionID === sessionID)
+      .sort((a, b) => a.startedAt - b.startedAt)[0];
+    const [firstSibling, secondSibling] = children.map(child => firstRound(child.sessionID));
+    assert.ok(firstSibling.startedAt < secondSibling.endedAt
+      && secondSibling.startedAt < firstSibling.endedAt,
+      'sibling intervals did not overlap');
+    assert.ok(intervals.every(interval => interval.durationSource === 'opencode.event.sourceTime'));
+    assert.ok(intervals.every(interval => interval.evidence.length >= 2
+      && interval.intervalRef?.captureID));
+
+    const attempts = tree.tools.attempts;
+    assert.equal(attempts.length, 2, 'the root tool attempts were not exposed');
+    assert.ok(attempts.every(attempt => attempt.sessionID === root && attempt.outcome === 'success'));
+    assert.deepEqual(new Set(attempts.map(attempt => attempt.callID)),
+      new Set(['call_synthetic_delegate_0', 'call_synthetic_delegate_1']));
+    assert.ok(attempts.every(attempt => attempt.consumption === null && attempt.retryOf === null
+      && attempt.operationID === null));
+    assert.ok(attempts.every(attempt => attempt.evidence.length >= 2
+      && attempt.evidence.some(ref => ref.type === 'session.tool.input.started')));
+
+    assert.deepEqual(new Set(tree.metrics.steps.map(step => step.sessionID)),
+      new Set(tree.tree.sessionIDs), 'model steps did not cover the observed tree');
+    assert.ok(tree.metrics.steps.length >= 4);
+    assert.ok(tree.metrics.steps.every(step => step.executionID === null
+      && step.tokens.providerReported === null
+      && (step.tokens.basis === undefined || step.tokens.basis === 'runtime-normalized-unverified')));
+    assert.ok(tree.metrics.steps.every(step => ['observed', 'unknown'].includes(step.tokens.status)
+      && ['estimated', 'unknown'].includes(step.costUSD.status)));
+    assert.equal(tree.metrics.coverage.flowElapsedMs, null);
+    assert.ok(tree.metrics.coverage.omissions.includes('no-concurrent-duration-sum'));
+    assert.equal(tree.captureDiagnostics.readiness, 'not-assessed');
+    assert.deepEqual(new Set(tree.captureDiagnostics.sessions), new Set(tree.tree.sessionIDs));
+    assert.ok(!JSON.stringify(tree).includes('synthetic-secret-42'), 'the trace leaked a secret');
+
+    const branchSessionID = grandchild.observedParents[0];
+    const scoped = await eventually(async () => {
+      const body = (await traceOf(app, executionId, branchSessionID)).body;
+      return body?.readable === true && body.selectedSessionID === branchSessionID
+        && body.tree?.nodes?.length === 2 ? body : undefined;
+    }, 'the sub-execution trace did not scope to its subtree', 120000);
+    assert.deepEqual(new Set(scoped.tree.sessionIDs), new Set([branchSessionID, grandchild.sessionID]));
+    assert.ok(scoped.timeline.intervals.every(interval =>
+      [branchSessionID, grandchild.sessionID].includes(interval.sessionID)),
+      'the scoped timeline mixed other executions or branches');
+    assert.equal(scoped.tools.attempts.length, 1, 'the branch attempts were not exposed by session');
+    assert.equal(scoped.tools.attempts[0].sessionID, branchSessionID);
+    assert.equal(scoped.captureDiagnostics.sessions.length, 2);
+
+    const foreign = (await instance.api('/api/session', { location: { directory: instance.projects[0] } })).data;
+    await instance.api(`/api/session/${foreign.id}/prompt`, { text: 'Sesión ajena a la ejecución.' });
+    const rejected = await traceOf(app, executionId, foreign.id);
+    assert.equal(rejected.status, 404);
+    assert.equal(rejected.body.error, 'session-not-in-execution');
+    assert.equal((await traceOf(app, 'urn:not-an-execution')).status, 404);
+
+    const second = await createExecution(app, 'traza-segunda', 'Encargo corto tras el árbol.');
+    assert.equal(second.status, 201, 'a finished execution did not release the project');
+    const secondExecutionId = second.body.execution.id;
+    const secondRoot = await eventually(async () => (await executionDetail(app, secondExecutionId))
+      .body.execution.sessionID, 'the second execution did not confirm its session');
+    const secondTrace = await eventually(async () => {
+      const body = (await traceOf(app, secondExecutionId)).body;
+      return body?.readable === true && body.tree?.nodes?.length === 1 ? body : undefined;
+    }, 'the second execution did not expose its single-session tree', 120000);
+    assert.ok(!secondTrace.tree.sessionIDs.includes(root),
+      'the trace of the second execution mixed the first tree');
+    assert.ok(!JSON.stringify(secondTrace.timeline.intervals).includes(root),
+      'the timeline of the second execution mixed the first tree');
+    const firstAgain = (await traceOf(app, executionId)).body;
+    assert.ok(firstAgain.tree.sessionIDs.includes(root));
+    assert.ok(!firstAgain.tree.sessionIDs.includes(secondRoot),
+      'the trace of the first execution mixed a later execution');
+  });
+
+test('la traza mantiene desconocidas una llamada sin desenlace y una relación sin llamada observada',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true,
+      config: { secrets: ['synthetic-secret-42'] } });
+    const { app } = await launchWebapp(t, instance);
+    const created = await createExecution(app, 'traza-desconocido', 'Encargo retenido. SYNTHETIC_ACTION_HOLD');
+    assert.equal(created.status, 201);
+    const executionId = created.body.execution.id;
+    const root = await eventually(async () => (await executionDetail(app, executionId))
+      .body.execution.sessionID, 'root session was not confirmed');
+
+    const openCall = await eventually(async () => {
+      const body = (await traceOf(app, executionId)).body;
+      return body?.tools?.attempts?.find(attempt => attempt.callID === 'call_synthetic_action') ?? undefined;
+    }, 'the open tool call did not surface in the trace', 120000);
+    assert.equal(openCall.outcome, 'not-observed');
+    assert.equal(openCall.sessionID, root);
+    assert.ok(openCall.messageID);
+    assert.equal(openCall.consumption, null);
+    assert.equal(openCall.retryOf, null);
+    assert.equal(openCall.operationID, null);
+    assert.deepEqual(openCall.incident, { kind: 'outcome-not-observed', cause: null });
+    assert.ok(openCall.evidence.some(ref => ref.type === 'session.tool.input.started'));
+    assert.ok(openCall.evidence.some(ref => ref.type === 'session.tool.called'));
+    const readerAttempt = runReader(instance, root, '--tools')
+      .find(row => row.callID === 'call_synthetic_action');
+    assert.equal(readerAttempt.outcome, 'not-observed');
+    assert.equal(readerAttempt.startedAt, openCall.startedAt);
+    assert.deepEqual(readerAttempt.evidence, openCall.evidence);
+
+    const child = (await instance.api('/api/session', { parentID: root,
+      location: { directory: instance.projects[0] } })).data;
+    await instance.api(`/api/session/${child.id}/prompt`, { text: 'Hijo observado sin llamada de delegación.' });
+    const traced = await eventually(async () => {
+      const body = (await traceOf(app, executionId)).body;
+      return body?.tree?.nodes?.some(node => node.sessionID === child.id) ? body : undefined;
+    }, 'the parent-observed child did not join the tree', 120000);
+    const childNode = traced.tree.nodes.find(node => node.sessionID === child.id);
+    assert.equal(childNode.relation, 'parent-observed-call-unknown');
+    assert.deepEqual(childNode.observedParents, [root]);
+    assert.equal(childNode.delegations.length, 0,
+      'a creation call was invented for a child without an observed link');
+    const rootNode = traced.tree.nodes.find(node => node.sessionID === root);
+    assert.equal(rootNode.delegations.length, 0,
+      'the open call without outcome was linked to a child session');
+    const stillOpen = traced.tools.attempts.find(attempt => attempt.callID === 'call_synthetic_action');
+    assert.ok(stillOpen);
+    assert.equal(stillOpen.outcome, 'not-observed');
+    assert.ok(!JSON.stringify(traced).includes('synthetic-secret-42'), 'the trace leaked a secret');
+
+    const stopped = await stopCall(app, executionId);
+    assert.equal(stopped.status, 200);
+    await eventually(async () => (await executionDetail(app, executionId)).body.execution.status
+      === 'interrupted', 'the stopped execution did not close', 180000);
+
+    const recovered = await createExecution(app, 'traza-recuperado',
+      'Encargo con fallo recuperado. SYNTHETIC_ACTION_RECOVERY');
+    assert.equal(recovered.status, 201);
+    const recoveredTrace = await eventually(async () => {
+      const body = (await traceOf(app, recovered.body.execution.id)).body;
+      return body?.tools?.attempts?.length === 2 ? body : undefined;
+    }, 'the recovered attempts did not surface separately', 120000);
+    assert.equal(new Set(recoveredTrace.tools.attempts.map(attempt => attempt.toolName)).size, 1,
+      'attempts of the same tool were not expected');
+    assert.equal(recoveredTrace.tools.attempts.filter(attempt => attempt.outcome === 'error').length, 1);
+    assert.equal(recoveredTrace.tools.attempts.filter(attempt => attempt.outcome === 'success').length, 1);
+    assert.ok(recoveredTrace.tools.attempts.every(attempt => attempt.retryOf === null
+      && attempt.operationID === null && attempt.consumption === null),
+      'retries were grouped by name or arguments instead of observed links');
+    assert.equal(recoveredTrace.tools.attempts.filter(attempt => attempt.incident?.kind === 'tool-error').length, 1);
+    assert.equal(recoveredTrace.tools.attempts[0].callID, 'call_synthetic_action_1');
+    assert.equal(recoveredTrace.tools.attempts[1].callID, 'call_synthetic_action_2');
+  });
