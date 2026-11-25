@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createEngine } from './engine.mjs';
 import { commandMetadata, createStore, isTerminal } from './store.mjs';
 import { latestLifecycle, readRows, readSession, readTrace, readDeliverables } from './evidence.mjs';
+import { createEvaluationReader } from './evaluation.mjs';
 
 const TERMINAL_PHASES = ['succeeded', 'failed', 'interrupted'];
 const CONFIG_KEYS = ['version', 'opencodeURL', 'opencodePassword', 'projectDirectory', 'captureDirectory', 'dataDirectory'];
@@ -36,9 +37,10 @@ export async function loadAppConfig(filename) {
   return { ...config, projectKey: await realpath(config.projectDirectory) };
 }
 
-export async function startApp({ configPath, port: requestedPort }) {
+export async function startApp({ configPath, port: requestedPort, evaluationFixtures }) {
   const config = await loadAppConfig(configPath);
   const engine = createEngine({ baseURL: config.opencodeURL, password: config.opencodePassword });
+  const evaluation = createEvaluationReader(evaluationFixtures);
   const store = createStore(config.dataDirectory);
   await store.load();
   const locks = new Map();
@@ -554,6 +556,16 @@ export async function startApp({ configPath, port: requestedPort }) {
           ? { ...live, resolved: evidence.interactions.resolved }
           : { pending: [], resolved: [], readErrors: evidence ? [{ error: 'evidence-unavailable' }] : [] },
       });
+    }
+    if (url.pathname === '/api/rubrics' && request.method === 'GET') {
+      return json(response, 200, await evaluation.rubrics());
+    }
+    const evaluations = url.pathname.match(/^\/api\/executions\/([^/]+)\/evaluations$/);
+    if (evaluations && request.method === 'GET') {
+      const execution = store.byId(evaluations[1]);
+      if (!execution) return json(response, 404, { error: 'unknown-execution' });
+      return json(response, 200, { executionID: execution.id,
+        ...await evaluation.evaluations(execution.id) });
     }
     const evidenceRoute = url.pathname.match(/^\/api\/executions\/([^/]+)\/(trace|deliverables)$/);
     if (evidenceRoute && request.method === 'GET') {

@@ -218,6 +218,31 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   archivos del proyecto observado y cambiar o eliminar el original no altera
   la versión conservada. El índice persistente no guarda contenido, rutas ni
   hashes de entregables: todo el contenido publicado procede de la captura.
+- **Rúbricas y evaluaciones de sólo lectura sin generar resultados ([#28](https://github.com/pablotecat/evagentic-flow/issues/28)).**
+  La ejecución expone sus evaluaciones con `GET /api/executions/{id}/evaluations`
+  (404 para ejecución desconocida) y la app expone `GET /api/rubrics`. Ambos son
+  de sólo lectura: sin juez implementado, sin mecanismo productivo que genere
+  rúbricas aprobadas, versiones, puntuaciones ni aceptaciones. En producción el
+  estado habitual es ausencia explícita (`source` `none`: «sin evaluación» y
+  «sin rúbricas versionadas»), incluso con la ejecución terminada correctamente:
+  el desenlace técnico no equivale a aceptación. La fuente de datos alternativa
+  es un directorio de fixtures sintéticos (`rubrics.jsonl` y `evaluations.jsonl`,
+  contrato de lectura mínimo que no fija el contrato definitivo del juez #23)
+  configurable sólo como opción en memoria de `startApp` que únicamente las
+  pruebas pasan: no existe clave de configuración local (se rechaza como clave
+  desconocida), variable de entorno ni valor por defecto para producción. El
+  lector proyecta de forma conservadora: una puntuación o cobertura ausente
+  permanece desconocida (nunca cero), una aceptación sólo se declara cuando la
+  evidencia la declara, y el estado de una versión de rúbrica se resuelve por
+  `rubricID` + versión exacta contra las versiones conocidas, identificando una
+  versión borrador o desconocida como no aprobada y una referencia no disponible
+  como tal sin inventar contenido. Cada evaluación conserva identidad propia,
+  referencia a la captura, evaluador y versiones de componente, caso y rúbrica;
+  una reevaluación enlaza con `reevaluationOf` y se muestra como resultado
+  separado de la misma captura, nunca como otra ejecución del flujo. Las vistas,
+  separadas de la traza y de los diagnósticos técnicos, no ofrecen acciones de
+  editar, evaluar ni reevaluar; los errores de lectura de fixtures son visibles
+  sin sustituirse por resultados.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
   peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
   páginas externas no puedan despachar trabajo. No usa cookies ni acceso
@@ -301,6 +326,24 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   de sesión ajena, ejecución fallida con resultados parciales consultables,
   segunda ejecución aislada, contenido conservado tras cambiar/borrar el
   original y consulta sin motor, sin que el índice persista contenido.
+- `test/browser-ui.test.mjs` añade #28: el renderizado puro de las vistas de
+  evaluación y rúbricas — carga, vacío («sin evaluación» con ejecución exitosa,
+  «sin rúbricas versionadas»), error de lectura, versión aprobada/borrador/
+  desconocida, contenido histórico por versión, varias evaluaciones con
+  reevaluación identificada, valores desconocidos sin cero ni aceptación y
+  ausencia de acciones de edición o evaluación.
+- `test/webapp.test.mjs` añade #28: la ausencia real sin fuente de datos
+  (incluido el rechazo de una clave de configuración local que pretendiera
+  habilitar los fixtures) y el contrato de lectura de fixtures sintéticos
+  —versiones y contenido de rúbricas, varias evaluaciones de la misma captura
+  con reevaluación, criterios evaluados y no evaluables con evidencia y motivo,
+  puntuación, cobertura, aceptación sólo declarada, versiones de componente,
+  caso, rúbrica y evaluador, aislamiento entre ejecuciones y error de lectura—.
+- `test/browser.test.mjs` añade #28: la frontera vertical de navegador —
+  ausencia real en producción con ausencia explícita sin despachar agente
+  evaluador alguno (cero sesiones y admisiones nuevas, captura byte a byte) y,
+  sólo con fixtures sintéticos de prueba, contenido, versiones y varios
+  resultados consultables sin despachar trabajo adicional.
 - `test/browser-ui.test.mjs`: comprobación pura de renderizado en Chromium,
   sin motor ni registrador sustituidos. Verifica borradores distintos para
   tipo, sesión y solicitud, y el aviso de error de lectura. No acredita por
@@ -370,3 +413,9 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   ejecución ya exitosa (rol `input`, `finality: null`); la ausencia del aviso de
   resultados parciales y la finalidad declarada se verifican en la UI pura.
   La detención (`interrupted`) se comprueba en la UI pura, no con instancia real.
+- El corte [#28](https://github.com/pablotecat/evagentic-flow/issues/28) prepara
+  sólo las vistas: no hay juez, ni rúbricas aprobadas, ni evaluaciones reales, y
+  el contrato del directorio de fixtures es un contrato de lectura mínimo que no
+  fija el del juez futuro (#23). No se prueba una avería real del directorio de
+  fixtures porque no es una fuente productiva: el error de lectura se comprueba
+  con archivos sintéticos rotos en `test/webapp.test.mjs` y en la UI pura.

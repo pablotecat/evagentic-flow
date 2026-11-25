@@ -240,3 +240,131 @@ test('UI pura: una ejecución exitosa no muestra aviso de parciales, muestra la 
   assert.equal(await page.locator('#deliverables [data-session-error="ses_child"]').count(), 1);
   assert.ok(!panel.includes('Aprobado'));
 });
+
+test('UI pura: rúbricas y evaluaciones muestran vacío, error, versiones y varios resultados', async t => {
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(new URL('../webapp/public/index.html', import.meta.url).href);
+  await page.addScriptTag({ content: await readFile(new URL('../webapp/public/app.js', import.meta.url), 'utf8') });
+  await page.evaluate(() => {
+    const execution = { id: 'synthetic-id-333333', sessionID: 'ses_root', status: 'succeeded', dispatch: 'admitted' };
+    state.selected = execution.id;
+    state.detail = { execution, interactions: { pending: [], resolved: [] },
+      capture: { readable: true, captureIDs: [], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root'] }, gaps: [], omissions: [] } };
+    state.evaluation = null;
+    state.rubrics = null;
+    renderExecution();
+  });
+  assert.ok(await page.locator('#evaluation').innerText().then(text =>
+    text.includes('Consultando si existen resultados de evaluación')));
+  assert.ok(await page.locator('#rubrics').innerText().then(text =>
+    text.includes('Consultando las rúbricas conocidas')));
+
+  await page.evaluate(() => {
+    state.evaluation = { source: 'none', state: 'ready', evaluations: [] };
+    state.rubrics = { source: 'none', state: 'ready', rubrics: [] };
+    renderExecution();
+  });
+  const emptyEvaluation = await page.locator('#evaluation').innerText();
+  assert.ok(emptyEvaluation.includes('Evaluación: sin evaluación.'));
+  assert.ok(emptyEvaluation.includes('no equivale a una aceptación'));
+  assert.ok(emptyEvaluation.includes('no hay juez implementado'));
+  const emptyRubrics = await page.locator('#rubrics').innerText();
+  assert.ok(emptyRubrics.includes('Rúbricas: sin rúbricas versionadas.'));
+  assert.ok(emptyRubrics.includes('no es una rúbrica aprobada'));
+
+  await page.evaluate(() => {
+    state.evaluation = { source: 'synthetic-fixtures', state: 'read-error',
+      reason: 'synthetic read failure', evaluations: null };
+    state.rubrics = { source: 'synthetic-fixtures', state: 'read-error',
+      reason: 'synthetic read failure', rubrics: null };
+    renderExecution();
+  });
+  const errorEvaluation = await page.locator('#evaluation').innerText();
+  assert.ok(errorEvaluation.includes('no están consultables (synthetic read failure)'));
+  assert.ok(errorEvaluation.includes('no se muestran puntuaciones ni aceptación inventadas'));
+  assert.ok(await page.locator('#rubrics').innerText().then(text =>
+    text.includes('Las rúbricas no están consultables (synthetic read failure)')));
+
+  await page.evaluate(() => {
+    state.evaluation = { source: 'synthetic-fixtures', state: 'ready', evaluations: [
+      { evaluationID: 'eval-a', executionID: 'synthetic-id-333333', captureID: 'cap-a',
+        captureReference: 'captura sintética', reevaluationOf: null, evaluatedAt: 1764000001000,
+        rubric: { rubricID: 'rubrica-sintetica', version: '2026-10-31', status: 'approved',
+          versionAvailable: true },
+        versions: { component: 'componente@1', case: 'caso@1', rubric: '2026-10-31',
+          evaluator: 'evaluador@1' },
+        criteria: [
+          { id: 'cobertura', title: 'Cobertura del encargo', weight: 2, mandatory: false,
+            status: 'evaluated', score: 0.5, reason: null,
+            evidence: ['cap-a · fila 3 (session.text.ended)'] },
+          { id: 'fidelidad', title: 'Fidelidad a las decisiones', weight: 1, mandatory: true,
+            status: 'not-evaluable', score: null, reason: 'sin evidencia suficiente', evidence: [] },
+        ],
+        score: { value: 0.5, basis: 'criterios-evaluados' },
+        coverage: { evaluatedWeight: 2, applicableWeight: 3 },
+        acceptance: 'pending' },
+      { evaluationID: 'eval-b', executionID: 'synthetic-id-333333', captureID: 'cap-a',
+        captureReference: 'captura sintética', reevaluationOf: 'eval-a', evaluatedAt: null,
+        rubric: { rubricID: 'rubrica-sintetica', version: '2027-01-01', status: null,
+          versionAvailable: false },
+        versions: { component: null, case: null, rubric: '2027-01-01', evaluator: null },
+        criteria: [], score: null, coverage: null, acceptance: null },
+    ] };
+    state.rubrics = { source: 'synthetic-fixtures', state: 'ready', rubrics: [
+      { rubricID: 'rubrica-sintetica', title: 'Rúbrica sintética', versions: [
+        { version: '2026-10-31', status: 'approved', observedAt: 1764000000000,
+          criteria: [{ id: 'cobertura', title: 'Cobertura del encargo', weight: 2, mandatory: false }],
+          content: 'Contenido sintético de la versión aprobada.' },
+        { version: '2026-11-12', status: 'draft', observedAt: 1764300000000,
+          criteria: [], content: 'Contenido sintético del borrador.' },
+      ] },
+      { rubricID: 'rubrica-desconocida', title: 'Rúbrica sin versión', versions: [
+        { version: null, status: 'unknown', observedAt: null,
+          criteria: [], content: null },
+      ] },
+    ] };
+    renderExecution();
+  });
+  const evaluationPanel = await page.locator('#evaluation').innerText();
+  assert.ok(evaluationPanel.includes('Evaluación eval-a'));
+  assert.ok(evaluationPanel.includes('Reevaluación de eval-a'));
+  for (let index = 0; index < await page.locator('#evaluation details > summary').count(); index++) {
+    await page.locator('#evaluation details > summary').nth(index).click();
+  }
+  const evaluationFull = await page.locator('#evaluation').innerText();
+  assert.ok(evaluationFull.includes('conservan su identidad y sus resultados por separado'));
+  assert.ok(evaluationFull.includes('una reevaluación no es otra ejecución del flujo'));
+  assert.ok(evaluationFull.includes('Aceptación: pendiente'));
+  assert.ok(evaluationFull.includes('Puntuación sobre los criterios evaluados: 0.5'));
+  assert.ok(evaluationFull.includes('Cobertura de evaluación: 2 de 3'));
+  assert.ok(evaluationFull.includes('no evaluable: sin evidencia suficiente'));
+  assert.ok(evaluationFull.includes('cap-a · fila 3 (session.text.ended)'));
+  assert.ok(evaluationFull.includes('versión aprobada explícitamente identificada'));
+  assert.ok(evaluationFull.includes('Puntuación: desconocida'));
+  assert.ok(evaluationFull.includes('no se transforma en cero'));
+  assert.ok(evaluationFull.includes('Aceptación: no declarada'));
+  assert.ok(evaluationFull.includes('estado de versión desconocido'));
+  assert.ok(evaluationFull.includes('el contenido de esa versión no está disponible'));
+  assert.ok(evaluationFull.includes('componente@1'));
+  assert.ok(evaluationFull.includes('Versión de evaluador: desconocida'));
+  assert.ok(!evaluationFull.includes('Aceptación: aceptada'), 'an unknown acceptance was shown as accepted');
+  const rubricsPanel = await page.locator('#rubrics').innerText();
+  assert.ok(rubricsPanel.includes('Rúbrica rubrica-sintetica'));
+  await page.locator('#rubrics details[data-rubric="rubrica-sintetica"] > summary').click();
+  await page.locator('#rubrics details[data-rubric="rubrica-desconocida"] > summary').click();
+  const rubricsFull = await page.locator('#rubrics').innerText();
+  assert.ok(rubricsFull.includes('Versión 2026-10-31 · versión aprobada explícitamente'));
+  assert.ok(rubricsFull.includes('Versión 2026-11-12 · borrador: no es una versión aprobada'));
+  assert.ok(rubricsFull.includes('Versión no identificada'));
+  assert.ok(rubricsFull.includes('no se presenta como aprobada'));
+  assert.ok(rubricsFull.includes('Contenido de la versión no disponible.'));
+  assert.ok(rubricsFull.includes('Criterio cobertura — Cobertura del encargo (peso 2; no obligatorio)'));
+  await page.locator('#rubrics details[data-rubric="rubrica-sintetica"] [data-version="2026-10-31"] details > summary').click();
+  const contents = await page.locator('#rubrics details[data-rubric="rubrica-sintetica"] [data-version="2026-10-31"] details pre').allInnerTexts();
+  assert.deepEqual(contents, ['Contenido sintético de la versión aprobada.']);
+  const buttonNames = await page.locator('#evaluation button, #rubrics button').allInnerTexts();
+  assert.deepEqual(buttonNames, [], 'evaluation or rubric views offered editing actions');
+});

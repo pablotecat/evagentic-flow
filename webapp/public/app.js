@@ -58,6 +58,18 @@ const DELIVERABLE_ACQUISITION_LABELS = {
   'not-acquired': 'no adquirido',
 };
 
+const RUBRIC_STATUS_LABELS = {
+  approved: 'versión aprobada explícitamente identificada',
+  draft: 'borrador: no es una versión aprobada',
+  unknown: 'no se presenta como aprobada',
+};
+
+const ACCEPTANCE_LABELS = {
+  accepted: 'aceptada',
+  rejected: 'rechazada',
+  pending: 'pendiente',
+};
+
 const state = {
   health: null,
   connected: null,
@@ -82,6 +94,8 @@ const state = {
   trace: null,
   selectedSession: null,
   deliverables: null,
+  evaluation: null,
+  rubrics: null,
 };
 
 const statusLine = document.querySelector('#status');
@@ -466,6 +480,8 @@ async function submitDraft(event) {
     state.trace = null;
     state.selectedSession = null;
     state.deliverables = null;
+    state.evaluation = null;
+    state.rubrics = null;
     state.draft = '';
     state.agent = '';
     state.model = '';
@@ -552,6 +568,25 @@ async function refreshDeliverables() {
   catch { body = { readable: false, reason: 'deliverables-unavailable' }; }
   if (state.selected !== executionID || state.selectedSession !== sessionID) return;
   state.deliverables = body;
+  renderConversation();
+}
+
+async function refreshEvaluation() {
+  const executionID = state.selected;
+  if (executionID === null) return;
+  let body;
+  try { body = await api(`/api/executions/${executionID}/evaluations`); }
+  catch { body = { source: null, state: 'read-error', reason: 'evaluations-unavailable' }; }
+  if (state.selected !== executionID) return;
+  state.evaluation = body;
+  renderConversation();
+}
+
+async function refreshRubrics() {
+  let body;
+  try { body = await api('/api/rubrics'); }
+  catch { body = { source: null, state: 'read-error', reason: 'rubrics-unavailable' }; }
+  state.rubrics = body;
   renderConversation();
 }
 
@@ -875,6 +910,124 @@ function renderDeliverables(execution) {
   ]);
 }
 
+function renderEvaluationCriterion(criterion) {
+  const qualifier = `peso ${criterion.weight ?? 'desconocido'}; ${criterion.mandatory ? 'obligatorio' : 'no obligatorio'}`;
+  const title = `Criterio ${criterion.id ?? 'desconocido'} — ${criterion.title ?? 'título no disponible'} (${qualifier})`;
+  const result = criterion.status === 'not-evaluable'
+    ? `no evaluable: ${criterion.reason ?? 'motivo no declarado'}`
+    : criterion.status === 'evaluated' && criterion.score !== null && criterion.score !== undefined
+      ? `puntuación ${criterion.score}`
+      : 'resultado desconocido: no se interpreta como cero';
+  return el('li', { 'data-criterion': criterion.id ?? '' },
+    el('p', {}, `${title} · ${result}`),
+    criterion.evidence.length ? el('p', { class: 'notice' },
+      `Evidencia: ${criterion.evidence.join(' | ')}`) : null);
+}
+
+function renderEvaluationVersions(versions) {
+  const rows = [['componente', versions?.component], ['caso', versions?.case],
+    ['rúbrica', versions?.rubric], ['evaluador', versions?.evaluator]];
+  return el('ul', {}, ...rows.map(([name, value]) => el('li', {},
+    `Versión de ${name}: ${value ?? 'desconocida'}`)));
+}
+
+function renderEvaluationItem(item) {
+  const rubric = item.rubric ?? {};
+  const status = RUBRIC_STATUS_LABELS[rubric.status] ?? 'estado de versión desconocido: no se presenta como aprobada';
+  const reference = `Rúbrica aplicada: ${rubric.rubricID ?? 'desconocida'} · Versión ${rubric.version ?? 'desconocida'}`
+    + ` · ${status}`;
+  const details = [
+    el('p', {}, `Evaluada: ${formatMs(item.evaluatedAt)} · Captura: ${item.captureID ?? 'referencia no declarada'}`
+      + ` (${item.captureReference ?? 'detalle no disponible'})`),
+    el('p', {}, `Aceptación: ${ACCEPTANCE_LABELS[item.acceptance]
+      ?? 'no declarada: desconocida; no se interpreta como aceptación'}`),
+    el('p', {}, item.score
+      ? `Puntuación sobre los criterios evaluados: ${item.score.value}`
+        + ` (${item.score.basis ?? 'base desconocida'})`
+      : 'Puntuación: desconocida; no se transforma en cero'),
+    el('p', {}, item.coverage
+      ? `Cobertura de evaluación: ${item.coverage.evaluatedWeight ?? 'desconocido'}`
+        + ` de ${item.coverage.applicableWeight ?? 'desconocido'} de peso de criterios aplicables`
+      : 'Cobertura de evaluación: desconocida'),
+    el('p', {}, reference),
+    rubric.versionAvailable === false ? el('p', { class: 'notice' },
+      'Referencia exacta conservada desde la evaluación; el contenido de esa versión no está disponible en la vista de rúbricas.') : null,
+    renderEvaluationVersions(item.versions),
+    item.criteria.length ? el('ul', {}, ...item.criteria.map(renderEvaluationCriterion))
+      : el('p', { class: 'notice' }, 'Sin criterios declarados en este resultado.'),
+    item.reevaluationOf ? el('p', { class: 'notice' },
+      `Es una reevaluación de ${item.reevaluationOf} sobre la misma captura: conserva sus propios resultados y no es otra ejecución del flujo.`) : null,
+  ];
+  const summary = `Evaluación ${item.evaluationID ?? 'de identidad desconocida'}`
+    + `${item.reevaluationOf ? ` · Reevaluación de ${item.reevaluationOf}` : ''}`;
+  return el('details', { 'data-evaluation': item.evaluationID ?? '' }, el('summary', {}, summary), ...details);
+}
+
+function renderEvaluation(execution) {
+  const wrap = children => [el('section', { id: 'evaluation', 'aria-label': 'Evaluación' },
+    el('h3', {}, 'Evaluación'), ...children)];
+  const body = state.evaluation;
+  if (!execution) return [];
+  if (!body) return wrap([
+    el('p', { class: 'notice' }, 'Consultando si existen resultados de evaluación de esta captura…')]);
+  if (body.state === 'read-error') return wrap([
+    el('p', { role: 'alert', class: 'error' },
+      `Los resultados de evaluación no están consultables (${body.reason ?? 'desconocido'}); no se muestran puntuaciones ni aceptación inventadas.`)]);
+  const evaluations = body.evaluations ?? [];
+  if (!evaluations.length) return wrap([
+    el('p', {}, 'Evaluación: sin evaluación.'),
+    el('p', { class: 'notice' },
+      'No existe ningún resultado de evaluación para esta ejecución. Un desenlace técnico correcto no equivale a una aceptación: no hay juez implementado en esta entrega y no se generan puntuaciones, versiones ni aceptaciones de ejemplo.')]);
+  return wrap([
+    el('p', { class: 'notice' },
+      'Resultados de sólo lectura, separados de la traza y de los diagnósticos técnicos. Cada evaluación conserva la versión exacta de rúbrica que aplicó y sus resultados por criterio.'),
+    el('ul', {}, ...evaluations.map(renderEvaluationItem)),
+    el('p', { class: 'notice' },
+      'Varias evaluaciones de la misma captura conservan su identidad y sus resultados por separado; una reevaluación no es otra ejecución del flujo y no sobrescribe a la anterior. No existen acciones de evaluar, reevaluar o editar rúbricas en esta entrega.')]);
+}
+
+function renderRubricVersion(version) {
+  const status = RUBRIC_STATUS_LABELS[version.status]
+    ?? 'estado desconocido de la versión: no se presenta como aprobada';
+  const heading = `Versión ${version.version ?? 'no identificada'} · ${status}`;
+  return el('section', { 'data-version': version.version ?? '' },
+    el('h5', {}, heading),
+    el('p', {}, `Observada: ${formatMs(version.observedAt)}`),
+    version.criteria.length ? el('ul', {}, ...version.criteria.map(criterion => el('li', {},
+      `Criterio ${criterion.id ?? 'desconocido'} — ${criterion.title ?? 'título no disponible'}`
+      + ` (peso ${criterion.weight ?? 'desconocido'}; ${criterion.mandatory ? 'obligatorio' : 'no obligatorio'})`)))
+      : el('p', { class: 'notice' }, 'Sin criterios declarados en esta versión.'),
+    version.content !== null && version.content !== undefined
+      ? el('details', {}, el('summary', {}, 'Contenido de la versión'), el('pre', {}, version.content))
+      : el('p', { class: 'notice' }, 'Contenido de la versión no disponible.'));
+}
+
+function renderRubrics() {
+  const wrap = children => [el('section', { id: 'rubrics', 'aria-label': 'Rúbricas' },
+    el('h3', {}, 'Rúbricas'), ...children)];
+  const body = state.rubrics;
+  if (!body) return wrap([
+    el('p', { class: 'notice' }, 'Consultando las rúbricas conocidas…')]);
+  if (body.state === 'read-error') return wrap([
+    el('p', { role: 'alert', class: 'error' },
+      `Las rúbricas no están consultables (${body.reason ?? 'desconocido'}); no se generan versiones de ejemplo.`)]);
+  const rubrics = body.rubrics ?? [];
+  if (!rubrics.length) return wrap([
+    el('p', {}, 'Rúbricas: sin rúbricas versionadas.'),
+    el('p', { class: 'notice' },
+      'No existe ninguna rúbrica versionada. La revisión, el versionado de las rúbricas y el agente juez son trabajos posteriores a esta entrega: el borrador del documento de rúbrica inicial no es una rúbrica aprobada y esta vista no lo usa como dato.')]);
+  const approved = rubrics.some(rubric => rubric.versions.some(version => version.status === 'approved'));
+  return wrap([
+    el('p', { class: 'notice' },
+      'Vista de sólo lectura de contenido y versiones históricas de las rúbricas. Las evaluaciones referencian la versión exacta que aplicaron; una versión borrador o desconocida no se presenta como versión aprobada.'),
+    approved ? null : el('p', { class: 'notice' },
+      'Ninguna rúbrica tiene una versión aprobada explícitamente identificada.'),
+    ...rubrics.map(rubric => el('details', { 'data-rubric': rubric.rubricID },
+      el('summary', {}, `Rúbrica ${rubric.rubricID}`),
+      el('p', {}, `Título: ${rubric.title ?? 'no disponible'}`),
+      ...rubric.versions.map(renderRubricVersion)))]);
+}
+
 function traceSection() {
   const detail = state.detail;
   const execution = detail?.execution;
@@ -928,6 +1081,8 @@ function renderExecution() {
     el('p', { class: 'dispatch' }, DISPATCH_LABELS[execution.dispatch] ?? DISPATCH_LABELS.unconfirmed),
     renderMessages(),
     ...renderDeliverables(execution),
+    ...renderEvaluation(execution),
+    ...renderRubrics(),
     ...renderInteractions(),
     ...renderStop(execution),
     ...traceSection(),
@@ -1010,10 +1165,14 @@ function renderHistory() {
       state.trace = null;
       state.selectedSession = null;
       state.deliverables = null;
+      state.evaluation = null;
+      state.rubrics = null;
       renderConversation();
       refreshDetail();
       refreshTrace();
       refreshDeliverables();
+      refreshEvaluation();
+      refreshRubrics();
     });
     historyList.append(el('li', {}, button));
   }
@@ -1030,6 +1189,8 @@ document.querySelector('#new-chat').addEventListener('click', () => {
   state.trace = null;
   state.selectedSession = null;
   state.deliverables = null;
+  state.evaluation = null;
+  state.rubrics = null;
   state.draft = '';
   state.agent = '';
   state.model = '';
@@ -1068,7 +1229,8 @@ async function tick() {
     await refreshExecutions();
     if (state.options === null && !state.optionsLoading) await refreshOptions();
   } else {
-    await Promise.allSettled([refreshDetail(), refreshTrace(), refreshDeliverables()]);
+    await Promise.allSettled([refreshDetail(), refreshTrace(), refreshDeliverables(),
+      refreshEvaluation(), refreshRubrics()]);
     renderConversation();
   }
 }

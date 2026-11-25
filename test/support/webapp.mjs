@@ -13,7 +13,8 @@ export async function launchWebapp(t, instance, options = {}) {
     dataDirectory: join(instance.root, 'webapp-data'),
     ...options.appConfig,
   }, null, 2));
-  const app = await startApp({ configPath, port: options.appPort });
+  const app = await startApp({ configPath, port: options.appPort,
+    evaluationFixtures: options.evaluationFixtures });
   t.after(() => app.close());
   return { app, configPath };
 }

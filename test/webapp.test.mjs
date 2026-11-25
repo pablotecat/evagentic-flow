@@ -1250,3 +1250,173 @@ test('un adjunto de entrada posterior conserva snapshot con finalidad nula sin a
     }
     assert.equal((await appFetch(app, `/api/executions/${executionId}/trace?session=`)).status, 400);
   });
+
+const syntheticRubricFixtureRows = () => ([
+  { rubricID: 'refinamiento-historias', version: '2026-10-31', status: 'approved',
+    title: 'Rúbrica sintética de refinamiento',
+    criteria: [
+      { id: 'cobertura', title: 'Cobertura del encargo', weight: 2, mandatory: false },
+      { id: 'verificabilidad', title: 'Criterios de aceptación verificables', weight: 1, mandatory: false },
+      { id: 'fidelidad', title: 'Fidelidad a las decisiones', weight: 1, mandatory: true },
+    ],
+    content: 'Contenido sintético de la versión aprobada de la rúbrica.',
+    observedAt: 1764000000000 },
+  { rubricID: 'refinamiento-historias', version: '2026-11-12', status: 'draft',
+    title: 'Rúbrica sintética de refinamiento',
+    criteria: [
+      { id: 'cobertura', title: 'Cobertura del encargo', weight: 2, mandatory: false },
+    ],
+    content: 'Contenido sintético del borrador posterior.',
+    observedAt: 1764300000000 },
+  { rubricID: 'generacion-codigo', version: null,
+    title: 'Rúbrica sintética sin versión identificada',
+    criteria: [{ id: 'contratos', title: 'Preservación de contratos', weight: 1, mandatory: false }],
+    content: null, observedAt: null },
+]);
+
+const syntheticEvaluationFixtureRows = executionID => ([
+  { evaluationID: 'eval-sintetica-1', executionID, captureID: 'cap-sintetica',
+    captureReference: 'captura sintética de la sesión raíz de la ejecución',
+    reevaluationOf: null, evaluatedAt: 1764000001000,
+    rubric: { rubricID: 'refinamiento-historias', version: '2026-10-31' },
+    versions: { component: 'depurador-historias@1', case: 'caso-refinamiento@1',
+      rubric: '2026-10-31', evaluator: 'juez-sintetico@1' },
+    criteria: [
+      { id: 'cobertura', status: 'evaluated', score: 0.9, weight: 2, mandatory: false,
+        evidence: ['cap-sintetica · fila 3 (session.text.ended)'] },
+      { id: 'verificabilidad', status: 'evaluated', score: 0.5, weight: 1, mandatory: false,
+        evidence: ['cap-sintetica · fila 4 (session.text.ended)'] },
+      { id: 'fidelidad', status: 'not-evaluable',
+        reason: 'sin evidencia suficiente de la decisión aprobada', weight: 1, mandatory: true },
+    ],
+    score: { value: 0.77, basis: 'criterios-evaluados' },
+    coverage: { evaluatedWeight: 3, applicableWeight: 4 },
+    acceptance: 'pending' },
+  { evaluationID: 'eval-sintetica-2', executionID, captureID: 'cap-sintetica',
+    captureReference: 'captura sintética de la sesión raíz de la ejecución',
+    reevaluationOf: 'eval-sintetica-1', evaluatedAt: 1764300001000,
+    rubric: { rubricID: 'refinamiento-historias', version: '2026-11-12' },
+    versions: { component: 'depurador-historias@1', case: 'caso-refinamiento@1',
+      rubric: '2026-11-12', evaluator: null },
+    criteria: [
+      { id: 'cobertura', status: 'evaluated', score: 0.95, weight: 2, mandatory: false,
+        evidence: ['cap-sintetica · fila 5 (session.text.ended)'] },
+    ],
+    score: { value: 0.95, basis: 'criterios-evaluados' },
+    coverage: { evaluatedWeight: 1, applicableWeight: 1 },
+    acceptance: null },
+  { evaluationID: 'eval-sintetica-3', executionID, captureID: 'cap-sintetica',
+    captureReference: 'captura sintética de la sesión raíz de la ejecución',
+    reevaluationOf: 'eval-sintetica-1', evaluatedAt: 1764600001000,
+    rubric: { rubricID: 'refinamiento-historias', version: '2026-12-01' },
+    versions: { component: null, case: null, rubric: '2026-12-01', evaluator: null },
+    criteria: [], score: null, coverage: null, acceptance: null },
+]);
+
+test('las vistas de rúbricas y evaluaciones muestran ausencia real sin fuente de datos', { timeout: 300000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const { app } = await launchWebapp(t, instance);
+  const created = await createExecution(app, 'rLEN-ausencia', 'Encargo sintético del corte de evaluaciones.');
+  assert.equal(created.status, 201);
+  const executionId = created.body.execution.id;
+  await eventually(async () => (await executionDetail(app, executionId))
+    .body.execution.status === 'succeeded', 'execution did not succeed', 240000);
+  const evaluations = await appFetch(app, `/api/executions/${executionId}/evaluations`);
+  assert.equal(evaluations.status, 200);
+  assert.equal(evaluations.body.source, 'none');
+  assert.deepEqual(evaluations.body.evaluations, []);
+  const rubrics = await appFetch(app, '/api/rubrics');
+  assert.equal(rubrics.status, 200);
+  assert.equal(rubrics.body.source, 'none');
+  assert.deepEqual(rubrics.body.rubrics, []);
+  assert.equal((await appFetch(app, '/api/executions/sin-existir/evaluations')).status, 404);
+  const configPath = join(instance.root, 'webapp.local.json');
+  await writeFile(join(instance.root, 'config-prohibida.json'), JSON.stringify({
+    version: 1, opencodeURL: instance.url(), opencodePassword: 'synthetic-instance-password',
+    projectDirectory: instance.projects[0], captureDirectory: instance.captureDirectory,
+    dataDirectory: join(instance.root, 'webapp-data-prohibida'),
+    evaluationFixtures: join(instance.root, 'cualquier-directorio'),
+  }));
+  await assert.rejects(startApp({ configPath: join(instance.root, 'config-prohibida.json') }),
+    /unknown keys/);
+});
+
+test('las rúbricas y evaluaciones leen fixtures sintéticos de sólo lectura sin mezclar ejecuciones', { timeout: 300000 }, async t => {
+  const instance = await fixture(t, { simulation: true });
+  const fixturesDirectory = join(instance.root, 'evaluation-fixtures');
+  const { app } = await launchWebapp(t, instance, { evaluationFixtures: fixturesDirectory });
+  const created = await createExecution(app, 'rLEN-fixtures', 'Encargo sintético del corte de evaluaciones.');
+  const executionId = created.body.execution.id;
+  await eventually(async () => (await executionDetail(app, executionId))
+    .body.execution.status === 'succeeded', 'execution did not succeed', 240000);
+  const writeFixtures = async (rubrics, evaluations) => {
+    await mkdir(fixturesDirectory, { recursive: true });
+    await writeFile(join(fixturesDirectory, 'rubrics.jsonl'),
+      rubrics.map(row => `${JSON.stringify(row)}\n`).join(''));
+    await writeFile(join(fixturesDirectory, 'evaluations.jsonl'),
+      evaluations.map(row => `${JSON.stringify(row)}\n`).join(''));
+  };
+  await writeFixtures(syntheticRubricFixtureRows(), syntheticEvaluationFixtureRows(executionId));
+
+  const rubrics = (await appFetch(app, '/api/rubrics')).body;
+  assert.equal(rubrics.source, 'synthetic-fixtures');
+  assert.equal(rubrics.state, 'ready');
+  const refinement = rubrics.rubrics.find(rubric => rubric.rubricID === 'refinamiento-historias');
+  assert.ok(refinement);
+  assert.deepEqual(refinement.versions.map(version => [version.version, version.status]),
+    [['2026-10-31', 'approved'], ['2026-11-12', 'draft']]);
+  assert.equal(refinement.versions[0].content, 'Contenido sintético de la versión aprobada de la rúbrica.');
+  assert.deepEqual(refinement.versions[0].criteria.map(criterion => criterion.id),
+    ['cobertura', 'verificabilidad', 'fidelidad']);
+  const unidentified = rubrics.rubrics.find(rubric => rubric.rubricID === 'generacion-codigo');
+  assert.equal(unidentified.versions[0].version, null);
+  assert.equal(unidentified.versions[0].content, null);
+
+  const evaluations = (await appFetch(app, `/api/executions/${executionId}/evaluations`)).body;
+  assert.equal(evaluations.source, 'synthetic-fixtures');
+  assert.equal(evaluations.state, 'ready');
+  assert.deepEqual(evaluations.evaluations.map(evaluation => evaluation.evaluationID),
+    ['eval-sintetica-1', 'eval-sintetica-2', 'eval-sintetica-3']);
+  const [first, second, third] = evaluations.evaluations;
+  assert.equal(first.rubric.rubricID, 'refinamiento-historias');
+  assert.equal(first.rubric.version, '2026-10-31');
+  assert.equal(first.rubric.status, 'approved');
+  assert.equal(first.rubric.versionAvailable, true);
+  assert.equal(first.versions.evaluator, 'juez-sintetico@1');
+  assert.equal(first.acceptance, 'pending');
+  assert.equal(first.score.value, 0.77);
+  assert.equal(first.coverage.evaluatedWeight, 3);
+  const notEvaluable = first.criteria.find(criterion => criterion.id === 'fidelidad');
+  assert.equal(notEvaluable.status, 'not-evaluable');
+  assert.equal(notEvaluable.reason, 'sin evidencia suficiente de la decisión aprobada');
+  assert.equal(notEvaluable.score, null);
+  const covered = first.criteria.find(criterion => criterion.id === 'cobertura');
+  assert.equal(covered.score, 0.9);
+  assert.deepEqual(covered.evidence, ['cap-sintetica · fila 3 (session.text.ended)']);
+  assert.equal(second.reevaluationOf, 'eval-sintetica-1');
+  assert.equal(second.rubric.status, 'draft');
+  assert.equal(second.acceptance, null);
+  assert.equal(second.versions.evaluator, null);
+  assert.equal(third.rubric.version, '2026-12-01');
+  assert.equal(third.rubric.status, null);
+  assert.equal(third.rubric.versionAvailable, false);
+  assert.equal(third.score, null);
+  assert.equal(third.coverage, null);
+  assert.equal(third.versions.component, null);
+
+  const secondExecution = await createExecution(app, 'rLEN-otra', 'Encargo sintético de otra ejecución.');
+  const isolated = (await appFetch(app, `/api/executions/${secondExecution.body.execution.id}/evaluations`)).body;
+  assert.deepEqual(isolated.evaluations, []);
+
+  await writeFile(join(fixturesDirectory, 'evaluations.jsonl'), '{"evaluationID": roto\n');
+  const broken = (await appFetch(app, `/api/executions/${executionId}/evaluations`)).body;
+  assert.equal(broken.state, 'read-error');
+  assert.equal(broken.evaluations, null);
+  assert.ok(broken.reason.includes('no válida') || broken.reason.includes('is not valid JSON') || broken.reason.length > 0);
+  const stillReadable = (await appFetch(app, '/api/rubrics')).body;
+  assert.equal(stillReadable.state, 'ready');
+  await writeFile(join(fixturesDirectory, 'rubrics.jsonl'), '{"rubricID": roto\n');
+  const brokenRubrics = (await appFetch(app, '/api/rubrics')).body;
+  assert.equal(brokenRubrics.state, 'read-error');
+  assert.equal(brokenRubrics.rubrics, null);
+});

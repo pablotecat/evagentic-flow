@@ -1036,3 +1036,186 @@ test('el navegador consulta entregables de raíz y subejecuciones y preserva los
     assert.equal(await hashCapture(instance.captureDirectory), digestBefore,
       'browsing deliverables altered captured evidence');
   });
+
+test('las vistas de rúbricas y evaluaciones muestran ausencia real sin despachar agentes evaluadores',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true });
+    const { app } = await launchWebapp(t, instance);
+    const browser = await chromium.launch();
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(app.url);
+    await upload(page, 'Encargo sintético del corte de evaluaciones.');
+    await awaitStatus(page, 'Finalizada técnicamente', 300000);
+
+    const evaluation = await page.locator('#evaluation').innerText();
+    assert.ok(evaluation.includes('Evaluación: sin evaluación.'),
+      'a succeeded execution with no results showed something else than an explicit absence');
+    assert.ok(evaluation.includes('no equivale a una aceptación'));
+    assert.ok(evaluation.includes('no hay juez implementado'));
+    const rubrics = await page.locator('#rubrics').innerText();
+    assert.ok(rubrics.includes('Rúbricas: sin rúbricas versionadas.'));
+    assert.ok(rubrics.includes('no es una rúbrica aprobada'));
+    assert.equal(await page.locator('#evaluation button, #rubrics button').count(), 0,
+      'the absent views offered evaluation or editing actions');
+
+    const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+    const sessionsBefore = (await instance.api(
+      `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data.length;
+    const admissionsBefore = await admittedCount(instance);
+    const digestBefore = await hashCapture(instance.captureDirectory);
+
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
+    await page.locator(`#history button[data-id="${executionId}"]`).click();
+    await page.waitForFunction(() => document.querySelector('#evaluation')?.textContent
+      ?.includes('Evaluación: sin evaluación.') ?? false, undefined, { timeout: 60000 });
+    await page.waitForFunction(() => document.querySelector('#rubrics')?.textContent
+      ?.includes('Rúbricas: sin rúbricas versionadas.') ?? false, undefined, { timeout: 60000 });
+    await page.waitForTimeout(3500);
+
+    assert.equal(await admittedCount(instance), admissionsBefore,
+      'opening the evaluation views dispatched an evaluator admission');
+    assert.equal((await instance.api(
+      `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data.length,
+    sessionsBefore, 'opening the evaluation views dispatched an evaluator session');
+    assert.equal(await hashCapture(instance.captureDirectory), digestBefore,
+      'opening the evaluation views altered captured evidence');
+  });
+
+const syntheticRubricRows = [
+  { rubricID: 'refinamiento-historias', version: '2026-10-31', status: 'approved',
+    title: 'Rúbrica sintética de refinamiento',
+    criteria: [
+      { id: 'cobertura', title: 'Cobertura del encargo', weight: 2, mandatory: false },
+      { id: 'fidelidad', title: 'Fidelidad a las decisiones', weight: 1, mandatory: true },
+    ],
+    content: 'Contenido sintético de la versión aprobada de la rúbrica.',
+    observedAt: 1764000000000 },
+  { rubricID: 'refinamiento-historias', version: '2026-11-12', status: 'draft',
+    title: 'Rúbrica sintética de refinamiento',
+    criteria: [{ id: 'cobertura', title: 'Cobertura del encargo', weight: 2, mandatory: false }],
+    content: 'Contenido sintético del borrador posterior.',
+    observedAt: 1764300000000 },
+];
+
+const syntheticEvaluationRows = (executionID, captureID) => ([
+  { evaluationID: 'eval-sintetica-1', executionID, captureID,
+    captureReference: 'captura sintética de la sesión raíz de la ejecución',
+    reevaluationOf: null, evaluatedAt: 1764000001000,
+    rubric: { rubricID: 'refinamiento-historias', version: '2026-10-31' },
+    versions: { component: 'depurador-historias@1', case: 'caso-refinamiento@1',
+      rubric: '2026-10-31', evaluator: 'juez-sintetico@1' },
+    criteria: [
+      { id: 'cobertura', status: 'evaluated', score: 0.9, weight: 2, mandatory: false,
+        evidence: ['captura · fila 3 (session.text.ended)'] },
+      { id: 'fidelidad', status: 'not-evaluable',
+        reason: 'sin evidencia suficiente de la decisión aprobada', weight: 1, mandatory: true },
+    ],
+    score: { value: 0.9, basis: 'criterios-evaluados' },
+    coverage: { evaluatedWeight: 2, applicableWeight: 3 },
+    acceptance: 'pending' },
+  { evaluationID: 'eval-sintetica-2', executionID, captureID,
+    captureReference: 'captura sintética de la sesión raíz de la ejecución',
+    reevaluationOf: 'eval-sintetica-1', evaluatedAt: 1764300001000,
+    rubric: { rubricID: 'refinamiento-historias', version: '2026-11-12' },
+    versions: { component: 'depurador-historias@1', case: 'caso-refinamiento@1',
+      rubric: '2026-11-12', evaluator: null },
+    criteria: [
+      { id: 'cobertura', status: 'evaluated', score: 0.95, weight: 2, mandatory: false,
+        evidence: ['captura · fila 5 (session.text.ended)'] },
+    ],
+    score: { value: 0.95, basis: 'criterios-evaluados' },
+    coverage: { evaluatedWeight: 1, applicableWeight: 1 },
+    acceptance: null },
+  { evaluationID: 'eval-sintetica-3', executionID, captureID,
+    captureReference: 'captura sintética de la sesión raíz de la ejecución',
+    reevaluationOf: 'eval-sintetica-1', evaluatedAt: 1764600001000,
+    rubric: { rubricID: 'refinamiento-historias', version: '2026-12-01' },
+    versions: { component: null, case: null, rubric: '2026-12-01', evaluator: null },
+    criteria: [], score: null, coverage: null, acceptance: null },
+]);
+
+test('las vistas con fixtures sintéticos muestran contenido, versiones y varios resultados sin despachar agentes',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true });
+    const fixturesDirectory = join(instance.root, 'evaluation-fixtures');
+    const { app } = await launchWebapp(t, instance, { evaluationFixtures: fixturesDirectory });
+    const browser = await chromium.launch();
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(app.url);
+    await upload(page, 'Encargo sintético del corte de evaluaciones.');
+    await awaitStatus(page, 'Finalizada técnicamente', 300000);
+    const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+    const detail = (await appFetch(app, `/api/executions/${executionId}`)).body;
+    const captureID = detail.capture.captureIDs[0];
+    await mkdir(fixturesDirectory, { recursive: true });
+    await writeFile(join(fixturesDirectory, 'rubrics.jsonl'),
+      syntheticRubricRows.map(row => `${JSON.stringify(row)}\n`).join(''));
+    await writeFile(join(fixturesDirectory, 'evaluations.jsonl'),
+      syntheticEvaluationRows(executionId, captureID).map(row => `${JSON.stringify(row)}\n`).join(''));
+
+    const evaluationsPanel = () => page.locator('#evaluation').innerText();
+    await page.waitForFunction(() => document.querySelectorAll('#evaluation details').length >= 3,
+      undefined, { timeout: 60000 });
+    let evaluationText = await evaluationsPanel();
+    assert.ok(evaluationText.includes('Evaluación eval-sintetica-1'));
+    assert.ok(evaluationText.includes('Reevaluación de eval-sintetica-1'));
+    for (let index = 0; index < await page.locator('#evaluation details > summary').count(); index++) {
+      await page.locator('#evaluation details > summary').nth(index).click();
+    }
+    evaluationText = await evaluationsPanel();
+    assert.ok(evaluationText.includes('Aceptación: pendiente'));
+    assert.ok(evaluationText.includes('Puntuación sobre los criterios evaluados: 0.9'));
+    assert.ok(evaluationText.includes('Cobertura de evaluación: 2 de 3'));
+    assert.ok(evaluationText.includes('no evaluable: sin evidencia suficiente de la decisión aprobada'));
+    assert.ok(evaluationText.includes('Evidencia: captura · fila 3 (session.text.ended)'));
+    assert.ok(evaluationText.includes('versión aprobada explícitamente identificada'));
+    assert.ok(evaluationText.includes('Versión de componente: depurador-historias@1'));
+    assert.ok(evaluationText.includes('Versión de evaluador: juez-sintetico@1'));
+    assert.ok(evaluationText.includes('Versión de evaluador: desconocida'));
+    assert.ok(evaluationText.includes('Puntuación: desconocida; no se transforma en cero'));
+    assert.ok(evaluationText.includes('Aceptación: no declarada'));
+    assert.ok(evaluationText.includes('estado de versión desconocido'));
+    assert.ok(evaluationText.includes('el contenido de esa versión no está disponible'));
+    assert.ok(evaluationText.includes('una reevaluación no es otra ejecución del flujo'));
+    assert.ok(!evaluationText.includes('Aceptación: aceptada'), 'a fixture result was shown as accepted');
+    assert.ok(!evaluationText.includes('Aceptación: rechazada'), 'an undeclared acceptance was invented');
+
+    const rubricsPanel = () => page.locator('#rubrics').innerText();
+    await page.waitForFunction(() => document.querySelector('#rubrics')?.textContent
+      ?.includes('Rúbrica refinamiento-historias') ?? false, undefined, { timeout: 60000 });
+    await page.locator('#rubrics details > summary').first().click();
+    const rubricsText = await rubricsPanel();
+    assert.ok(rubricsText.includes('Rúbrica refinamiento-historias'));
+    assert.ok(rubricsText.includes('Versión 2026-10-31 · versión aprobada explícitamente identificada'));
+    assert.ok(rubricsText.includes('Versión 2026-11-12 · borrador: no es una versión aprobada'));
+    assert.ok(!rubricsText.includes('Versión 2026-11-12 · versión aprobada'),
+      'a draft rubric version was presented as approved');
+    await page.locator('#rubrics [data-version="2026-10-31"] details > summary').click();
+    const contents = await page.locator('#rubrics [data-version="2026-10-31"] pre').allInnerTexts();
+    assert.deepEqual(contents, ['Contenido sintético de la versión aprobada de la rúbrica.']);
+
+    assert.equal(await page.locator('#evaluation button, #rubrics button').count(), 0,
+      'the fixture views offered evaluation or editing actions');
+    const sessionsBefore = (await instance.api(
+      `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data.length;
+    const admissionsBefore = await admittedCount(instance);
+    const digestBefore = await hashCapture(instance.captureDirectory);
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
+    await page.locator(`#history button[data-id="${executionId}"]`).click();
+    await page.waitForFunction(() => document.querySelectorAll('#evaluation details').length >= 3,
+      undefined, { timeout: 60000 });
+    await page.waitForTimeout(3500);
+    assert.equal(await admittedCount(instance), admissionsBefore,
+      'opening the fixture evaluation views dispatched an evaluator admission');
+    assert.equal((await instance.api(
+      `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data.length,
+    sessionsBefore, 'opening the fixture evaluation views dispatched an evaluator session');
+    assert.equal(await hashCapture(instance.captureDirectory), digestBefore,
+      'browsing the fixture evaluation views altered captured evidence');
+  });
