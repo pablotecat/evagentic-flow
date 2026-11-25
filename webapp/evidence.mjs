@@ -3,8 +3,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const reader = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'inspect.mjs');
-const ENTRY = 'session.inbox.enqueued';
-const RESPONSE = 'session.text.ended';
+const INBOX_ENQUEUED = 'session.inbox.enqueued';
+const TEXT_ENDED = 'session.text.ended';
 const EXECUTION_PREFIX = 'session.execution.';
 const cache = new Map();
 const pendingReads = new Map();
@@ -12,6 +12,9 @@ const TTL = 700;
 const READER_TIMEOUT = 20000;
 const READER_MAX_OUTPUT = 64 * 1024 * 1024;
 const READER_MAX_ERRORS = 4096;
+const READER_CONCURRENCY = 4;
+let activeReaders = 0;
+const waitingReaders = [];
 
 export function latestLifecycle(rows) {
   const events = rows.filter(row => row.type?.startsWith(EXECUTION_PREFIX));
@@ -20,7 +23,7 @@ export function latestLifecycle(rows) {
   return events.reduce((latest, row) => row.sourceSequence > latest.sourceSequence ? row : latest).lifecycle?.phase;
 }
 
-const runReader = (captureDirectory, args) => new Promise(resolve => {
+const spawnReader = (captureDirectory, args) => new Promise(resolve => {
   const child = spawn(process.execPath, [reader, captureDirectory, ...args]);
   let output = '';
   let errors = '';
@@ -56,6 +59,17 @@ const runReader = (captureDirectory, args) => new Promise(resolve => {
     finish({ ok: true, rows });
   });
 });
+
+const runReader = async (captureDirectory, args) => {
+  if (activeReaders >= READER_CONCURRENCY) await new Promise(resolve => waitingReaders.push(resolve));
+  else activeReaders++;
+  try { return await spawnReader(captureDirectory, args); }
+  finally {
+    const next = waitingReaders.shift();
+    if (next) next();
+    else activeReaders--;
+  }
+};
 
 const runCached = async (captureDirectory, args) => {
   const key = JSON.stringify([captureDirectory, ...args]);
@@ -129,10 +143,10 @@ export async function readSession(captureDirectory, sessionID) {
   return {
     ok: true,
     rows: read.rows,
-    admission: rows.find(row => row.type === ENTRY && row.messageID),
-    entries: rows.filter(row => row.type === ENTRY && row.content?.role === 'user')
+    admission: rows.find(row => row.type === INBOX_ENQUEUED && row.messageID),
+    entries: rows.filter(row => row.type === INBOX_ENQUEUED && row.content?.role === 'user')
       .map(row => ({ text: row.content.text })),
-    responses: rows.filter(row => row.type === RESPONSE && row.content?.role === 'assistant')
+    responses: rows.filter(row => row.type === TEXT_ENDED && row.content?.role === 'assistant')
       .map(row => ({ text: row.content.text })),
     captureIDs: [...new Set(scoped.map(row => row.captureID).filter(Boolean))],
     recorderFailed: read.rows.some(row => row.type === 'recorder.failed'),
@@ -210,14 +224,22 @@ const traceDiagnostics = (metrics, tools, coverage) => {
   };
 };
 
-export async function readTrace(captureDirectory, rootSessionID, requestedSessionID = null) {
-  const selectedSessionID = requestedSessionID || rootSessionID;
-  if (selectedSessionID.startsWith('--')) return { ok: false, notInExecution: true };
+const resolveSelection = async (captureDirectory, rootSessionID, requestedSessionID) => {
+  if (requestedSessionID !== null && (typeof requestedSessionID !== 'string' || !requestedSessionID
+    || requestedSessionID.startsWith('--'))) return { ok: false, notInExecution: true };
+  const selectedSessionID = requestedSessionID ?? rootSessionID;
   const session = await readSession(captureDirectory, rootSessionID);
   if (!session.ok) return { ok: false, reason: session.reason };
   if (selectedSessionID !== rootSessionID && !session.scope.sessionIDs.includes(selectedSessionID)) {
     return { ok: false, notInExecution: true };
   }
+  return { ok: true, selectedSessionID, session };
+};
+
+export async function readTrace(captureDirectory, rootSessionID, requestedSessionID = null) {
+  const selection = await resolveSelection(captureDirectory, rootSessionID, requestedSessionID);
+  if (!selection.ok) return selection;
+  const { selectedSessionID } = selection;
   const reads = await Promise.all(TRACE_MODES.map(mode => readMode(captureDirectory, selectedSessionID, mode)));
   for (const read of reads) {
     if (!read.ok) return { ok: false, reason: read.reason };
@@ -238,19 +260,12 @@ export async function readTrace(captureDirectory, rootSessionID, requestedSessio
 }
 
 export async function readDeliverables(captureDirectory, rootSessionID, requestedSessionID = null) {
-  const selectedSessionID = requestedSessionID || rootSessionID;
-  if (selectedSessionID.startsWith('--')) return { ok: false, notInExecution: true };
-  const session = await readSession(captureDirectory, rootSessionID);
-  if (!session.ok) return { ok: false, reason: session.reason };
-  if (selectedSessionID !== rootSessionID && !session.scope.sessionIDs.includes(selectedSessionID)) {
-    return { ok: false, notInExecution: true };
-  }
-  const targetSessions = requestedSessionID ? [selectedSessionID] : session.scope.sessionIDs;
+  const selection = await resolveSelection(captureDirectory, rootSessionID, requestedSessionID);
+  if (!selection.ok) return selection;
+  const { selectedSessionID, session } = selection;
+  const targetSessions = requestedSessionID === null ? session.scope.sessionIDs : [selectedSessionID];
   const reads = await Promise.all(targetSessions
     .map(sessionID => readMode(captureDirectory, sessionID, '--deliverables')));
-  for (const read of reads) {
-    if (!read.ok) return { ok: false, reason: read.reason };
-  }
   const reference = row => ({ captureID: row.captureID, arrival: row.arrival, observedAt: row.observedAt });
   const texts = (sessionID, type, role) => session.rows
     .filter(row => row.type === type && row.sessionID === sessionID && row.content?.role === role)
@@ -258,9 +273,10 @@ export async function readDeliverables(captureDirectory, rootSessionID, requeste
   const sessions = targetSessions.map((sessionID, index) => ({
     sessionID,
     isRoot: sessionID === rootSessionID,
-    entries: texts(sessionID, ENTRY, 'user'),
-    responses: texts(sessionID, RESPONSE, 'assistant'),
-    deliverables: reads[index].rows.map(row => ({
+    entries: texts(sessionID, INBOX_ENQUEUED, 'user'),
+    responses: texts(sessionID, TEXT_ENDED, 'assistant'),
+    ...reads[index].ok ? { readable: true } : { readable: false, reason: reads[index].reason },
+    deliverables: (reads[index].ok ? reads[index].rows : []).map(row => ({
       source: row.source,
       identity: row.identity ?? null,
       status: row.status,
@@ -281,7 +297,7 @@ export async function readDeliverables(captureDirectory, rootSessionID, requeste
     readable: true,
     selectedSessionID,
     query: {
-      mode: requestedSessionID ? 'selected-session' : 'known-sessions-explicit',
+      mode: requestedSessionID !== null ? 'selected-session' : 'known-sessions-explicit',
       sessions: targetSessions,
     },
     sessions,

@@ -799,12 +799,13 @@ function renderTraceCoverage(trace) {
       horizons));
 }
 
-function renderDeliverableItem(group, item) {
+function renderDeliverableSnapshot(group, item) {
   const value = item.value;
   const rows = [
     el('p', {}, `Ruta: ${value?.path ?? 'no expuesta o no admitida'}`),
     el('p', {}, `Papel: ${value ? DELIVERABLE_ROLE_LABELS[value.role] ?? value.role : 'desconocido'}`
       + ` (procedencia del papel: ${value?.roleSource ?? 'desconocida'})`),
+    el('p', {}, `Finalidad declarada por la evidencia: ${value?.finality ?? 'desconocida (no declarada)'}`),
     el('p', {}, `Adquisición: ${DELIVERABLE_ACQUISITION_LABELS[value?.acquisition] ?? value?.acquisition ?? 'desconocida'}`),
     el('p', { class: 'notice' }, `Fuente: ${item.source ?? 'desconocida'} · mensaje ${item.messageID ?? 'desconocido'}`
       + ` · llamada ${value?.callID ?? 'no expuesta'} · evidencia: ${evidenceText(item.evidence)}`),
@@ -847,18 +848,20 @@ function renderDeliverables(execution) {
       `Los entregables no están consultables (${body.reason ?? 'desconocido'}); no se reconstruye contenido no capturado.`)]);
   const groups = body.sessions.map(group => el('li', { 'data-session': group.sessionID },
     el('h4', {}, sessionLabel(execution, group.sessionID)),
+    ...group.readable === false ? [el('p', { class: 'notice', 'data-session-error': group.sessionID },
+      `Lectura de esta sesión fallida (${group.reason ?? 'desconocido'}); resultado parcial: no se reconstruye contenido no capturado.`)] : [],
     el('p', { class: 'notice' }, `Respuestas autorizadas: ${group.responses.length
       ? group.responses.map(response => response.text).join(' | ') : 'ninguna observada en la captura'}`),
     el('p', {}, `Snapshots conservados: ${group.deliverables.length}`),
-    ...group.deliverables.length
-      ? [el('ul', {}, ...group.deliverables.map(item => renderDeliverableItem(group, item)))]
+    ...group.readable === false ? [] : group.deliverables.length
+      ? [el('ul', {}, ...group.deliverables.map(item => renderDeliverableSnapshot(group, item)))]
       : [el('p', { class: 'notice' },
         'Sin entregables capturados para esta sesión; la ausencia no acredita que no existieran archivos en el proyecto.')]));
   return wrap([
     el('p', { class: 'notice' },
       'Se consulta la versión conservada en la captura, no el archivo actual: cambiar o eliminar el original no altera lo mostrado. La app no recorre el proyecto ni abre sus archivos.'),
     el('p', { class: 'notice' },
-      'Cada snapshot conserva contenido filtrado, procedencia, momento y hash de la proyección conservada. La finalidad global no está acreditada: un papel de salida en una herramienta no acredita que este contenido sea el resultado final del flujo.'),
+      'Cada snapshot conserva contenido filtrado, procedencia, momento y hash de la proyección conservada. La finalidad de cada snapshot es la declarada por la evidencia (desconocida si es nula) y no acredita una finalidad global. La finalidad global no está acreditada: un papel de salida en una herramienta no acredita que este contenido sea el resultado final del flujo.'),
     body.query?.mode === 'selected-session'
       ? el('p', { class: 'notice' },
         `Consulta de una sola sesión (${body.selectedSessionID}): no incluye los entregables de sus descendientes.`)

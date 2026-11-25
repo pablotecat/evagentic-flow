@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import { execFile, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { eventually, fixture, records } from './support/instance.mjs';
 import { appFetch, createExecution, executionDetail, launchExecution, launchWebapp, replyInteraction } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
@@ -1214,4 +1214,39 @@ test('los entregables consultan snapshots por sesión del árbol acreditado sin 
       'result.txt', 'Synthetic produced result.']) {
       assert.ok(!storedIndex.includes(excluded), `the app index persisted deliverable content: ${excluded}`);
     }
+  });
+
+test('una ejecucion exitosa conserva snapshots sin acreditar finalidad y la consulta valida ?session=',
+  { timeout: 300000 }, async t => {
+    const instance = await fixture(t, { simulation: true, config: { secrets: ['synthetic-deliverable-secret'] } });
+    const directory = instance.projects[0];
+    const input = join(directory, 'input.txt');
+    await writeFile(input, 'Synthetic attached input. synthetic-deliverable-secret');
+    const { app } = await launchWebapp(t, instance);
+    const created = await createExecution(app, 'entregables-exito', 'Encargo corto sin herramientas.');
+    assert.equal(created.status, 201);
+    const executionId = created.body.execution.id;
+    const completed = await eventually(async () => {
+      const body = (await executionDetail(app, executionId)).body;
+      return body.execution.sessionID && body.execution.status === 'succeeded' ? body : undefined;
+    }, 'the execution did not succeed', 240000);
+    const root = completed.execution.sessionID;
+    await instance.api(`/api/session/${root}/prompt`, {
+      text: 'Synthetic attached input', files: [{ uri: pathToFileURL(input).href }], resume: false });
+    const body = await eventually(async () => {
+      const read = (await deliverablesOf(app, executionId)).body;
+      return read?.readable && read.sessions?.[0]?.deliverables.length ? read : undefined;
+    }, 'the attached snapshot was not exposed', 120000);
+    assert.equal((await executionDetail(app, executionId)).body.execution.status, 'succeeded');
+    const [snapshot] = body.sessions[0].deliverables;
+    assert.equal(snapshot.value.role, 'input');
+    assert.equal(snapshot.value.finality, null);
+    assert.equal(snapshot.value.content, 'Synthetic attached input. [REDACTED]');
+    assert.equal(body.sessions[0].readable, true);
+    assert.ok(!JSON.stringify(body).includes('synthetic-deliverable-secret'));
+    for (const query of ['?session=', '?session=--tree', `?session=${'x'.repeat(201)}`]) {
+      const response = await appFetch(app, `/api/executions/${executionId}/deliverables${query}`);
+      assert.equal(response.status, query === '?session=--tree' ? 404 : 400, query);
+    }
+    assert.equal((await appFetch(app, `/api/executions/${executionId}/trace?session=`)).status, 400);
   });

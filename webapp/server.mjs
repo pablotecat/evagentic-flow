@@ -555,29 +555,19 @@ export async function startApp({ configPath, port: requestedPort }) {
           : { pending: [], resolved: [], readErrors: evidence ? [{ error: 'evidence-unavailable' }] : [] },
       });
     }
-    const trace = url.pathname.match(/^\/api\/executions\/([^/]+)\/trace$/);
-    if (trace && request.method === 'GET') {
-      const execution = store.byId(trace[1]);
+    const evidenceRoute = url.pathname.match(/^\/api\/executions\/([^/]+)\/(trace|deliverables)$/);
+    if (evidenceRoute && request.method === 'GET') {
+      const execution = store.byId(evidenceRoute[1]);
       if (!execution) return json(response, 404, { error: 'unknown-execution' });
+      const requested = url.searchParams.has('session') ? url.searchParams.get('session') : null;
+      if (requested !== null && (requested.length < 1 || requested.length > 200)) {
+        return json(response, 400, { error: 'invalid-session' });
+      }
       const unreadable = reason => json(response, 200, { executionID: execution.id,
         ...execution.sessionID ? { rootSessionID: execution.sessionID } : {}, readable: false, reason });
       if (!execution.sessionID) return unreadable('session-not-confirmed');
-      const read = await readTrace(config.captureDirectory, execution.sessionID,
-        url.searchParams.get('session'));
-      if (read.notInExecution) return json(response, 404, { error: 'session-not-in-execution' });
-      if (!read.ok) return unreadable(read.reason);
-      return json(response, 200, { executionID: execution.id,
-        rootSessionID: execution.sessionID, ...read });
-    }
-    const deliverables = url.pathname.match(/^\/api\/executions\/([^/]+)\/deliverables$/);
-    if (deliverables && request.method === 'GET') {
-      const execution = store.byId(deliverables[1]);
-      if (!execution) return json(response, 404, { error: 'unknown-execution' });
-      const unreadable = reason => json(response, 200, { executionID: execution.id,
-        ...execution.sessionID ? { rootSessionID: execution.sessionID } : {}, readable: false, reason });
-      if (!execution.sessionID) return unreadable('session-not-confirmed');
-      const read = await readDeliverables(config.captureDirectory, execution.sessionID,
-        url.searchParams.get('session'));
+      const reader = evidenceRoute[2] === 'trace' ? readTrace : readDeliverables;
+      const read = await reader(config.captureDirectory, execution.sessionID, requested);
       if (read.notInExecution) return json(response, 404, { error: 'session-not-in-execution' });
       if (!read.ok) return unreadable(read.reason);
       return json(response, 200, { executionID: execution.id,

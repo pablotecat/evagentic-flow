@@ -351,3 +351,22 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   64 MiB, emite una línea no JSON o falla con una captura inválida, la traza
   queda `readable: false` con el motivo, sin ignorar líneas ni bloquear las
   peticiones siguientes.
+
+- El corte [#32](https://github.com/pablotecat/evagentic-flow/issues/32) corrige
+  tras su revisión la lectura de entregables: un fallo del lector en una sesión
+  ya no invalida las demás; cada sesión expone `readable` y, si falla, su
+  `reason` con `deliverables: []`, y la vista lo marca como resultado parcial.
+  Los procesos hijos del lector se acotan a 4 simultáneos (además del plazo de
+  20 s y el límite de 64 MiB, que rigen también esta ruta). `?session=` vacío,
+  de más de 200 caracteres o que empieza por `--` se rechaza (400 o 404
+  `session-not-in-execution`); nunca cae a la vista de conjunto. La vista
+  muestra `value.finality` tal como lo declara la evidencia (`null` se
+  muestra como desconocida) sin acreditar una finalidad global.
+- Límite de la verificación de `succeeded`: con OpenCode 2.1.2 y el adaptador
+  openai-compatible, cualquier herramienta que devuelva una parte `file` hace
+  fallar la ejecución, así que no es posible obtener con la instancia real un
+  entregable de salida de herramienta en una ejecución `succeeded`. La prueba
+  real usa un adjunto de entrada añadido con `resume: false` a la sesión de una
+  ejecución ya exitosa (rol `input`, `finality: null`); la ausencia del aviso de
+  resultados parciales y la finalidad declarada se verifican en la UI pura.
+  La detención (`interrupted`) se comprueba en la UI pura, no con instancia real.

@@ -203,3 +203,40 @@ test('UI pura: los entregables distinguen adquisición, ausencia y finalidad des
   assert.ok(panel.includes('no incluye los entregables de sus descendientes'));
   assert.ok(panel.includes('Resultados parciales de una ejecución fallida o interrumpida'));
 });
+
+test('UI pura: una ejecución exitosa no muestra aviso de parciales, muestra la finalidad declarada y marca la sesión ilegible', async t => {
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(new URL('../webapp/public/index.html', import.meta.url).href);
+  await page.addScriptTag({ content: await readFile(new URL('../webapp/public/app.js', import.meta.url), 'utf8') });
+  await page.evaluate(() => {
+    const execution = { id: 'synthetic-id-222222', sessionID: 'ses_root', status: 'succeeded', dispatch: 'admitted' };
+    state.detail = { execution, interactions: { pending: [], resolved: [] },
+      capture: { readable: true, captureIDs: [], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root', 'ses_child'] }, gaps: [], omissions: [] } };
+    const value = finality => ({ path: 'a.txt', content: 'x', acquisition: 'runtime-content', role: 'input',
+      roleSource: 'public-file-boundary', sourceTimeBasis: 'runtime-event-created', finality, callID: null, sourceTime: 1 });
+    const item = finality => ({ source: 'opencode.session.inbox.files', status: 'captured', value: value(finality),
+      sha256: 'a'.repeat(64), hashBasis: 'redacted-json-utf8', observationTime: 1, sessionID: 'ses_root',
+      messageID: 'msg_a', omissions: [], redactions: [], evidence: { captureID: 'c', arrival: 1, observedAt: 1 } });
+    state.deliverables = { readable: true, selectedSessionID: 'ses_root',
+      query: { mode: 'known-sessions-explicit', sessions: ['ses_root', 'ses_child'] },
+      sessions: [
+        { sessionID: 'ses_root', isRoot: true, entries: [], responses: [], readable: true,
+          deliverables: [item(null), item('final')] },
+        { sessionID: 'ses_child', isRoot: false, entries: [], responses: [], readable: false,
+          reason: 'reader-timeout', deliverables: [] },
+      ], scope: { kind: 'observed-session-tree', rootSessionID: 'ses_root', sessionIDs: ['ses_root', 'ses_child'] },
+      horizon: null };
+    renderExecution();
+  });
+  const panel = await page.locator('#deliverables').innerText();
+  assert.ok(!panel.includes('Resultados parciales de una ejecución fallida o interrumpida'));
+  assert.ok(panel.includes('Finalidad declarada por la evidencia: desconocida (no declarada)'));
+  assert.ok(panel.includes('Finalidad declarada por la evidencia: final'));
+  assert.ok(panel.includes('La finalidad global no está acreditada'));
+  assert.ok(panel.includes('Lectura de esta sesión fallida (reader-timeout)'));
+  assert.equal(await page.locator('#deliverables [data-session-error="ses_child"]').count(), 1);
+  assert.ok(!panel.includes('Aprobado'));
+});

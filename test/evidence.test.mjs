@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readSession, readTrace } from '../webapp/evidence.mjs';
+import { readSession, readTrace, readDeliverables } from '../webapp/evidence.mjs';
 
 const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
   ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : tmpdir());
@@ -82,4 +82,34 @@ test('un diario invï¿½lido produce un fallo explï¿½cito y no bloquea lectu
   assert.match(first.reason, /Invalid or incomplete capture: broken\.jsonl, line 1/);
   assert.equal((await readSession(directory, 'ses_root')).ok, false);
   assert.deepEqual(await readTrace(directory, 'ses_root', '--tree'), { ok: false, notInExecution: true });
+});
+
+test('un fallo del lector en una sesion deja las demas consultables con su estado de error explicito', async () => {
+  const directory = await mkdtemp(join(temporary, 'webapp-evidence-partial-'));
+  const captureID = randomUUID();
+  await writeFile(join(directory, 'synthetic.jsonl'), [
+    event(captureID, 1, 'ses_root', 1000, { childSessionID: '--unreadable' }),
+    event(captureID, 2, '--unreadable', 2000, { parentSessionID: 'ses_root' }),
+    event(captureID, 3, 'ses_child', 3000, { parentSessionID: 'ses_root' }),
+  ].map(row => JSON.stringify(row)).join('\n') + '\n');
+  const read = await readDeliverables(directory, 'ses_root');
+  assert.equal(read.ok, true, read.reason);
+  assert.equal(read.query.mode, 'known-sessions-explicit');
+  const bySession = new Map(read.sessions.map(group => [group.sessionID, group]));
+  assert.equal(bySession.get('--unreadable').readable, false);
+  assert.ok(bySession.get('--unreadable').reason);
+  assert.deepEqual(bySession.get('--unreadable').deliverables, []);
+  assert.equal(bySession.get('ses_root').readable, true);
+  assert.equal(bySession.get('ses_child').readable, true);
+});
+
+test('readDeliverables rechaza valores raros de sesion sin caer a la vista de conjunto', async () => {
+  const directory = await mkdtemp(join(temporary, 'webapp-evidence-values-'));
+  await writeFile(join(directory, 'synthetic.jsonl'), JSON.stringify(event(randomUUID(), 1, 'ses_root', 1000)) + '\n');
+  for (const value of ['--x', '--deliverables', '', 5, {}, 'ses_foreign']) {
+    assert.deepEqual(await readDeliverables(directory, 'ses_root', value), { ok: false, notInExecution: true }, String(value));
+    assert.deepEqual(await readTrace(directory, 'ses_root', value), { ok: false, notInExecution: true }, String(value));
+  }
+  assert.equal((await readDeliverables(directory, 'ses_root', null)).query.mode, 'known-sessions-explicit');
+  assert.equal((await readDeliverables(directory, 'ses_root', 'ses_root')).query.mode, 'selected-session');
 });
