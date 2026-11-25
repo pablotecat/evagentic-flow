@@ -741,7 +741,7 @@ test('el navegador explora el árbol, la línea temporal y el diagnóstico de un
     const treeText = await page.locator('[aria-label="Árbol de subejecuciones"]').innerText();
     assert.ok(treeText.includes(`Sesión raíz ${root}`));
     assert.ok((treeText.match(/Subejecución/g) ?? []).length >= 3, 'the nested branches were not shown');
-    assert.ok(treeText.includes('por llamada observada call_synthetic_delegate_0'));
+    assert.match(treeText, /hija por \d+ llamada\(s\) observada\(s\): \S+ · call_synthetic_delegate_0 ·/);
     assert.ok(treeText.includes('agente: synthetic-branch'));
     const domSessions = await page.$$eval('#trace .tree-node button',
       buttons => buttons.map(button => button.dataset.session));
@@ -777,7 +777,8 @@ test('el navegador explora el árbol, la línea temporal y el diagnóstico de un
     assert.ok(toolsText.includes('Evidencia:'));
     assert.ok(!toolsText.includes('synthetic-secret-42'), 'tool details leaked a secret');
 
-    await page.locator('#trace .tree-node button').nth(1).click();
+    await page.locator('#trace .tree-node', { hasText: `${root} · call_synthetic_delegate_0` })
+      .locator('button').click();
     await page.waitForFunction(() => document.querySelectorAll('#trace .tree-node').length === 2
       && document.querySelector('#trace')?.textContent?.includes('(raíz de la vista)'),
     undefined, { timeout: 120000 });
@@ -1156,6 +1157,9 @@ test('las vistas con fixtures sintéticos muestran contenido, versiones y varios
       syntheticRubricRows.map(row => `${JSON.stringify(row)}\n`).join(''));
     await writeFile(join(fixturesDirectory, 'evaluations.jsonl'),
       syntheticEvaluationRows(executionId, captureID).map(row => `${JSON.stringify(row)}\n`).join(''));
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
     await page.locator(`#history button[data-id="${executionId}"]`).click();
 
     const evaluationsPanel = () => page.locator('#evaluation').innerText();
