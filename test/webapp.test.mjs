@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { eventually, fixture, records } from './support/instance.mjs';
 import { appFetch, createExecution, executionDetail, launchExecution, launchWebapp, replyInteraction } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
+import { createEvaluationReader } from '../webapp/evaluation.mjs';
 
 test('el cleanup cierra la app incluso si una aserción falla antes del cierre explícito', async () => {
   const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
@@ -1339,6 +1340,53 @@ test('las vistas de rúbricas y evaluaciones muestran ausencia real sin fuente d
   }));
   await assert.rejects(startApp({ configPath: join(instance.root, 'config-prohibida.json') }),
     /unknown keys/);
+});
+
+test('el lector de evaluaciones señala anomalías, reevaluaciones dudosas, errores de lectura y tamaño excesivo', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'evaluation-reader-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const write = (file, rows) => writeFile(join(directory, file), rows.map(row => `${JSON.stringify(row)}\n`).join(''));
+  const criterion = (id, weight, status, mandatory = false) => ({ id, weight, status, mandatory, score: status === 'evaluated' ? 1 : null });
+  await write('rubrics.jsonl', [
+    { rubricID: 'r', version: '1', status: 'approved' },
+    { rubricID: 'r', version: '1', status: 'draft' },
+    { version: '9', status: 'approved' },
+  ]);
+  await write('evaluations.jsonl', [
+    { evaluationID: 'a', executionID: 'x', captureID: 'c1', rubric: { rubricID: 'r', version: '1' },
+      criteria: [criterion('k', 2, 'evaluated'), criterion('m', 1, 'not-evaluable', true)],
+      coverage: { evaluatedWeight: 2, applicableWeight: 3 }, acceptance: 'accepted' },
+    { evaluationID: 'b', executionID: 'x', captureID: 'c2', reevaluationOf: 'a', rubric: { rubricID: 'r', version: '2' },
+      criteria: [criterion('k', 2, 'evaluated')], coverage: { evaluatedWeight: 5, applicableWeight: 5 } },
+    { evaluationID: 'c', executionID: 'x', captureID: 'c1', reevaluationOf: 'a', rubric: { rubricID: 'r', version: '2' } },
+    { evaluationID: 'd', executionID: 'x', captureID: 'c1', reevaluationOf: 'inexistente', rubric: { rubricID: 'r', version: '2' } },
+  ]);
+  const reader = createEvaluationReader(directory);
+  const rubrics = await reader.rubrics();
+  assert.equal(rubrics.anomalies.withoutRubricID, 1);
+  assert.deepEqual(rubrics.anomalies.duplicateVersions, [{ rubricID: 'r', version: '1' }]);
+  assert.equal(rubrics.rubrics[0].versions.length, 2);
+  const [a, b, c, d] = (await reader.evaluations('x')).evaluations;
+  assert.equal(a.rubric.versionAmbiguous, true);
+  assert.equal(a.rubric.status, null);
+  assert.equal(a.coverage.evaluatedWeightMatches, true);
+  assert.equal(b.coverage.evaluatedWeightMatches, false);
+  assert.equal(c.coverage, null);
+  assert.equal(b.reevaluation, 'different-capture');
+  assert.equal(c.reevaluation, 'same-capture');
+  assert.equal(d.reevaluation, 'missing-target');
+  assert.equal(a.reevaluation, null);
+  assert.equal(b.rubric.versionAvailable, false);
+
+  await writeFile(join(directory, 'rubrics.jsonl'), '{"rubricID": roto\n');
+  const degraded = (await reader.evaluations('x')).evaluations;
+  assert.equal(degraded[0].rubric.versionAvailable, null);
+  assert.ok(degraded[0].rubric.readError);
+
+  await writeFile(join(directory, 'evaluations.jsonl'), 'x'.repeat(1024 * 1024 + 1));
+  const oversized = await reader.evaluations('x');
+  assert.equal(oversized.state, 'read-error');
+  assert.match(oversized.reason, /size limit/);
 });
 
 test('las rúbricas y evaluaciones leen fixtures sintéticos de sólo lectura sin mezclar ejecuciones', { timeout: 300000 }, async t => {

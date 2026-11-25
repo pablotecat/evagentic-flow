@@ -1156,6 +1156,7 @@ test('las vistas con fixtures sintéticos muestran contenido, versiones y varios
       syntheticRubricRows.map(row => `${JSON.stringify(row)}\n`).join(''));
     await writeFile(join(fixturesDirectory, 'evaluations.jsonl'),
       syntheticEvaluationRows(executionId, captureID).map(row => `${JSON.stringify(row)}\n`).join(''));
+    await page.locator(`#history button[data-id="${executionId}"]`).click();
 
     const evaluationsPanel = () => page.locator('#evaluation').innerText();
     await page.waitForFunction(() => document.querySelectorAll('#evaluation details').length >= 3,

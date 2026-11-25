@@ -227,9 +227,10 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   «sin rúbricas versionadas»), incluso con la ejecución terminada correctamente:
   el desenlace técnico no equivale a aceptación. La fuente de datos alternativa
   es un directorio de fixtures sintéticos (`rubrics.jsonl` y `evaluations.jsonl`,
-  contrato de lectura mínimo que no fija el contrato definitivo del juez #23)
-  configurable sólo como opción en memoria de `startApp` que únicamente las
-  pruebas pasan: no existe clave de configuración local (se rechaza como clave
+  contrato de lectura mínimo y provisional que no fija el contrato definitivo
+  del juez #23: puede cambiar sin migración)
+  configurable sólo como parámetro `evaluationFixtures` de `startApp`, que
+  únicamente las pruebas pasan: no existe clave de configuración local (se rechaza como clave
   desconocida), variable de entorno ni valor por defecto para producción. El
   lector proyecta de forma conservadora: una puntuación o cobertura ausente
   permanece desconocida (nunca cero), una aceptación sólo se declara cuando la
@@ -242,7 +243,19 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   separado de la misma captura, nunca como otra ejecución del flujo. Las vistas,
   separadas de la traza y de los diagnósticos técnicos, no ofrecen acciones de
   editar, evaluar ni reevaluar; los errores de lectura de fixtures son visibles
-  sin sustituirse por resultados.
+  sin sustituirse por resultados. Cada fichero se lee una sola vez por petición,
+  con un tope de 1 MiB (excederlo es un error de lectura visible). Un error de
+  lectura de `rubrics.jsonl` se propaga a cada evaluación afectada como motivo, sin
+  confundirse con una versión ausente; las filas sin `rubricID` y las versiones
+  duplicadas se señalan en la vista en lugar de descartarse. La vista marca la
+  contradicción de una aceptación declarada con un criterio obligatorio no
+  evaluable o sin evidencia como decisión pendiente por falta de evidencia
+  obligatoria ([ADR 0001](0001-evaluacion-por-invocacion.md)); la puntuación sólo
+  se presenta «sobre los criterios evaluados» si los datos declaran esa base, y la
+  coherencia del peso evaluado se comprueba o se indica como no verificada. Una
+  reevaluación sólo se presenta sobre la misma captura si `captureID` coincide, y
+  se avisa si `reevaluationOf` no resuelve. La vista de rúbricas es alcanzable
+  también sin ejecución seleccionada.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
   peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
   páginas externas no puedan despachar trabajo. No usa cookies ni acceso

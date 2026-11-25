@@ -368,3 +368,65 @@ test('UI pura: rúbricas y evaluaciones muestran vacío, error, versiones y vari
   const buttonNames = await page.locator('#evaluation button, #rubrics button').allInnerTexts();
   assert.deepEqual(buttonNames, [], 'evaluation or rubric views offered editing actions');
 });
+
+test('UI pura: contradicción de aceptación, base de puntuación, reevaluación dudosa, anomalías y rúbricas sin ejecución', async t => {
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(new URL('../webapp/public/index.html', import.meta.url).href);
+  await page.addScriptTag({ content: await readFile(new URL('../webapp/public/app.js', import.meta.url), 'utf8') });
+  await page.evaluate(() => {
+    refreshRubrics = async () => {};
+    state.selected = null;
+    state.rubrics = { source: 'synthetic-fixtures', state: 'ready', rubrics: [],
+      anomalies: { withoutRubricID: 2, duplicateVersions: [{ rubricID: 'r-dup', version: '1' }] } };
+    renderConversation();
+  });
+  const composerRubrics = await page.locator('#rubrics').innerText();
+  assert.ok(composerRubrics.includes('2 fila(s) de rúbricas sin identificador'));
+  assert.ok(composerRubrics.includes('Versión duplicada: r-dup'));
+  assert.equal(await page.locator('#rubrics button').count(), 0);
+
+  await page.evaluate(() => {
+    const execution = { id: 'synthetic-id-444444', sessionID: 'ses_root', status: 'succeeded', dispatch: 'admitted' };
+    state.selected = execution.id;
+    state.detail = { execution, interactions: { pending: [], resolved: [] },
+      capture: { readable: true, captureIDs: [], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root'] }, gaps: [], omissions: [] } };
+    const base = { executionID: execution.id, captureID: 'cap-a', captureReference: null, evaluatedAt: null,
+      rubric: { rubricID: 'r', version: '1', status: 'approved', versionAvailable: true,
+        versionAmbiguous: false, readError: null },
+      versions: {}, reevaluationOf: null, reevaluation: null, coverage: null };
+    const mandatory = { id: 'm', title: 'Obligatorio', weight: 1, mandatory: true,
+      status: 'not-evaluable', score: null, reason: 'sin evidencia', evidence: [] };
+    state.evaluation = { source: 'synthetic-fixtures', state: 'ready', evaluations: [
+      { ...base, evaluationID: 'e1', criteria: [mandatory], acceptance: 'accepted',
+        score: { value: 0.9, basis: 'otra-base' },
+        coverage: { evaluatedWeight: 5, applicableWeight: 5, evaluatedWeightMatches: false } },
+      { ...base, evaluationID: 'e2', criteria: [], acceptance: 'accepted', score: { value: 0.4, basis: null },
+        reevaluationOf: 'e1', reevaluation: 'different-capture',
+        coverage: { evaluatedWeight: 1, applicableWeight: 2, evaluatedWeightMatches: null } },
+      { ...base, evaluationID: 'e3', criteria: [], acceptance: null, score: null,
+        reevaluationOf: 'nada', reevaluation: 'missing-target',
+        rubric: { ...base.rubric, versionAvailable: null, readError: 'boom' } },
+    ] };
+    renderExecution();
+  });
+  for (let index = 0; index < await page.locator('#evaluation details > summary').count(); index++) {
+    await page.locator('#evaluation details > summary').nth(index).click();
+  }
+  const first = await page.locator('#evaluation [data-evaluation="e1"]').innerText();
+  assert.ok(first.includes('Decisión pendiente por falta de evidencia obligatoria'));
+  assert.ok(first.includes('Puntuación sin base declarada como criterios evaluados: 0.9'));
+  assert.ok(!first.includes('Puntuación sobre los criterios evaluados'));
+  assert.ok(first.includes('Cobertura incoherente'));
+  const second = await page.locator('#evaluation [data-evaluation="e2"]').innerText();
+  assert.ok(!second.includes('Decisión pendiente'), 'no mandatory criterion is missing evidence');
+  assert.ok(second.includes('la captura no coincide'));
+  assert.ok(!second.includes('sobre la misma captura:'));
+  assert.ok(second.includes('Coherencia de la cobertura no verificada'));
+  const third = await page.locator('#evaluation [data-evaluation="e3"]').innerText();
+  assert.ok(third.includes('que no existe entre las evaluaciones'));
+  assert.ok(third.includes('No se pudo leer la vista de rúbricas (boom)'));
+  assert.ok(!third.includes('no está disponible en la vista de rúbricas'));
+});

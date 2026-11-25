@@ -454,7 +454,7 @@ function renderComposer() {
     if (event.target.id === 'draft') state.draft = event.target.value;
   });
   form.addEventListener('submit', submitDraft);
-  conversationPanel.replaceChildren(el('h2', {}, 'Nuevo encargo'), form);
+  conversationPanel.replaceChildren(el('h2', {}, 'Nuevo encargo'), form, ...renderRubrics());
   const textarea = form.querySelector('#draft');
   textarea.value = state.draft;
 }
@@ -475,13 +475,7 @@ async function submitDraft(event) {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    state.selected = execution.id;
-    state.detail = null;
-    state.trace = null;
-    state.selectedSession = null;
-    state.deliverables = null;
-    state.evaluation = null;
-    state.rubrics = null;
+    resetView(execution.id);
     state.draft = '';
     state.agent = '';
     state.model = '';
@@ -571,6 +565,21 @@ async function refreshDeliverables() {
   renderConversation();
 }
 
+function resetView(selected) {
+  state.selected = selected;
+  state.detail = null;
+  state.error = null;
+  state.interactionError = null;
+  state.interactionAnswers = {};
+  state.stopError = null;
+  state.stopRequest = null;
+  state.trace = null;
+  state.selectedSession = null;
+  state.deliverables = null;
+  state.evaluation = null;
+  refreshRubrics();
+}
+
 async function refreshEvaluation() {
   const executionID = state.selected;
   if (executionID === null) return;
@@ -583,9 +592,11 @@ async function refreshEvaluation() {
 }
 
 async function refreshRubrics() {
+  const selected = state.selected;
   let body;
   try { body = await api('/api/rubrics'); }
   catch { body = { source: null, state: 'read-error', reason: 'rubrics-unavailable' }; }
+  if (state.selected !== selected) return;
   state.rubrics = body;
   renderConversation();
 }
@@ -910,9 +921,13 @@ function renderDeliverables(execution) {
   ]);
 }
 
+function criterionLabel(criterion) {
+  return `Criterio ${criterion.id ?? 'desconocido'} — ${criterion.title ?? 'título no disponible'}`;
+}
+
 function renderEvaluationCriterion(criterion) {
   const qualifier = `peso ${criterion.weight ?? 'desconocido'}; ${criterion.mandatory ? 'obligatorio' : 'no obligatorio'}`;
-  const title = `Criterio ${criterion.id ?? 'desconocido'} — ${criterion.title ?? 'título no disponible'} (${qualifier})`;
+  const title = `${criterionLabel(criterion)} (${qualifier})`;
   const result = criterion.status === 'not-evaluable'
     ? `no evaluable: ${criterion.reason ?? 'motivo no declarado'}`
     : criterion.status === 'evaluated' && criterion.score !== null && criterion.score !== undefined
@@ -931,6 +946,19 @@ function renderEvaluationVersions(versions) {
     `Versión de ${name}: ${value ?? 'desconocida'}`)));
 }
 
+function acceptanceContradiction(item) {
+  return item.acceptance === 'accepted' && item.criteria.some(criterion => criterion.mandatory
+    && (criterion.status !== 'evaluated' || !criterion.evidence.length));
+}
+
+function reevaluationText(item) {
+  const own = 'conserva sus propios resultados y no es otra ejecución del flujo.';
+  if (item.reevaluation === 'same-capture') return `Es una reevaluación de ${item.reevaluationOf} sobre la misma captura: ${own}`;
+  if (item.reevaluation === 'different-capture') return `Declara reevaluar ${item.reevaluationOf}, pero la captura no coincide: no se presenta como reevaluación sobre la misma captura; ${own}`;
+  if (item.reevaluation === 'missing-target') return `Declara reevaluar ${item.reevaluationOf}, que no existe entre las evaluaciones de esta ejecución: referencia no resoluble; ${own}`;
+  return `Declara reevaluar ${item.reevaluationOf}, pero no se puede comprobar que sea la misma captura; ${own}`;
+}
+
 function renderEvaluationItem(item) {
   const rubric = item.rubric ?? {};
   const status = RUBRIC_STATUS_LABELS[rubric.status] ?? 'estado de versión desconocido: no se presenta como aprobada';
@@ -941,22 +969,36 @@ function renderEvaluationItem(item) {
       + ` (${item.captureReference ?? 'detalle no disponible'})`),
     el('p', {}, `Aceptación: ${ACCEPTANCE_LABELS[item.acceptance]
       ?? 'no declarada: desconocida; no se interpreta como aceptación'}`),
+    acceptanceContradiction(item) ? el('p', { role: 'alert', class: 'error', 'data-contradiction': 'acceptance' },
+      'Contradicción: la evaluación declara aceptación, pero un criterio obligatorio no es evaluable o carece de evidencia. Decisión pendiente por falta de evidencia obligatoria: no se presenta como aceptación firme.') : null,
     el('p', {}, item.score
-      ? `Puntuación sobre los criterios evaluados: ${item.score.value}`
-        + ` (${item.score.basis ?? 'base desconocida'})`
+      ? (item.score.basis === 'criterios-evaluados'
+        ? `Puntuación sobre los criterios evaluados: ${item.score.value}`
+        : `Puntuación sin base declarada como criterios evaluados: ${item.score.value}`
+          + ` (base: ${item.score.basis ?? 'no declarada'})`)
       : 'Puntuación: desconocida; no se transforma en cero'),
     el('p', {}, item.coverage
       ? `Cobertura de evaluación: ${item.coverage.evaluatedWeight ?? 'desconocido'}`
         + ` de ${item.coverage.applicableWeight ?? 'desconocido'} de peso de criterios aplicables`
       : 'Cobertura de evaluación: desconocida'),
+    item.coverage ? el('p', { class: item.coverage.evaluatedWeightMatches === false ? 'error' : 'notice' },
+      item.coverage.evaluatedWeightMatches === true
+        ? 'El peso evaluado coincide con la suma de pesos de los criterios evaluados.'
+        : item.coverage.evaluatedWeightMatches === false
+          ? 'Cobertura incoherente: el peso evaluado declarado no coincide con la suma de pesos de los criterios evaluados.'
+          : 'Coherencia de la cobertura no verificada: faltan datos para comprobarla.') : null,
     el('p', {}, reference),
-    rubric.versionAvailable === false ? el('p', { class: 'notice' },
-      'Referencia exacta conservada desde la evaluación; el contenido de esa versión no está disponible en la vista de rúbricas.') : null,
+    rubric.readError ? el('p', { class: 'notice' },
+      `No se pudo leer la vista de rúbricas (${rubric.readError}); la disponibilidad de esta versión es desconocida.`)
+      : rubric.versionAmbiguous ? el('p', { class: 'notice' },
+        'La versión de rúbrica aparece duplicada en la vista de rúbricas: su estado no se resuelve.')
+        : rubric.versionAvailable === false ? el('p', { class: 'notice' },
+          'Referencia exacta conservada desde la evaluación; el contenido de esa versión no está disponible en la vista de rúbricas.') : null,
     renderEvaluationVersions(item.versions),
     item.criteria.length ? el('ul', {}, ...item.criteria.map(renderEvaluationCriterion))
       : el('p', { class: 'notice' }, 'Sin criterios declarados en este resultado.'),
-    item.reevaluationOf ? el('p', { class: 'notice' },
-      `Es una reevaluación de ${item.reevaluationOf} sobre la misma captura: conserva sus propios resultados y no es otra ejecución del flujo.`) : null,
+    item.reevaluationOf ? el('p', { class: item.reevaluation === 'same-capture' ? 'notice' : 'error' },
+      reevaluationText(item)) : null,
   ];
   const summary = `Evaluación ${item.evaluationID ?? 'de identidad desconocida'}`
     + `${item.reevaluationOf ? ` · Reevaluación de ${item.reevaluationOf}` : ''}`;
@@ -994,7 +1036,7 @@ function renderRubricVersion(version) {
     el('h5', {}, heading),
     el('p', {}, `Observada: ${formatMs(version.observedAt)}`),
     version.criteria.length ? el('ul', {}, ...version.criteria.map(criterion => el('li', {},
-      `Criterio ${criterion.id ?? 'desconocido'} — ${criterion.title ?? 'título no disponible'}`
+      criterionLabel(criterion)
       + ` (peso ${criterion.weight ?? 'desconocido'}; ${criterion.mandatory ? 'obligatorio' : 'no obligatorio'})`)))
       : el('p', { class: 'notice' }, 'Sin criterios declarados en esta versión.'),
     version.content !== null && version.content !== undefined
@@ -1012,7 +1054,15 @@ function renderRubrics() {
     el('p', { role: 'alert', class: 'error' },
       `Las rúbricas no están consultables (${body.reason ?? 'desconocido'}); no se generan versiones de ejemplo.`)]);
   const rubrics = body.rubrics ?? [];
+  const anomalies = [
+    body.anomalies?.withoutRubricID ? el('p', { role: 'alert', class: 'error', 'data-anomaly': 'sin-rubricID' },
+      `${body.anomalies.withoutRubricID} fila(s) de rúbricas sin identificador no se muestran como rúbrica.`) : null,
+    ...(body.anomalies?.duplicateVersions ?? []).map(duplicate => el('p',
+      { role: 'alert', class: 'error', 'data-anomaly': 'version-duplicada' },
+      `Versión duplicada: ${duplicate.rubricID} · ${duplicate.version ?? 'no identificada'}; su estado no se resuelve.`)),
+  ];
   if (!rubrics.length) return wrap([
+    ...anomalies,
     el('p', {}, 'Rúbricas: sin rúbricas versionadas.'),
     el('p', { class: 'notice' },
       'No existe ninguna rúbrica versionada. La revisión, el versionado de las rúbricas y el agente juez son trabajos posteriores a esta entrega: el borrador del documento de rúbrica inicial no es una rúbrica aprobada y esta vista no lo usa como dato.')]);
@@ -1022,6 +1072,7 @@ function renderRubrics() {
       'Vista de sólo lectura de contenido y versiones históricas de las rúbricas. Las evaluaciones referencian la versión exacta que aplicaron; una versión borrador o desconocida no se presenta como versión aprobada.'),
     approved ? null : el('p', { class: 'notice' },
       'Ninguna rúbrica tiene una versión aprobada explícitamente identificada.'),
+    ...anomalies,
     ...rubrics.map(rubric => el('details', { 'data-rubric': rubric.rubricID },
       el('summary', {}, `Rúbrica ${rubric.rubricID}`),
       el('p', {}, `Título: ${rubric.title ?? 'no disponible'}`),
@@ -1155,42 +1206,19 @@ function renderHistory() {
     const button = el('button', { type: 'button', 'data-id': execution.id,
       ...(state.selected === execution.id ? { 'aria-current': 'true' } : {}) }, label);
     button.addEventListener('click', () => {
-      state.selected = execution.id;
-      state.detail = null;
-      state.error = null;
-      state.interactionError = null;
-      state.interactionAnswers = {};
-      state.stopError = null;
-      state.stopRequest = null;
-      state.trace = null;
-      state.selectedSession = null;
-      state.deliverables = null;
-      state.evaluation = null;
-      state.rubrics = null;
+      resetView(execution.id);
       renderConversation();
       refreshDetail();
       refreshTrace();
       refreshDeliverables();
       refreshEvaluation();
-      refreshRubrics();
     });
     historyList.append(el('li', {}, button));
   }
 }
 
 document.querySelector('#new-chat').addEventListener('click', () => {
-  state.selected = null;
-  state.detail = null;
-  state.error = null;
-  state.interactionError = null;
-  state.interactionAnswers = {};
-  state.stopError = null;
-  state.stopRequest = null;
-  state.trace = null;
-  state.selectedSession = null;
-  state.deliverables = null;
-  state.evaluation = null;
-  state.rubrics = null;
+  resetView(null);
   state.draft = '';
   state.agent = '';
   state.model = '';
@@ -1225,12 +1253,13 @@ async function refreshExecutions() {
 
 async function tick() {
   await refreshHealth();
+  if (state.rubrics === null || state.rubrics.source === null) await refreshRubrics();
   if (state.selected === null) {
     await refreshExecutions();
     if (state.options === null && !state.optionsLoading) await refreshOptions();
   } else {
     await Promise.allSettled([refreshDetail(), refreshTrace(), refreshDeliverables(),
-      refreshEvaluation(), refreshRubrics()]);
+      refreshEvaluation()]);
     renderConversation();
   }
 }
