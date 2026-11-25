@@ -1,0 +1,434 @@
+# Webapp local con ejecución simple e histórico persistente
+
+Implementa el primer corte vertical de [#24](https://github.com/pablotecat/evagentic-flow/issues/24)
+([#25](https://github.com/pablotecat/evagentic-flow/issues/25)): lanzar un encargo
+simple desde una webapp local real y consultar su respuesta y estado en un
+histórico persistente, sin leer archivos. No sustituye las decisiones de captura
+del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
+
+## Decisiones
+
+- **Stack mínimo sin framework.** Servidor HTTP de la biblioteca estándar de
+  Node y una interfaz de navegador con HTML/CSS/JS estático. No se añade
+  framework, base de datos ni herramienta de diagramas: el ADR 0005 exige la
+  solución mínima. Playwright entra sólo como `devDependency` de prueba, y
+  únicamente para la frontera aprobada de navegador.
+- **App separada, motor reutilizado.** `webapp/` es una app propia que controla
+  una instancia dedicada de OpenCode 2.1.2 mediante su API pública HTTP (crear
+  sesión raíz nueva, enviar el encargo inicial, consultar `/api/info`). No lee
+  su base de datos ni sustituye sus interfaces. La configuración local no
+  versionada (`version: 1`) fija URL loopback del motor, contraseña, proyecto
+  observado, directorio de captura y destino de datos de la app
+  (`examples/webapp.example.json` como plantilla sintética).
+- **El índice no es una vía alternativa de contenido.** El índice persistente
+  de ejecuciones sólo guarda identidad, clave de solicitud, proyecto, sesión
+  raíz, tiempos, despacho y desenlace técnico. El encargo y la respuesta
+  mostrados en el histórico proceden exclusivamente de la captura autorizada y
+  filtrada del registrador, consultada con el lector independiente
+  `scripts/inspect.mjs` reutilizado como proceso hijo. No se importan capturas
+  previas ni se identifican activaciones del registrador con ejecuciones: el
+  histórico sólo contiene ejecuciones creadas desde la app.
+- **Identidad propia por lanzamiento.** Cada lanzamiento genera una identidad de
+  ejecución distinta de la sesión raíz y de los `captureID` referenciados; la
+  interfaz los muestra por separado.
+- **Candado por proyecto en el servidor.** Una sola ejecución activa por
+  proyecto, aplicada en memoria y persistida en el índice, de modo que también
+  vale entre pestañas y tras reiniciar la app. Sin cola: una segunda solicitud
+  distinta recibe `409` mientras el desenlace no esté comprobado.
+- **Creación idempotente por `requestKey`.** Repetir la misma solicitud
+  recupera la misma ejecución sin reenviar el encargo, aunque se hubiera
+  perdido la respuesta anterior. El cliente genera la clave por conversación
+  y la conserva al reintentar.
+- **Despacho sin desenlace comprobado.** Crear la sesión sólo acredita
+  `session-confirmed`; antes de intentar el encargo se persiste `possibly-sent`.
+  Ambos conservan `pending`, sin fecha de admisión. Sólo la respuesta pública
+  de admisión o una fila `session.inbox.enqueued` con identidad de mensaje
+  acreditan `admitted` y `running`. Si se pierde la respuesta, se reconcilia
+  la captura, sin reenviar el trabajo. La finalización exige la última fase
+  pública terminal por secuencia de cada sesión conocida del árbol, además de
+  comprobar por API pública ausencia de actividad, formularios y permisos.
+  Se vuelve a enumerar el árbol antes de cerrar; un descendiente ausente,
+  evidencia insuficiente, avería de captura o motor inaccesible conserva la
+  exclusión. `idle` o caída del motor no acreditan desenlace.
+- **Transiciones persistidas antes de publicarlas.** La reconciliación y la
+  reserva de nuevas claves se serializan en el servidor; no se encola trabajo.
+  Una carrera que atraviesa el cierre anterior sigue recuperando la misma
+  ejecución. El estado candidato se escribe antes de modificar la vista en
+  memoria o liberar el proyecto. Al abrir el índice se arma previamente
+  `index-review-required`, y sólo un cierre sano de la app lo retira. Una avería
+  bloquea nuevas escrituras y lanzamientos, sin una cola de promesas rechazada
+  ni reintentos automáticos. Reparar la ruta no acredita revisión; el marcador
+  conserva el bloqueo tras reiniciar, incluso al restaurar el directorio que
+  se perdió. Un cierre abrupto también exige revisión conservadora. La salud pública del índice indica
+  `review-required` y los nuevos lanzamientos reciben `503`. El histórico y
+  las claves ya existentes siguen consultables si el índice es legible.
+  La revisión manual debe contrastar índice, marcador y captura antes de
+  retirar el marcador con la app detenida; no hay desbloqueo automático ni UI
+  de recuperación en este corte.
+- **Cierre técnico no es aceptación.** El estado expone desenlace técnico
+  observado y salud de captura por separado; la evaluación queda fuera de este
+  corte y no se muestran puntuaciones.
+- **Un único envío inicial.** La conversación de una ejecución no habilita
+  nuevos turnos de trabajo ni un botón «Finalizar ejecución» (aplazado a #22).
+  «Nuevo encargo» abre otra conversación con otra clave; el candado decide.
+- **Seguimiento fuera de la pestaña ([#26](https://github.com/pablotecat/evagentic-flow/issues/26)).**
+  El ciclo de vida sigue perteneciendo al servidor local: recargar o cerrar
+  el navegador no detiene el trabajo ni despacha otro encargo, y reabrir
+  recupera identidad, sesión raíz y evidencia persistidas. La conexión del
+  navegador con la app se muestra como señal propia («Sin conexión con la
+  app local») separada del motor, la captura y el desenlace. Con el motor
+  inaccesible y una ejecución no terminal, la vista muestra «desenlace
+  pendiente de comprobar» y nunca éxito ni consumo; el aviso se retira al
+  volver a alcanzar el motor, sin que una reconexión acredite por sí sola
+  el desenlace ni reenvíe el encargo. El detalle histórico expone el
+  horizonte temporal de la evidencia («Evidencia hasta»: el último momento
+  observado del árbol de sesiones acreditado por la captura, con su alcance
+  explícito), distingue «sin filas de
+  captura» de «captura no consultable», y no reconstruye texto no capturado:
+  no hay replay ni backfill. Publica las omisiones observadas con referencias
+  a sesión, captura y fila. Las declaraciones globales `recorder.gap` se
+  muestran como lagunas del destino de captura sin atribuirlas a la ejecución:
+  no identifican una sesión afectada ni amplían el horizonte del árbol.
+  La app puede relanzarse en el mismo puerto
+  (puerto interno opcional) para comprobar que la reconstrucción parte del
+  índice persistente, no de la memoria del navegador.
+- **Preguntas y permisos nativos desde el chat ([#29](https://github.com/pablotecat/evagentic-flow/issues/29)).**
+  Responder una interacción es un contrato propio (`POST
+  /api/executions/{id}/interactions`) que no crea turnos, sesiones ni
+  ejecuciones: el encargo continúa porque la respuesta nativa alimenta la
+  espera del runtime, y el candado por proyecto decide igual que antes. La
+  identidad observada es tipo (`form`/`permission`) + sesión + solicitud
+  pública, sólo del árbol de sesiones acreditado por la captura de esa
+  ejecución: una sesión ajena o global se rechaza explícitamente (`403`).
+  Las pendientes se reconstruyen leyendo la captura autorizada (el filtro de
+  contenido ya redactó campos, títulos, acción y alcance) y se contrastan con
+  el listado vivo público (`GET /api/session/{id}/form` y
+  `GET /api/session/{id}/permission`): una solicitud resuelta, cancelada o
+  desaparecida no se ofrece ni se responde otra vez; con el motor caído las
+  pendientes de la captura permanecen visibles como espera y la respuesta
+  devuelve un error explícito. Un fallo del listado vivo se publica como error
+  de lectura, sin presentar la vigencia de esas pendientes como comprobada.
+  Antes de enviar, la respuesta revalida la
+  solicitud en el listado vivo y el envío serializado del servidor impide la
+  doble respuesta ante el doble clic: `409 interaction-resolved` en vez de
+  una segunda réplica. Las respuestas de formulario sólo admiten claves y
+  tipos de los campos públicos capturados (los ocultos y desconocidos se
+  excluyen como en la captura); los permisos sólo aceptan las decisiones
+  nativas `once`, `always` y `reject` elegidas expresamente, sin concesión
+  por defecto: un fallo previo al envío no responde ni concede nada. Tras
+  intentar la respuesta nativa, perder la respuesta HTTP o recibir un error
+  no demuestra ausencia de efectos: se informa de respuesta posiblemente
+  enviada y resultado pendiente de reconciliar, sin repetición automática ni
+  nuevo encargo. Los borradores del navegador usan también tipo + sesión +
+  solicitud; una casilla booleana sin marcar envía `false`, no un campo omitido.
+  El índice persistente no guarda preguntas, respuestas ni
+  objetos de la API del runtime: el contenido consultable procede
+  exclusivamente de la captura filtrada, con su procedencia de «cliente
+  externo no identificado», no una identidad humana autenticada que el
+  runtime no aporta. Mientras hay pendientes, la ejecución se muestra en
+  marcha con su identidad y un aviso propio de espera; el cierre técnico
+  existente ya exige formularios y permisos despejados.
+- **Detención y fallo del registrador en la webapp ([#30](https://github.com/pablotecat/evagentic-flow/issues/30)).**
+  Solicitar la detención es un contrato propio (`POST
+  /api/executions/{id}/stop`, rechazado con 409 si la ejecución ya es
+  terminal o no tiene sesión raíz confirmada) que sólo actúa sobre el
+  árbol de sesiones acreditado de esa ejecución: la captura observada y
+  el cierre público de descendientes dentro del proyecto configurado;
+  nunca sobre sesiones ajenas al árbol. Por cada sesión se pide
+  `session.interrupt` con `resume: false` y se confirma sólo con un
+  desenlace público `interrupted` posterior a la solicitud, igual que el
+  registrador: una petición aceptada, `not-running` y los errores se
+  muestran como no confirmados, sin confirmación global ficticia. La
+  oleada reenumera y reintenta reactivaciones y descendientes nuevos con
+  plazo acotado; no promete parada instantánea, pausa ni reversión de
+  efectos externos. Del índice sólo se persiste metadata permitida
+  (`stopRequested`, `stopRequestedAt`); el desenlace por sesión se
+  reconcilia en cada consulta desde la evidencia pública, sin relanzar el
+  encargo ni convertir una desconexión en confirmación. El fallo del
+  registrador se presenta con aviso, estado de captura y revisión
+  requerida, a partir de la metadata pública `evagenticRecorder` de la
+  sesión raíz y de las declaraciones `recorder.failed` de la captura;
+  se conservan el bloqueo durable y la exclusión del proyecto, sin
+  desbloqueo automático por recargar o reparar la ruta. La reconciliación
+  tampoco cierra ni libera si esa metadata pública declara `failed` o
+  revisión requerida, aunque la captura no contenga `recorder.failed`, ni
+  si no puede leerla. Si el árbol no puede verificarse, la detención cae al
+  alcance conocido y la interfaz avisa de que los descendientes nuevos no
+  pudieron comprobarse. Una ejecución
+  interrumpida conserva en el histórico sus resultados parciales y su
+  estado real, sin puntuaciones ni juez.
+- **Árbol, línea temporal y diagnóstico técnico desde la captura ([#31](https://github.com/pablotecat/evagentic-flow/issues/31)).**
+  La ejecución expone su traza con `GET /api/executions/{id}/trace`
+  (`?session=` opcional), reconstruida exclusivamente con el lector
+  independiente reutilizado como proceso hijo en sus modos `--tree`,
+  `--tools`, `--metrics` y `--coverage` sobre la sesión raíz o la
+  subejecución seleccionada: ninguna proyección se recalcula distinta y el
+  índice no persiste contenido nuevo. Los nodos del árbol sólo representan
+  relaciones acreditadas (llamada de delegación observada o padre
+  observado): un hijo con padre pero sin llamada queda
+  `parent-observed-call-unknown` y una relación ausente permanece
+  `unknown`, nunca deducida. Seleccionar una subejecución reencuadra
+  árbol, línea temporal, herramientas y cobertura a su subárbol (las
+  herramientas son por sesión, igual que `--tools`); una sesión ajena al
+  árbol acreditado de esa ejecución se rechaza con `404` y ninguna vista
+  mezcla sesiones de otra ejecución. La línea temporal reproduce los
+  intervalos y esperas de `--metrics` con barras por sesión sobre el reloj
+  público del runtime, con aviso explícito de que pueden solaparse, no se
+  suman ramas concurrentes y no hay orden causal global entre diarios; no
+  existe campo de duración total. Los intentos conservan identidad de
+  sesión, mensaje y llamada, entrada/resultado/error autorizados y
+  referencias a evidencia; una llamada sin desenlace se muestra como
+  desconocida (no acredita fallo ni éxito) y no se agrupan reintentos por
+  nombre, argumentos ni proximidad. Las métricas conservan valor, fuente y
+  alcance: un valor ausente se muestra desconocido (nunca cero), el
+  consumo se rotula como valor normalizado del runtime (no medición del
+  proveedor) y el coste como estimación. Las skills observadas
+  (activación o carga) se separan de las meramente disponibles y de las
+  definiciones del registro y el entorno de plugins — lecturas posteriores
+  al hecho, no fotos históricas —, con contenido filtrado y hash. La
+  cobertura de captura se publica con `readiness: "not-assessed"` y con
+  avisos de que los diagnósticos técnicos no son una evaluación. La vista
+  se actualiza en el ciclo de sondeo existente y se reconstruye tras una
+  recarga o con el motor caído desde la captura persistida, sin replay ni
+  relleno de lagunas.
+- **Resultados y snapshots de entregables ([#32](https://github.com/pablotecat/evagentic-flow/issues/32)).**
+  La ejecución expone sus resultados con `GET /api/executions/{id}/deliverables`
+  (`?session=` opcional), reconstruido exclusivamente con el lector
+  independiente reutilizado como proceso hijo en su modo `--deliverables` por
+  sesión: sin sesión seleccionada, la vista de conjunto consulta una a una las
+  sesiones del árbol acreditado de esa ejecución (la consulta de una sesión en
+  `--deliverables` no incluye descendientes, igual que el lector); con
+  `?session=` se consulta esa sesión sola, y una sesión ajena al árbol
+  acreditado se rechaza con `404`. Cada grupo publica las respuestas
+  autorizadas (`session.inbox.enqueued` de usuario y `session.text.ended` de
+  asistente, ya filtradas) y los snapshots conservados con contenido filtrado
+  o su estado de ausencia (`value: null` con omisiones `deliverable-*`,
+  `acquisition: not-acquired`, o `status: unrecognized` sin contenido ni
+  hash), procedencia (`source`, `role`, `roleSource`, `acquisition`,
+  mensaje/llamada y referencia de evidencia), momentos (`observationTime`,
+  `sourceTime` con su base) y hash verificable (`sha256`,
+  `redacted-json-utf8`) de la proyección conservada por el registrador. La
+  interfaz distingue el contenido capturado del propio evento de una lectura
+  posterior y advierte que esta no acredita qué bytes produjo o utilizó la
+  acción original; `finality` permanece `null` y la vista no acredita
+  finalidad global: un papel de salida en una herramienta no es el resultado
+  final del flujo. Los resultados parciales de ejecuciones fallidas o
+  interrumpidas son consultables con su estado real y un aviso explícito de
+  que consultarlos no equivale a éxito ni aceptación; la consulta no relee
+  archivos del proyecto observado y cambiar o eliminar el original no altera
+  la versión conservada. El índice persistente no guarda contenido, rutas ni
+  hashes de entregables: todo el contenido publicado procede de la captura.
+- **Rúbricas y evaluaciones de sólo lectura sin generar resultados ([#28](https://github.com/pablotecat/evagentic-flow/issues/28)).**
+  La ejecución expone sus evaluaciones con `GET /api/executions/{id}/evaluations`
+  (404 para ejecución desconocida) y la app expone `GET /api/rubrics`. Ambos son
+  de sólo lectura: sin juez implementado, sin mecanismo productivo que genere
+  rúbricas aprobadas, versiones, puntuaciones ni aceptaciones. En producción el
+  estado habitual es ausencia explícita (`source` `none`: «sin evaluación» y
+  «sin rúbricas versionadas»), incluso con la ejecución terminada correctamente:
+  el desenlace técnico no equivale a aceptación. La fuente de datos alternativa
+  es un directorio de fixtures sintéticos (`rubrics.jsonl` y `evaluations.jsonl`,
+  contrato de lectura mínimo y provisional que no fija el contrato definitivo
+  del juez #23: puede cambiar sin migración)
+  configurable sólo como parámetro `evaluationFixtures` de `startApp`, que
+  únicamente las pruebas pasan: no existe clave de configuración local (se rechaza como clave
+  desconocida), variable de entorno ni valor por defecto para producción. El
+  lector proyecta de forma conservadora: una puntuación o cobertura ausente
+  permanece desconocida (nunca cero), una aceptación sólo se declara cuando la
+  evidencia la declara, y el estado de una versión de rúbrica se resuelve por
+  `rubricID` + versión exacta contra las versiones conocidas, identificando una
+  versión borrador o desconocida como no aprobada y una referencia no disponible
+  como tal sin inventar contenido. Cada evaluación conserva identidad propia,
+  referencia a la captura, evaluador y versiones de componente, caso y rúbrica;
+  una reevaluación enlaza con `reevaluationOf` y se muestra como resultado
+  separado de la misma captura, nunca como otra ejecución del flujo. Las vistas,
+  separadas de la traza y de los diagnósticos técnicos, no ofrecen acciones de
+  editar, evaluar ni reevaluar; los errores de lectura de fixtures son visibles
+  sin sustituirse por resultados. Cada fichero se lee una sola vez por petición,
+  con un tope de 1 MiB (excederlo es un error de lectura visible). Un error de
+  lectura de `rubrics.jsonl` se propaga a cada evaluación afectada como motivo, sin
+  confundirse con una versión ausente; las filas sin `rubricID` y las versiones
+  duplicadas se señalan en la vista en lugar de descartarse. La vista marca la
+  contradicción de una aceptación declarada con un criterio obligatorio no
+  evaluable o sin evidencia como decisión pendiente por falta de evidencia
+  obligatoria ([ADR 0001](0001-evaluacion-por-invocacion.md)); la puntuación sólo
+  se presenta «sobre los criterios evaluados» si los datos declaran esa base, y la
+  coherencia del peso evaluado se comprueba o se indica como no verificada. Una
+  reevaluación sólo se presenta sobre la misma captura si `captureID` coincide, y
+  se avisa si `reevaluationOf` no resuelve. La vista de rúbricas es alcanzable
+  también sin ejecución seleccionada.
+- **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
+  peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
+  páginas externas no puedan despachar trabajo. No usa cookies ni acceso
+  remoto; sigue sin activarse el piloto real ni el servicio compartido.
+- **Reutilización de la frontera de pruebas.** Las pruebas usan
+  `test/support/instance.mjs` (instancia aislada real), la simulación Postman
+  sintética existente y el vigilante de admisión sintético para ocupar el
+  proyecto. Sólo OpenCode, el registrador y el proveedor HTTP sintético
+  participan; nunca credenciales reales.
+
+## Frontera de pruebas
+
+- `test/webapp.test.mjs`: API pública de la app contra instancia real —
+  lanzamiento, respuesta autorizada, idempotencia por clave, rechazo con
+  proyecto ocupado, desenlace pendiente tras pérdida, persistencia tras
+  reinicio de la app, lectura del histórico con el motor caído y rechazo de
+  orígenes ajenos.
+  #29 añade responder preguntas y permisos nativos desde la API: campos
+  públicos y decisiones nativas, aislamiento de sesión ajena, errores
+  explícitos sin concesión por defecto, reconstrucción tras reinicio,
+  doble respuesta rechazada y evidencia consultable.
+- `test/browser.test.mjs`: navegador real (Playwright) con app, OpenCode y
+  registrador reales y proveedor HTTP sintético — estado
+  disponible/no disponible, envío único, respuesta y finalización técnica,
+  carrera de peticiones simultáneas sin doble despacho, recarga sin relanzar,
+  rechazo entre pestañas e histórico tras reinicio con y sin motor.
+  #26 añade recarga y cierre del navegador con trabajo en curso
+  (identidad, ausencia de nuevos despachos y bytes de captura preservados),
+  reinicio de la app en el mismo origen con la pestaña abierta (señal de
+  desconexión, reconciliación desde el índice sin reenvío) y caída del motor
+  en curso con aviso de desenlace pendiente, proyecto ocupado al reconectar
+  y consulta histórica sin motor.
+  #29 añade la frontera vertical de intervención: pregunta nativa de la raíz
+  y de una subejecución autorizada distinguidas en el panel, solicitud ajena
+  no mostrada, recarga que reconstruye las pendientes, respuesta del
+  navegador que continúa el mismo encargo (pregunta y permiso con decisión
+  nativa) y evidencia consultable con procedencia no atribuida.
+  La regresión de transporte pierde deliberadamente la respuesta HTTP entre
+  app y navegador después de que la app haya respondido un permiso real:
+  comprueba el aviso de resultado incierto y una sola respuesta capturada.
+  Un formulario público booleano obligatorio comprueba `false` sin tocar la
+  casilla. La rama de permisos de la raíz extrae el valor del `JSHandle`, lo
+  libera y exige haber respondido al menos un permiso real antes del cierre.
+  #30 añade detención confirmada sobre un árbol con descendiente delegado
+  (resultados por sesión y estado real con resultados parciales tras
+  recargar), detención no confirmada con el motor caído (la recarga no
+  confirma ni relanza) y avería real de persistencia de la captura con
+  aviso, revisión requerida y bloqueo conservado tras recargar y reparar
+  la ruta. En `test/webapp.test.mjs` la API de detención comprueba el
+  alcance verificado, el aislamiento de sesiones ajenas, los rechazos de
+  ejecución terminal o sin sesión, la metadata permitida del índice y la
+  liberación sólo tras desenlace observado. Los rótulos por sesión que no
+  son deterministas en el motor real se comprueban en `test/browser-ui.test.mjs`.
+- `test/webapp.test.mjs` añade #31: contraste de la traza con el lector
+  independiente en una delegación anidada y concurrente (árbol por
+  evidencia, intervalos solapados de hermanos, intentos con identidad y
+  evidencia, selección de subejecución sin mezclar, aislamiento entre
+  ejecuciones y `404` de sesión ajena) y conservación de los valores
+  desconocidos (llamada abierta sin desenlace, hijo con padre observado
+  sin llamada creadora y fallo recuperado sin agrupar reintentos por
+  nombre o argumentos).
+- `test/browser.test.mjs` añade #31: la frontera vertical de exploración
+  (árbol navegable desde el navegador y contrastado con el lector,
+  selección de subejecución sin mezclar la raíz, reconstrucción tras
+  recarga y consulta histórica con el motor caído sin despachar trabajo) y
+  la de límites de evidencia (llamada retenida mostrada «sin desenlace
+  observado», skills observadas diferenciadas de las disponibles,
+  métricas con fuente y consumo normalizado, y cobertura `not-assessed`
+  presentada como distinta de una evaluación).
+- `test/browser.test.mjs` añade #32: la frontera vertical de resultados con
+  entregables sintéticos de raíz e hijos sobre una ejecución fallida real del
+  runtime (el proveedor sintético devuelve partes `file` que el adaptador
+  OpenAI-compatible rechaza, así que el árbol termina `failed` con resultados
+  parciales tal como exige el corte): conjunto explícito de sesiones,
+  selección de raíz y subejecución sin mezcla, modificación y borrado del
+  archivo original sin alterar la captura, consulta con el motor detenido,
+  omisiones y secretos excluidos sin despachar trabajo, y preservación del
+  contenido filtrado de la captura byte a byte.
+- `test/webapp.test.mjs` añade #32: contraste por sesión con el lector
+  independiente (`--deliverables`), consultas de conjunto y selección, `404`
+  de sesión ajena, ejecución fallida con resultados parciales consultables,
+  segunda ejecución aislada, contenido conservado tras cambiar/borrar el
+  original y consulta sin motor, sin que el índice persista contenido.
+- `test/browser-ui.test.mjs` añade #28: el renderizado puro de las vistas de
+  evaluación y rúbricas — carga, vacío («sin evaluación» con ejecución exitosa,
+  «sin rúbricas versionadas»), error de lectura, versión aprobada/borrador/
+  desconocida, contenido histórico por versión, varias evaluaciones con
+  reevaluación identificada, valores desconocidos sin cero ni aceptación y
+  ausencia de acciones de edición o evaluación.
+- `test/webapp.test.mjs` añade #28: la ausencia real sin fuente de datos
+  (incluido el rechazo de una clave de configuración local que pretendiera
+  habilitar los fixtures) y el contrato de lectura de fixtures sintéticos
+  —versiones y contenido de rúbricas, varias evaluaciones de la misma captura
+  con reevaluación, criterios evaluados y no evaluables con evidencia y motivo,
+  puntuación, cobertura, aceptación sólo declarada, versiones de componente,
+  caso, rúbrica y evaluador, aislamiento entre ejecuciones y error de lectura—.
+- `test/browser.test.mjs` añade #28: la frontera vertical de navegador —
+  ausencia real en producción con ausencia explícita sin despachar agente
+  evaluador alguno (cero sesiones y admisiones nuevas, captura byte a byte) y,
+  sólo con fixtures sintéticos de prueba, contenido, versiones y varios
+  resultados consultables sin despachar trabajo adicional.
+- `test/browser-ui.test.mjs`: comprobación pura de renderizado en Chromium,
+  sin motor ni registrador sustituidos. Verifica borradores distintos para
+  tipo, sesión y solicitud, y el aviso de error de lectura. No acredita por
+  sí sola un fallo HTTP real del listado vivo.
+
+## Límites
+
+- La reconciliación del desenlace es perezosa: se comprueba al consultar la
+  app, no con temporizadores internos. El candado se reevalúa en cada
+  consulta, por lo que una pestaña cerrada no bloquea la comprobación.
+- Una ejecución `pending` sin sesión confirmada no se reenvía nunca y
+  mantiene el proyecto ocupado hasta que exista desenlace observado; este
+  corte no ofrece desbloqueo manual (la revisión tras pérdida de desenlace
+  es la vía prevista).
+- La salud de captura resume la última declaración global
+  `recorder.ready`/`recorder.failed` del destino configurado; no es una
+  garantía de cobertura de la ejecución concreta.
+- El corte [#27](https://github.com/pablotecat/evagentic-flow/issues/27) añade la
+  selección de agente y modelo, la ejecución de comandos públicos con argumentos
+  y el rechazo explícito de opciones desaparecidas:
+  [ADR 0011](0011-opciones-y-comandos-publicos.md).
+- El contraste de pendientes con el listado vivo depende de que OpenCode exponga
+  el formulario o permiso con el mismo identificador público que la captura
+  conservó; una respuesta observada en la captura siempre priva sobre el listado.
+- El corte [#29](https://github.com/pablotecat/evagentic-flow/issues/29) no
+  implementa la detención solicitada, el árbol visual ni la línea temporal.
+- El timeout previo comunicado de navegador con motor caído (#26) no se ha
+  reproducido en la verificación vertical de estas correcciones. La rama de
+  lectura de pendientes no consulta listados cuando no hay interacciones,
+  y la prueba de #26 no crea preguntas ni permisos; no hay evidencia que
+  relacione su timeout con estos fallos de #29. Corregir el `JSHandle` evita
+  omitir una respuesta de permiso en #29, pero no demuestra la causa del fallo
+  anterior de #26 ni permite descartarlo como inocuo. La pérdida de HTTP
+  probada aquí es app–navegador; no reproduce una pérdida motor–app.
+- En OpenCode 2.1.2 la interrupción de una sesión que espera resultados de
+  subagentes puede reactivar su propio turno cuando los descendientes
+  abortan: se observaron filas `session.execution.started` posteriores a
+  `session.execution.interrupted` en un árbol delegado real. La oleada de
+  detención de #30 reintenta esas reactivaciones con plazo acotado y la
+  confirmación por sesión expone la evidencia pública vigente, pero no
+  garantiza una parada estable del árbol del runtime; el desenlace
+  observado prevalece sobre la solicitud aceptada.
+- Las observaciones `recorder.observation` que expone la traza (`value`,
+  skills admitidas, disponibles, definiciones y entorno) las escribe el
+  registrador tras `sanitizeJson` con los secretos configurados, y el lector
+  sólo lee esa captura ya filtrada; la webapp no vuelve a leer ficheros del
+  proyecto observado. Si la lectura del lector excede el plazo (20 s), supera
+  64 MiB, emite una línea no JSON o falla con una captura inválida, la traza
+  queda `readable: false` con el motivo, sin ignorar líneas ni bloquear las
+  peticiones siguientes.
+
+- El corte [#32](https://github.com/pablotecat/evagentic-flow/issues/32) corrige
+  tras su revisión la lectura de entregables: un fallo del lector en una sesión
+  ya no invalida las demás; cada sesión expone `readable` y, si falla, su
+  `reason` con `deliverables: []`, y la vista lo marca como resultado parcial.
+  Los procesos hijos del lector se acotan a 4 simultáneos (además del plazo de
+  20 s y el límite de 64 MiB, que rigen también esta ruta). `?session=` vacío,
+  de más de 200 caracteres o que empieza por `--` se rechaza (400 o 404
+  `session-not-in-execution`); nunca cae a la vista de conjunto. La vista
+  muestra `value.finality` tal como lo declara la evidencia (`null` se
+  muestra como desconocida) sin acreditar una finalidad global.
+- Límite de la verificación de `succeeded`: con OpenCode 2.1.2 y el adaptador
+  openai-compatible, cualquier herramienta que devuelva una parte `file` hace
+  fallar la ejecución, así que no es posible obtener con la instancia real un
+  entregable de salida de herramienta en una ejecución `succeeded`. La prueba
+  real usa un adjunto de entrada añadido con `resume: false` a la sesión de una
+  ejecución ya exitosa (rol `input`, `finality: null`); la ausencia del aviso de
+  resultados parciales y la finalidad declarada se verifican en la UI pura.
+  La detención (`interrupted`) se comprueba en la UI pura, no con instancia real.
+- El corte [#28](https://github.com/pablotecat/evagentic-flow/issues/28) prepara
+  sólo las vistas: no hay juez, ni rúbricas aprobadas, ni evaluaciones reales, y
+  el contrato del directorio de fixtures es un contrato de lectura mínimo que no
+  fija el del juez futuro (#23). No se prueba una avería real del directorio de
+  fixtures porque no es una fuente productiva: el error de lectura se comprueba
+  con archivos sintéticos rotos en `test/webapp.test.mjs` y en la UI pura.

@@ -1,0 +1,166 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
+export function createEngine({ baseURL, password }) {
+  const authorization = password ? `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}` : null;
+  const send = async (path, { method = 'GET', body, timeout = 10000, signal } = {}) => {
+    const headers = authorization ? { authorization } : {};
+    const init = {
+      method,
+      headers,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
+    };
+    if (body !== undefined) {
+      headers['content-type'] = 'application/json';
+      init.body = JSON.stringify(body);
+    }
+    const response = await fetch(`${baseURL}${path}`, init);
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, data: text ? JSON.parse(text) : null };
+  };
+  const located = directory => `location[directory]=${encodeURIComponent(directory)}`;
+  return {
+    async info() {
+      try { return await send('/api/info', { timeout: 3000 }); }
+      catch { return { ok: false, status: 0, data: null }; }
+    },
+    async agents(directory, signal) {
+      const result = await send(`/api/agent?${located(directory)}`, { signal });
+      if (!result.ok) throw new Error(`agents unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async models(directory, signal) {
+      const result = await send(`/api/model?${located(directory)}`, { signal });
+      if (!result.ok) throw new Error(`models unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async commands(directory, signal) {
+      const result = await send(`/api/command?${located(directory)}`, { signal });
+      if (!result.ok) throw new Error(`commands unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async options(directory, signal) {
+      const resolve = await send(`/api/location?${located(directory)}`, { signal });
+      if (!resolve.ok) throw new Error(`location unavailable: ${resolve.status}`);
+      const deadline = Date.now() + 5000;
+      let stable = null;
+      let previous = null;
+      do {
+        const listed = await Promise.all([
+          this.agents(directory, signal), this.models(directory, signal), this.commands(directory, signal)]);
+        stable = listed;
+        const snapshot = JSON.stringify([
+          listed[0].map(agent => agent.id).sort(),
+          listed[1].map(model => `${model.providerID}/${model.modelID ?? model.id}`
+            + (model.variants ?? []).map(variant => variant.id).join('+')).sort(),
+          listed[2].map(command => command.name).sort(),
+        ]);
+        if (previous !== null && snapshot === previous) break;
+        previous = snapshot;
+        await delay(250);
+      } while (Date.now() < deadline && !signal?.aborted);
+      return { agents: stable[0], models: stable[1], commands: stable[2] };
+    },
+    async session(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}`, { signal });
+      if (!result.ok) throw new Error(`session unavailable: ${result.status}`);
+      return result.data?.data ?? null;
+    },
+    async messages(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}/message`, { signal });
+      if (!result.ok) throw new Error(`messages unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async forms(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}/form`, { signal });
+      if (!result.ok) throw new Error(`forms unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async permissions(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}/permission`, { signal });
+      if (!result.ok) throw new Error(`permissions unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async replyForm(sessionID, requestID, answer, signal) {
+      return send(`/api/session/${sessionID}/form/${requestID}/reply`, {
+        method: 'POST', body: { answer }, timeout: 30000, signal });
+    },
+    async interrupt(sessionID, signal) {
+      return send(`/api/session/${sessionID}/interrupt`, {
+        method: 'POST', body: { resume: false }, timeout: 30000, signal });
+    },
+    async wait(sessionID, signal) {
+      return send(`/api/experimental/session/${sessionID}/wait`, {
+        method: 'POST', body: {}, timeout: 30000, signal });
+    },
+    async tree(directory, rootID, knownIDs, signal) {
+      const result = await send(`/api/session?directory=${encodeURIComponent(directory)}`, { signal });
+      if (!result.ok) throw new Error('cannot verify execution scope');
+      const sessions = result.data?.data;
+      if (!Array.isArray(sessions)) throw new Error('unknown execution scope');
+      const ids = new Set([rootID, ...knownIDs]);
+      for (let size = -1; size !== ids.size;) {
+        size = ids.size;
+        for (const session of sessions) if (ids.has(session.parentID)) ids.add(session.id);
+      }
+      return { sessions, ids: [...ids] };
+    },
+    async activeMap(signal) {
+      const result = await send('/api/session/active', { signal });
+      if (!result.ok) throw new Error('cannot verify active sessions');
+      const active = result.data?.data;
+      if (!active || typeof active !== 'object') throw new Error('unknown active sessions');
+      return active;
+    },
+    async replyPermission(sessionID, requestID, decision, signal) {
+      return send(`/api/session/${sessionID}/permission/${requestID}/reply`, {
+        method: 'POST', body: { decision }, timeout: 30000, signal });
+    },
+    async setAgent(sessionID, agent, signal) {
+      return send(`/api/session/${sessionID}/agent`, { method: 'POST', body: { agent }, timeout: 30000, signal });
+    },
+    async setModel(sessionID, model, signal) {
+      return send(`/api/session/${sessionID}/model`, { method: 'POST', body: { model }, timeout: 30000, signal });
+    },
+    async runCommand(sessionID, name, text, signal) {
+      return send(`/api/session/${sessionID}/command`, { method: 'POST', body: { name, text },
+        timeout: 300000, signal });
+    },
+    async createSession(payload, signal) {
+      const result = await send('/api/session', { method: 'POST', body: payload, timeout: 30000, signal });
+      if (!result.ok) throw new Error(`session creation failed: ${result.status}`);
+      return result.data?.data ?? null;
+    },
+    async prompt(sessionID, text, signal) {
+      const result = await send(`/api/session/${sessionID}/prompt`, { method: 'POST', body: { text }, timeout: 300000, signal });
+      if (!result.ok) throw new Error(`prompt failed: ${result.status}`);
+      return result.data?.data ?? null;
+    },
+    async scope(directory, rootID, knownIDs) {
+      const get = async path => {
+        const result = await send(path);
+        if (!result.ok) throw new Error('cannot verify execution scope');
+        return result.data?.data;
+      };
+      const [tree, active] = await Promise.all([
+        this.tree(directory, rootID, knownIDs), this.activeMap(),
+      ]);
+      const treeIDs = new Set(tree.ids);
+      const scoped = tree.sessions.filter(session => treeIDs.has(session.id));
+      if (scoped.length !== treeIDs.size) throw new Error('known session unavailable');
+      const clear = await Promise.all(scoped.map(async session => {
+        const [forms, permissions] = await Promise.all([
+          get(`/api/session/${session.id}/form`), get(`/api/session/${session.id}/permission`),
+        ]);
+        return Array.isArray(forms) && forms.length === 0 && Array.isArray(permissions) && permissions.length === 0
+          && !active[session.id] && ['succeeded', 'failed', 'interrupted'].includes(session.outcome);
+      }));
+      const [verifiedTree, finalActive] = await Promise.all([
+        this.tree(directory, rootID, tree.ids), this.activeMap(),
+      ]);
+      const verified = verifiedTree.sessions;
+      const stable = !verified.some(session => treeIDs.has(session.parentID) && !treeIDs.has(session.id))
+        && tree.ids.every(id => verified.some(session => session.id === id
+          && ['succeeded', 'failed', 'interrupted'].includes(session.outcome)) && !finalActive[id]);      return { sessionIDs: tree.ids, clear: clear.every(Boolean) && stable };
+    },
+  };
+}

@@ -63,6 +63,21 @@ http.createServer(async (req, res) => {
   const artifact = body.tools?.find(tool => tool.function?.name === 'synthetic_deliverable');
   const turn = body.messages.slice(body.messages.findLastIndex(message => message.role === 'user'));
   const artifactInput = JSON.stringify(turn);
+  if (artifact && delegate && input.includes('SYNTHETIC_DELIVERABLE_TREE') && actionResults === 0
+    && !turn.some(message => message.role === 'tool')) {
+    const prompts = ['SYNTHETIC_DELIVERABLE_PRODUCE delegated child',
+      'SYNTHETIC_DELIVERABLE_LIMITS delegated child', 'Hijo observado sin entregables'];
+    send({ role: 'assistant', tool_calls: [
+      { index: 0, id: 'call_synthetic_deliverable', type: 'function',
+        function: { name: artifact.function.name, arguments: JSON.stringify({ mode: 'produce' }) } },
+      ...prompts.map((prompt, index) => ({ index: index + 1,
+        id: `call_synthetic_delegate_${index}`, type: 'function', function: { name: delegate.function.name,
+          arguments: JSON.stringify({ agent: 'synthetic-branch', description: 'Synthetic delegated work',
+            prompt: `${prompt} synthetic-secret-42`, background: true }) } })),
+    ] });
+    send({}, 'tool_calls');
+    return res.end('data: [DONE]\n\n');
+  }
   if (artifact && artifactInput.includes('SYNTHETIC_DELIVERABLE_') && !turn.some(message => message.role === 'tool')) {
     send({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_synthetic_deliverable', type: 'function',
       function: { name: artifact.function.name, arguments: JSON.stringify({ mode: artifactInput.includes('SYNTHETIC_DELIVERABLE_LIMITS')

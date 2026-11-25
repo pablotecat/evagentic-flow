@@ -201,6 +201,28 @@ export async function fixture(t, options = {}) {
       } });
     `);
   }
+  if (options.syntheticCommands) {
+    await mkdir(join(root, 'config/opencode/commands'));
+    await writeFile(join(root, 'config/opencode/commands/synthetic-echo.md'),
+      `---\ndescription: Encargo sintético de comando\n---\nEncargo sintético de comando: $ARGUMENTS\n`);
+  }
+  if (options.removeCommandSession) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-command-failure.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      import { writeFile } from 'node:fs/promises';
+      export default Plugin.define({ id: 'synthetic.command.failure', async setup(ctx) {
+        const controller = new AbortController();
+        const task = (async () => {
+          for await (const event of ctx.event.subscribe({ types: ['session.created'], signal: controller.signal })) {
+            if (!(event.data.title ?? '').startsWith('Flujo en Proyecto ·')) continue;
+            await ctx.session.remove({ sessionID: event.data.sessionID });
+            await writeFile(${JSON.stringify(join(root, 'command-session-removed'))}, event.data.sessionID);
+          }
+        })().catch(() => {});
+        return async () => { controller.abort(); await task; };
+      } });
+    `);
+  }
   const serverConfig = { $schema: 'https://opencode.ai/config.json', update: 'disable',
     snapshots: false, ...options.serverConfig };
   if (options.syntheticDefinitions) {
@@ -234,7 +256,8 @@ export async function fixture(t, options = {}) {
   let address;
   const start = async () => {
     output = '';
-    child = spawn(binary, ['serve', '--hostname', '127.0.0.1', '--port', '0'], { env, cwd: root });
+    child = spawn(binary, ['serve', '--hostname', '127.0.0.1',
+      '--port', String(options.enginePort ?? 0)], { env, cwd: root });
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
     child.on('error', error => { output += error.message; });
