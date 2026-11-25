@@ -711,6 +711,7 @@ test('responder con el motor caído falla de forma explícita sin conceder permi
     const detail = (await executionDetail(app, id)).body;
     assert.equal(detail.execution.status, 'running');
     assert.equal(detail.interactions.pending.length, 1, 'the visible wait was lost with the engine down');
+    assert.deepEqual(detail.interactions.readErrors, [{ error: 'engine-unreachable' }]);
     assert.notEqual((await createExecution(app, 'intervencion-otro', 'No debe lanzarse.')).status, 201,
       'a failed reply released the project');
   });

@@ -219,6 +219,17 @@ test('la caída del motor se muestra como pendiente de comprobar y reconectar no
   const browser = await chromium.launch();
   t.after(() => browser.close());
   const page = await browser.newPage();
+  const creationTraffic = [];
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/api/executions')) {
+      creationTraffic.push({ event: 'request', at: Date.now() });
+    }
+  });
+  page.on('response', response => {
+    if (response.request().method() === 'POST' && response.url().endsWith('/api/executions')) {
+      creationTraffic.push({ event: 'response', at: Date.now(), status: response.status() });
+    }
+  });
   await page.goto(app.url);
   await page.waitForFunction(() => document.querySelector('#status')?.textContent
     ?.includes('Motor: disponible') ?? false, undefined, { timeout: 60000 });
@@ -259,8 +270,15 @@ test('la caída del motor se muestra como pendiente de comprobar y reconectar no
 
   await page.getByRole('button', { name: 'Nuevo encargo' }).click();
   await upload(page, 'No debe despacharse con el desenlace por comprobar.');
-  await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent
-    ?.includes('ocupado') ?? false, undefined, { timeout: 60000 });
+  try {
+    await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent
+      ?.includes('ocupado') ?? false, undefined, { timeout: 60000 });
+  } catch (error) {
+    t.diagnostic(JSON.stringify({ creationTraffic, visible: await page.locator('#conversation').innerText(),
+      draft: await page.getByLabel('Encargo').inputValue(),
+      executions: (await appFetch(restarted, '/api/executions')).body }));
+    throw error;
+  }
 
   await page.reload();
   await page.waitForFunction(() => document.querySelector('#status')?.textContent
@@ -416,6 +434,19 @@ test('el navegador responde preguntas y permisos nativos y reconstruye las pendi
     assert.equal(await page.locator(`[data-request="${foreignForm.id}"]`).count(), 0,
       'a foreign interaction appeared in the execution panel');
 
+    const negativeForm = (await instance.api(`/api/session/${root}/form`, {
+      title: 'Booleano público sintético',
+      fields: [{ key: 'confirmed', type: 'boolean', title: 'Confirmación', required: true }],
+    })).data;
+    const negativePanel = page.locator(`[data-kind="form"][data-request="${negativeForm.id}"]`);
+    await negativePanel.waitFor();
+    assert.equal(await negativePanel.locator('input[type="checkbox"]').isChecked(), false);
+    await negativePanel.getByRole('button', { name: 'Responder pregunta' }).click();
+    await eventually(async () => (await records(instance.captureDirectory)).some(row =>
+      row.type === 'form.replied' && row.sessionID === root
+      && row.interaction?.requestID === negativeForm.id && row.interaction.response?.confirmed === false),
+    'an untouched boolean checkbox did not submit false to the real runtime');
+
     await page.reload();
     await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
       undefined, { timeout: 60000 });
@@ -433,28 +464,48 @@ test('el navegador responde preguntas y permisos nativos y reconstruye las pendi
     assert.ok(permissionText.includes('synthetic.approval'));
     assert.ok(permissionText.includes('Synthetic resource [REDACTED]'));
     assert.ok(!permissionText.includes('synthetic-secret-42'));
+    let lostResponses = 0;
+    await page.route(`**/api/executions/${executionId}/interactions`, async route => {
+      await route.fetch();
+      lostResponses++;
+      await route.abort('failed');
+    }, { times: 1 });
     await page.locator('[data-kind="permission"] button[data-decision="once"]').click();
+    await page.getByRole('alert').filter({ hasText: 'Respuesta posiblemente enviada' }).waitFor();
+    assert.ok(!(await page.getByRole('alert').allTextContents()).join(' ').includes('no se ha concedido'));
     await page.waitForFunction(() => !document.querySelector('[data-kind="permission"]'),
       undefined, { timeout: 60000 });
+    assert.equal(lostResponses, 1);
+    const childPermissionReplies = (await records(instance.captureDirectory)).filter(row =>
+      row.type === 'permission.replied' && row.sessionID === child);
+    assert.equal(childPermissionReplies.length, 1, 'a lost HTTP response retried the native permission');
 
     const rootQuestion = (await appFetch(app, `/api/executions/${executionId}`))
       .body.interactions.pending.find(item => item.kind === 'form' && item.sessionID === root);
+    await instance.api(`/api/session/${root}`, {
+      permissions: [{ action: 'synthetic.approval', resource: '*', effect: 'ask' }],
+    }, 'PATCH');
     await fillPendingQuestion(page, rootQuestion.requestID);
+    let rootPermissionsAnswered = 0;
     for (let round = 0; round < 3; round++) {
-      const outcome = await page.waitForFunction(() => {
+      const handle = await page.waitForFunction(() => {
         const status = document.querySelector('#execution-status')?.textContent ?? '';
         if (status.includes('Finalizada técnicamente')) return 'final';
         if (document.querySelector('[data-kind="permission"]')) return 'permission';
         return false;
       }, undefined, { polling: 750, timeout: 240000 });
-      if (await page.evaluate(() => document.querySelector('#execution-status')?.textContent
-        ?.includes('Finalizada técnicamente') ?? false)) break;
+      let outcome;
+      try { outcome = await handle.jsonValue(); }
+      finally { await handle.dispose(); }
+      if (outcome === 'final') break;
       if (outcome !== 'permission') break;
       await page.locator('[data-kind="permission"] button[data-decision="once"]').first().click();
+      rootPermissionsAnswered++;
       await page.waitForFunction(() => !document.querySelector('[data-kind="permission"]'),
         undefined, { timeout: 60000 });
     }
     await awaitStatus(page, 'Finalizada técnicamente', 240000);
+    assert.ok(rootPermissionsAnswered > 0, 'the JSHandle outcome branch never answered a real root permission');
 
     await page.getByText('Respuestas registradas en la captura', { exact: true }).click();
     const evidenceText = await page.locator('[aria-label="Respuestas registradas"]').innerText();
@@ -465,6 +516,9 @@ test('el navegador responde preguntas y permisos nativos y reconstruye las pendi
     assert.ok(!board.includes('synthetic-secret-42'), 'interaction answers bypassed capture redaction');
     assert.equal(await admittedCount(instance), 2,
       'answering native interactions re-sent or dispatched work');
+    assert.equal((await records(instance.captureDirectory)).filter(row =>
+      row.type === 'permission.replied' && row.sessionID === child).length, 1,
+    'the permission was replied again after reconciling the lost HTTP response');
     const sessions = (await instance.api(
       `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
     assert.equal(sessions.filter(session =>

@@ -106,15 +106,22 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   `GET /api/session/{id}/permission`): una solicitud resuelta, cancelada o
   desaparecida no se ofrece ni se responde otra vez; con el motor caído las
   pendientes de la captura permanecen visibles como espera y la respuesta
-  devuelve un error explícito. Antes de enviar, la respuesta revalida la
+  devuelve un error explícito. Un fallo del listado vivo se publica como error
+  de lectura, sin presentar la vigencia de esas pendientes como comprobada.
+  Antes de enviar, la respuesta revalida la
   solicitud en el listado vivo y el envío serializado del servidor impide la
   doble respuesta ante el doble clic: `409 interaction-resolved` en vez de
   una segunda réplica. Las respuestas de formulario sólo admiten claves y
   tipos de los campos públicos capturados (los ocultos y desconocidos se
   excluyen como en la captura); los permisos sólo aceptan las decisiones
   nativas `once`, `always` y `reject` elegidas expresamente, sin concesión
-  por defecto: un fallo de lectura, listado o envío no concede nada ni
-  relanza nada. El índice persistente no guarda preguntas, respuestas ni
+  por defecto: un fallo previo al envío no responde ni concede nada. Tras
+  intentar la respuesta nativa, perder la respuesta HTTP o recibir un error
+  no demuestra ausencia de efectos: se informa de respuesta posiblemente
+  enviada y resultado pendiente de reconciliar, sin repetición automática ni
+  nuevo encargo. Los borradores del navegador usan también tipo + sesión +
+  solicitud; una casilla booleana sin marcar envía `false`, no un campo omitido.
+  El índice persistente no guarda preguntas, respuestas ni
   objetos de la API del runtime: el contenido consultable procede
   exclusivamente de la captura filtrada, con su procedencia de «cliente
   externo no identificado», no una identidad humana autenticada que el
@@ -158,6 +165,16 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   no mostrada, recarga que reconstruye las pendientes, respuesta del
   navegador que continúa el mismo encargo (pregunta y permiso con decisión
   nativa) y evidencia consultable con procedencia no atribuida.
+  La regresión de transporte pierde deliberadamente la respuesta HTTP entre
+  app y navegador después de que la app haya respondido un permiso real:
+  comprueba el aviso de resultado incierto y una sola respuesta capturada.
+  Un formulario público booleano obligatorio comprueba `false` sin tocar la
+  casilla. La rama de permisos de la raíz extrae el valor del `JSHandle`, lo
+  libera y exige haber respondido al menos un permiso real antes del cierre.
+- `test/browser-ui.test.mjs`: comprobación pura de renderizado en Chromium,
+  sin motor ni registrador sustituidos. Verifica borradores distintos para
+  tipo, sesión y solicitud, y el aviso de error de lectura. No acredita por
+  sí sola un fallo HTTP real del listado vivo.
 
 ## Límites
 
@@ -180,3 +197,11 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   conservó; una respuesta observada en la captura siempre priva sobre el listado.
 - El corte [#29](https://github.com/pablotecat/evagentic-flow/issues/29) no
   implementa la detención solicitada, el árbol visual ni la línea temporal.
+- El timeout previo comunicado de navegador con motor caído (#26) no se ha
+  reproducido en la verificación vertical de estas correcciones. La rama de
+  lectura de pendientes no consulta listados cuando no hay interacciones,
+  y la prueba de #26 no crea preguntas ni permisos; no hay evidencia que
+  relacione su timeout con estos fallos de #29. Corregir el `JSHandle` evita
+  omitir una respuesta de permiso en #29, pero no demuestra la causa del fallo
+  anterior de #26 ni permite descartarlo como inocuo. La pérdida de HTTP
+  probada aquí es app–navegador; no reproduce una pérdida motor–app.

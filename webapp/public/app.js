@@ -28,8 +28,8 @@ const INTERACTION_ERRORS = {
   'session-not-in-execution': 'La solicitud pertenece a otra sesión o ejecución; no se ha respondido nada ajeno.',
   'execution-terminal': 'La ejecución ya está cerrada; ya no se admite responder aquí.',
   'evidence-unavailable': 'La evidencia no está consultable; no se ha respondido nada.',
-  'engine-unreachable': 'No se pudo consultar o responder en el motor; no se ha concedido ningún permiso.',
-  'reply-failed': 'El motor rechazó la respuesta; no se ha concedido ningún permiso ni relanzado el encargo.',
+  'engine-unreachable': 'No se pudo consultar la solicitud en el motor; esta petición no llegó a intentar la respuesta.',
+  'reply-unconfirmed': 'Respuesta posiblemente enviada: no se pudo confirmar el resultado. El permiso pudo aplicarse; pendiente de reconciliar con la evidencia y el motor. No se repetirá automáticamente.',
 };
 
 const state = {
@@ -62,7 +62,7 @@ async function api(path, options = {}) {
     init.headers = { 'content-type': 'application/json' };
   }
   const response = await fetch(path, init);
-  const body = await response.json().catch(() => null);
+  const body = await response.json();
   if (!response.ok) throw { status: response.status, body };
   return body;
 }
@@ -112,13 +112,16 @@ function renderMessages() {
 const sessionLabel = (execution, sessionID) => sessionID === execution.sessionID
   ? 'Sesión raíz' : `Subejecución ${sessionID}`;
 
+const interactionKey = item => JSON.stringify([item.kind, item.sessionID, item.requestID]);
+
 function onInteractionInput(event) {
   const target = event.target;
   const fieldKey = target.dataset?.field;
   const wrap = target.closest('[data-request]');
   if (!fieldKey || !wrap) return;
-  const requestID = wrap.dataset.request;
-  const answers = state.interactionAnswers[requestID] ?? (state.interactionAnswers[requestID] = {});
+  const key = interactionKey({ kind: wrap.dataset.kind, sessionID: wrap.dataset.session,
+    requestID: wrap.dataset.request });
+  const answers = state.interactionAnswers[key] ?? (state.interactionAnswers[key] = {});
   if (target.type === 'checkbox' && target.dataset.group === 'multiselect') {
     const values = new Set(Array.isArray(answers[fieldKey]) ? answers[fieldKey] : []);
     if (target.checked) values.add(target.value);
@@ -128,8 +131,8 @@ function onInteractionInput(event) {
   else answers[fieldKey] = target.value;
 }
 
-function renderInteractionField(requestID, field) {
-  const stored = state.interactionAnswers[requestID]?.[field.key];
+function renderInteractionField(key, field) {
+  const stored = state.interactionAnswers[key]?.[field.key];
   const label = `${field.title ?? field.key}${field.required ? ' *' : ''}`;
   if (field.type === 'boolean') {
     const input = el('input', { type: 'checkbox', 'data-field': field.key });
@@ -185,15 +188,15 @@ function renderQuestion(execution, item) {
   const form = el('form', { 'data-kind': 'form', 'data-session': item.sessionID, 'data-request': requestID },
     el('h4', {}, `Pregunta nativa · ${sessionLabel(execution, item.sessionID)}`),
     el('p', {}, item.request?.title ?? 'Sin título observable'),
-    ...fields.flatMap(field => renderInteractionField(requestID, field)),
+    ...fields.flatMap(field => renderInteractionField(interactionKey(item), field)),
     el('button', { type: 'submit', ...(state.replying ? { disabled: '' } : {}) }, 'Responder pregunta'));
   form.addEventListener('input', onInteractionInput);
   form.addEventListener('submit', event => {
     event.preventDefault();
-    const answers = state.interactionAnswers[requestID] ?? {};
+    const answers = state.interactionAnswers[interactionKey(item)] ?? {};
     const answer = {};
     for (const field of fields) {
-      const raw = answers[field.key];
+      const raw = answers[field.key] ?? (field.type === 'boolean' ? false : undefined);
       if (raw === undefined || raw === '') continue;
       answer[field.key] = field.type === 'number' || field.type === 'integer' ? Number(raw) : raw;
     }
@@ -229,6 +232,11 @@ function renderInteractions() {
   const interactions = detail?.interactions ?? { pending: [], resolved: [] };
   if (!execution) return [];
   const sections = [];
+  for (const error of interactions.readErrors ?? []) {
+    sections.push(el('p', { role: 'alert', class: 'error' },
+      `No se pudieron leer las solicitudes pendientes${error.sessionID ? ` de ${error.sessionID}` : ''}. `
+      + 'Las solicitudes capturadas se conservan, pero su vigencia no está comprobada. La consulta no envía respuestas.'));
+  }
   if (interactions.pending.length) {
     sections.push(el('section', { id: 'interactions', 'aria-label': 'Intervención' },
       el('h3', {}, 'Esperando intervención'),
@@ -260,11 +268,11 @@ async function replyInteraction(payload) {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    delete state.interactionAnswers[payload.requestID];
+    delete state.interactionAnswers[interactionKey(payload)];
     await refreshDetail();
   } catch (error) {
     state.interactionError = INTERACTION_ERRORS[error?.body?.error]
-      ?? 'No se pudo responder la solicitud; no se ha concedido ningún permiso ni relanzado el encargo.';
+      ?? INTERACTION_ERRORS['reply-unconfirmed'];
   } finally {
     state.replying = false;
     renderConversation();

@@ -113,19 +113,20 @@ export async function startApp({ configPath, port: requestedPort }) {
   };
 
   const livePending = async pending => {
-    if (!pending.length) return pending;
+    if (!pending.length) return { pending, readErrors: [] };
     const health = await engine.info();
-    if (!health.ok) return pending;
+    if (!health.ok) return { pending, readErrors: [{ error: 'engine-unreachable' }] };
     const listings = new Map();
+    const readErrors = [];
     for (const sessionID of new Set(pending.map(item => item.sessionID))) {
       try {
         const [forms, permissions] = await Promise.all([engine.forms(sessionID), engine.permissions(sessionID)]);
         listings.set(sessionID,
           { form: new Set(forms.map(item => item?.id)), permission: new Set(permissions.map(item => item?.id)) });
-      } catch { }
+      } catch { readErrors.push({ sessionID, error: 'interaction-read-failed' }); }
     }
-    return pending.filter(item => !listings.has(item.sessionID)
-      || listings.get(item.sessionID)[item.kind]?.has(item.requestID));
+    return { pending: pending.filter(item => !listings.has(item.sessionID)
+      || listings.get(item.sessionID)[item.kind]?.has(item.requestID)), readErrors };
   };
 
   const observeSelection = async (execution, sessionID) => {
@@ -418,7 +419,7 @@ export async function startApp({ configPath, port: requestedPort }) {
       await reconcile(execution);
       const evidence = execution.sessionID
         ? await readSession(config.captureDirectory, execution.sessionID) : null;
-      const pending = evidence?.ok ? await livePending(evidence.interactions.pending) : [];
+      const live = evidence?.ok ? await livePending(evidence.interactions.pending) : null;
       return json(response, 200, {
         execution: publicExecution(execution),
         conversation: evidence?.ok ? { entries: evidence.entries, responses: evidence.responses }
@@ -429,8 +430,8 @@ export async function startApp({ configPath, port: requestedPort }) {
           : { readable: false, reason: evidence?.reason ?? 'session-not-confirmed',
             captureIDs: [], recorderFailed: false, horizon: null },
         interactions: evidence?.ok
-          ? { pending, resolved: evidence.interactions.resolved }
-          : { pending: [], resolved: [] },
+          ? { ...live, resolved: evidence.interactions.resolved }
+          : { pending: [], resolved: [], readErrors: evidence ? [{ error: 'evidence-unavailable' }] : [] },
       });
     }
     const interaction = url.pathname.match(/^\/api\/executions\/([^/]+)\/interactions$/);
@@ -497,8 +498,8 @@ export async function startApp({ configPath, port: requestedPort }) {
         result = kind === 'permission'
           ? await engine.replyPermission(sessionID, requestID, body.decision)
           : await engine.replyForm(sessionID, requestID, body.answer);
-      } catch { return json(response, 503, { error: 'engine-unreachable' }); }
-      if (!result.ok) return json(response, 502, { error: 'reply-failed', engineStatus: result.status });
+      } catch { return json(response, 503, { error: 'reply-unconfirmed' }); }
+      if (!result.ok) return json(response, 502, { error: 'reply-unconfirmed', engineStatus: result.status });
       return json(response, 200, { interaction: { kind, sessionID, requestID, phase: 'replied' } });
     }
     return json(response, 404, { error: 'not-found' });
