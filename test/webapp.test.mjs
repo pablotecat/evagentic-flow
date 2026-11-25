@@ -1216,7 +1216,7 @@ test('los entregables consultan snapshots por sesión del árbol acreditado sin 
     }
   });
 
-test('una ejecucion exitosa conserva snapshots sin acreditar finalidad y la consulta valida ?session=',
+test('un adjunto de entrada posterior conserva snapshot con finalidad nula sin alterar el estado y la consulta valida ?session=',
   { timeout: 300000 }, async t => {
     const instance = await fixture(t, { simulation: true, config: { secrets: ['synthetic-deliverable-secret'] } });
     const directory = instance.projects[0];
