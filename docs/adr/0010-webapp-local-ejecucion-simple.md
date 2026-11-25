@@ -302,3 +302,11 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   confirmación por sesión expone la evidencia pública vigente, pero no
   garantiza una parada estable del árbol del runtime; el desenlace
   observado prevalece sobre la solicitud aceptada.
+- Las observaciones `recorder.observation` que expone la traza (`value`,
+  skills admitidas, disponibles, definiciones y entorno) las escribe el
+  registrador tras `sanitizeJson` con los secretos configurados, y el lector
+  sólo lee esa captura ya filtrada; la webapp no vuelve a leer ficheros del
+  proyecto observado. Si la lectura del lector excede el plazo (20 s), supera
+  64 MiB, emite una línea no JSON o falla con una captura inválida, la traza
+  queda `readable: false` con el motivo, sin ignorar líneas ni bloquear las
+  peticiones siguientes.

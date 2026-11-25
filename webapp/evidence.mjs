@@ -9,6 +9,9 @@ const EXECUTION_PREFIX = 'session.execution.';
 const cache = new Map();
 const pendingReads = new Map();
 const TTL = 700;
+const READER_TIMEOUT = 20000;
+const READER_MAX_OUTPUT = 64 * 1024 * 1024;
+const READER_MAX_ERRORS = 4096;
 
 export function latestLifecycle(rows) {
   const events = rows.filter(row => row.type?.startsWith(EXECUTION_PREFIX));
@@ -21,21 +24,41 @@ const runReader = (captureDirectory, args) => new Promise(resolve => {
   const child = spawn(process.execPath, [reader, captureDirectory, ...args]);
   let output = '';
   let errors = '';
-  child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; });
-  child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk; });
-  child.on('error', error => resolve({ ok: false, reason: error.message }));
+  let settled = false;
+  const finish = value => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve(value);
+  };
+  const abort = reason => {
+    child.kill();
+    finish({ ok: false, reason });
+  };
+  const timer = setTimeout(() => abort('reader-timeout'), READER_TIMEOUT);
+  child.stdout.setEncoding('utf8').on('data', chunk => {
+    output += chunk;
+    if (output.length > READER_MAX_OUTPUT) abort('reader-output-too-large');
+  });
+  child.stderr.setEncoding('utf8').on('data', chunk => {
+    if (errors.length < READER_MAX_ERRORS) errors += chunk;
+  });
+  child.on('error', error => finish({ ok: false, reason: error.message }));
   child.on('close', code => {
-    if (code !== 0) return resolve({ ok: false, reason: errors.trim() || `reader exited with ${code}` });
-    try {
-      resolve({ ok: true, rows: output.split('\n').filter(Boolean).map(line => JSON.parse(line)) });
-    } catch (error) {
-      resolve({ ok: false, reason: error.message });
+    if (code !== 0) return finish({ ok: false, reason: errors.trim() || `reader exited with ${code}` });
+    const rows = [];
+    const lines = output.split('\n');
+    for (let index = 0; index < lines.length; index++) {
+      if (!lines[index]) continue;
+      try { rows.push(JSON.parse(lines[index])); }
+      catch { return finish({ ok: false, reason: `invalid-reader-line:${index + 1}` }); }
     }
+    finish({ ok: true, rows });
   });
 });
 
 const runCached = async (captureDirectory, args) => {
-  const key = `${captureDirectory}\u0000${args.join(' ')}`;
+  const key = JSON.stringify([captureDirectory, ...args]);
   const cached = cache.get(key);
   if (cached && Date.now() - cached.at < TTL) return cached.value;
   const inFlight = pendingReads.get(key);
@@ -44,15 +67,26 @@ const runCached = async (captureDirectory, args) => {
   const read = runReader(captureDirectory, args).then(value => {
     cache.set(key, { at: Date.now(), value });
     return value;
-  }, error => {
-    throw error;
-  });
+  }).finally(() => pendingReads.delete(key));
   pendingReads.set(key, read);
-  const settled = await read;
-  pendingReads.delete(key);
-  return settled;
+  return read;
 };
 
+const sessionTree = (rows, rootSessionID) => {
+  const sessionIDs = new Set([rootSessionID]);
+  for (let size = -1; size !== sessionIDs.size;) {
+    size = sessionIDs.size;
+    for (const row of rows) {
+      if (row.sessionID && sessionIDs.has(row.parentSessionID)) sessionIDs.add(row.sessionID);
+      if (row.childSessionID && sessionIDs.has(row.sessionID)) sessionIDs.add(row.childSessionID);
+    }
+  }
+  const scoped = rows.filter(row => sessionIDs.has(row.sessionID));
+  const lastObserved = scoped.reduce((latest, row) =>
+    latest === null || row.observedAt > latest ? row.observedAt : latest, null);
+  return { sessionIDs, scoped,
+    horizon: lastObserved === null ? null : new Date(lastObserved).toISOString() };
+};
 export async function readRows(captureDirectory, sessionID = null) {
   return runCached(captureDirectory, sessionID ? [sessionID] : []);
 }
@@ -63,17 +97,7 @@ export async function readSession(captureDirectory, sessionID) {
   const read = await readRows(captureDirectory);
   if (!read.ok) return { ok: false, reason: read.reason };
   const rows = read.rows.filter(row => row.sessionID === sessionID);
-  const sessionIDs = new Set([sessionID]);
-  for (let size = -1; size !== sessionIDs.size;) {
-    size = sessionIDs.size;
-    for (const row of read.rows) {
-      if (row.sessionID && sessionIDs.has(row.parentSessionID)) sessionIDs.add(row.sessionID);
-      if (row.childSessionID && sessionIDs.has(row.sessionID)) sessionIDs.add(row.childSessionID);
-    }
-  }
-  const scoped = read.rows.filter(row => sessionIDs.has(row.sessionID));
-  const lastObserved = scoped.reduce((latest, row) =>
-    latest === null || row.observedAt > latest ? row.observedAt : latest, null);
+  const { sessionIDs, scoped, horizon } = sessionTree(read.rows, sessionID);
   const reference = row => ({ captureID: row.captureID, arrival: row.arrival, observedAt: row.observedAt });
   const interactionKey = row =>
     `${row.sessionID}\u0000${row.interaction.kind}\u0000${row.interaction.requestID}`;
@@ -117,55 +141,41 @@ export async function readSession(captureDirectory, sessionID) {
       .map(row => ({ ...reference(row), scope: 'capture', reason: row.reason })),
     omissions: scoped.filter(row => row.omissions?.length)
       .map(row => ({ ...reference(row), sessionID: row.sessionID, type: row.type, omissions: row.omissions })),
-    horizon: lastObserved === null ? null : new Date(lastObserved).toISOString(),
+    horizon,
     interactions: { pending, resolved },
   };
 }
 
-export async function readTrace(captureDirectory, rootSessionID, requestedSessionID = null) {
-  const selectedSessionID = requestedSessionID ?? rootSessionID;
-  const reads = await Promise.all([
-    readMode(captureDirectory, selectedSessionID, '--tree'),
-    readMode(captureDirectory, selectedSessionID, '--tools'),
-    readMode(captureDirectory, selectedSessionID, '--metrics'),
-    readMode(captureDirectory, selectedSessionID, '--coverage'),
-  ]);
-  for (const read of reads) {
-    if (!read.ok) return { ok: false, reason: read.reason };
-  }
-  const [tree, tools, metrics, coverage] = reads;
-  const sessionIDs = new Set([selectedSessionID]);
-  for (let size = -1; size !== sessionIDs.size;) {
-    size = sessionIDs.size;
-    for (const row of tree.rows) {
-      if (row.sessionID && sessionIDs.has(row.parentSessionID)) sessionIDs.add(row.sessionID);
-      if (row.childSessionID && sessionIDs.has(row.sessionID)) sessionIDs.add(row.childSessionID);
-    }
-  }
-  const scoped = tree.rows.filter(row => sessionIDs.has(row.sessionID));
-  const reference = row => ({ captureID: row.captureID, arrival: row.arrival, eventID: row.eventID ?? null });
-  const nodes = [...sessionIDs].map(sessionID => {
-    const sessionRows = scoped.filter(row => row.sessionID === sessionID);
-    const agentIDs = [...new Set(sessionRows.map(row => row.agentID)
-      .filter(value => value !== null && value !== undefined))];
-    const observedParents = [...new Set(sessionRows.map(row => row.parentSessionID)
-      .filter(value => value !== null && value !== undefined))];
-    const delegations = scoped.filter(row => row.childSessionID === sessionID)
-      .map(row => ({ parentSessionID: row.sessionID, callID: row.callID ?? null,
-        evidence: { ...reference(row), type: row.type } }));
-    return {
-      sessionID,
-      isViewRoot: sessionID === selectedSessionID,
-      agentIDs,
-      observedParents,
-      delegations,
-      relation: sessionID === selectedSessionID ? 'view-root'
-        : delegations.length ? 'delegation-call-observed'
-        : observedParents.length ? 'parent-observed-call-unknown' : 'unknown',
-    };
-  });
-  const lastObserved = scoped.reduce((latest, row) =>
-    latest === null || row.observedAt > latest ? row.observedAt : latest, null);
+const OBSERVATION_STAGES = {
+  admitted: 'admitted-skill',
+  available: 'availability',
+  runtimeDefinition: 'runtime-definition',
+  deployedFile: 'deployed-file',
+  environment: 'environment',
+};
+const TRACE_MODES = ['--tree', '--tools', '--metrics', '--coverage'];
+
+const traceNodes = (scoped, sessionIDs, selectedSessionID, reference) => [...sessionIDs].map(sessionID => {
+  const sessionRows = scoped.filter(row => row.sessionID === sessionID);
+  const present = value => value !== null && value !== undefined;
+  const agentIDs = [...new Set(sessionRows.map(row => row.agentID).filter(present))];
+  const observedParents = [...new Set(sessionRows.map(row => row.parentSessionID).filter(present))];
+  const delegations = scoped.filter(row => row.childSessionID === sessionID)
+    .map(row => ({ parentSessionID: row.sessionID, callID: row.callID ?? null,
+      evidence: { ...reference(row), type: row.type } }));
+  return {
+    sessionID,
+    isViewRoot: sessionID === selectedSessionID,
+    agentIDs,
+    observedParents,
+    delegations,
+    relation: sessionID === selectedSessionID ? 'view-root'
+      : delegations.length ? 'delegation-call-observed'
+      : observedParents.length ? 'parent-observed-call-unknown' : 'unknown',
+  };
+});
+
+const traceSkills = (scoped, reference) => {
   const observation = stage => scoped
     .filter(row => row.type === 'recorder.observation' && row.stage === stage)
     .map(row => ({ observationTime: row.observationTime, source: row.source,
@@ -173,33 +183,56 @@ export async function readTrace(captureDirectory, rootSessionID, requestedSessio
       eventID: row.eventID ?? null, status: row.status, omissions: row.omissions,
       redactions: row.redactions, value: row.value, sha256: row.sha256 ?? null,
       hashBasis: row.hashBasis, evidence: reference(row) }));
-  const ofDiagnostic = (rows, type) => rows.filter(row => row.type === type);
+  return {
+    observed: scoped.filter(row => row.skill)
+      .map(row => ({ sessionID: row.sessionID, messageID: row.messageID ?? null,
+        callID: row.callID ?? null, type: row.type, skill: row.skill, evidence: reference(row) })),
+    admitted: observation(OBSERVATION_STAGES.admitted),
+    available: observation(OBSERVATION_STAGES.available),
+    definitions: [...observation(OBSERVATION_STAGES.runtimeDefinition),
+      ...observation(OBSERVATION_STAGES.deployedFile)],
+    environment: observation(OBSERVATION_STAGES.environment),
+  };
+};
+
+const traceDiagnostics = (metrics, tools, coverage) => {
+  const ofType = type => metrics.rows.filter(row => row.type === type);
+  return {
+    timeline: { intervals: ofType('diagnostic.execution-interval'), waits: ofType('diagnostic.wait') },
+    tools: { attempts: tools.rows },
+    metrics: {
+      steps: ofType('diagnostic.model-step'),
+      measurements: ofType('diagnostic.measurement'),
+      pendingInbox: ofType('diagnostic.pending-inbox'),
+      coverage: metrics.rows.find(row => row.type === 'diagnostic.metric-coverage') ?? null,
+    },
+    captureDiagnostics: coverage.rows.find(row => row.type === 'diagnostic.capture-coverage') ?? null,
+  };
+};
+
+export async function readTrace(captureDirectory, rootSessionID, requestedSessionID = null) {
+  const selectedSessionID = requestedSessionID || rootSessionID;
+  if (selectedSessionID.startsWith('--')) return { ok: false, notInExecution: true };
+  const session = await readSession(captureDirectory, rootSessionID);
+  if (!session.ok) return { ok: false, reason: session.reason };
+  if (selectedSessionID !== rootSessionID && !session.scope.sessionIDs.includes(selectedSessionID)) {
+    return { ok: false, notInExecution: true };
+  }
+  const reads = await Promise.all(TRACE_MODES.map(mode => readMode(captureDirectory, selectedSessionID, mode)));
+  for (const read of reads) {
+    if (!read.ok) return { ok: false, reason: read.reason };
+  }
+  const [tree, tools, metrics, coverage] = reads;
+  const { sessionIDs, scoped, horizon } = sessionTree(tree.rows, selectedSessionID);
+  const reference = row => ({ captureID: row.captureID, arrival: row.arrival, eventID: row.eventID ?? null });
   return {
     ok: true,
     readable: true,
     selectedSessionID,
-    tree: { nodes, sessionIDs: [...sessionIDs] },
-    timeline: {
-      intervals: ofDiagnostic(metrics.rows, 'diagnostic.execution-interval'),
-      waits: ofDiagnostic(metrics.rows, 'diagnostic.wait'),
-    },
-    tools: { attempts: tools.rows },
-    metrics: {
-      steps: ofDiagnostic(metrics.rows, 'diagnostic.model-step'),
-      measurements: ofDiagnostic(metrics.rows, 'diagnostic.measurement'),
-      pendingInbox: ofDiagnostic(metrics.rows, 'diagnostic.pending-inbox'),
-      coverage: metrics.rows.find(row => row.type === 'diagnostic.metric-coverage') ?? null,
-    },
-    captureDiagnostics: coverage.rows.find(row => row.type === 'diagnostic.capture-coverage') ?? null,
-    skills: {
-      observed: scoped.filter(row => row.skill)
-        .map(row => ({ sessionID: row.sessionID, messageID: row.messageID ?? null,
-          callID: row.callID ?? null, type: row.type, skill: row.skill, evidence: reference(row) })),
-      admitted: observation('admitted-skill'),
-      available: observation('availability'),
-      definitions: [...observation('runtime-definition'), ...observation('deployed-file')],
-      environment: observation('environment'),
-    },
-    horizon: lastObserved === null ? null : new Date(lastObserved).toISOString(),
+    tree: { nodes: traceNodes(scoped, sessionIDs, selectedSessionID, reference),
+      sessionIDs: [...sessionIDs] },
+    ...traceDiagnostics(metrics, tools, coverage),
+    skills: traceSkills(scoped, reference),
+    horizon,
   };
 }

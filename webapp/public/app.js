@@ -514,10 +514,15 @@ function selectSession(sessionID) {
 }
 
 async function refreshTrace() {
-  if (state.selected === null) return;
-  const query = state.selectedSession ? `?session=${encodeURIComponent(state.selectedSession)}` : '';
-  try { state.trace = await api(`/api/executions/${state.selected}/trace${query}`); }
-  catch { state.trace = { readable: false, reason: 'trace-unavailable' }; }
+  const executionID = state.selected;
+  const sessionID = state.selectedSession;
+  if (executionID === null) return;
+  const query = sessionID ? `?session=${encodeURIComponent(sessionID)}` : '';
+  let trace;
+  try { trace = await api(`/api/executions/${executionID}/trace${query}`); }
+  catch { trace = { readable: false, reason: 'trace-unavailable' }; }
+  if (state.selected !== executionID || state.selectedSession !== sessionID) return;
+  state.trace = trace;
   renderConversation();
 }
 
@@ -544,8 +549,9 @@ function renderTraceTree(execution, trace) {
     const agent = node.agentIDs.length ? `agente: ${node.agentIDs.join(', ')}` : 'agente no observado';
     const relation = node.relation === 'view-root' ? 'raíz de la vista actual'
       : node.relation === 'delegation-call-observed'
-        ? `hija de ${node.delegations[0].parentSessionID} por llamada observada ${
-          node.delegations[0].callID ?? 'sin id de llamada'} · evidencia: ${evidenceText(node.delegations[0].evidence)}`
+        ? `hija por ${node.delegations.length} llamada(s) observada(s): ${node.delegations.map(delegation =>
+          `${delegation.parentSessionID} · ${delegation.callID ?? 'sin id de llamada'} · evidencia: ${
+            evidenceText(delegation.evidence)}`).join(' | ')}`
         : node.relation === 'parent-observed-call-unknown'
           ? `padre observado ${node.observedParents.join(', ')}; llamada creadora no observada`
           : 'relación desconocida o excluida';
@@ -676,25 +682,31 @@ function renderTraceMetrics(trace) {
 
 function renderTraceSkills(trace) {
   const skills = trace.skills;
+  const provenance = item => el('p', { class: 'notice' },
+    `Procedencia: ${item.source ? `fuente ${item.source} · ` : ''}${item.observationTime !== undefined
+      ? `observada ${formatMs(item.observationTime)} · ` : ''}evidencia: ${evidenceText(item.evidence)}`);
   const observed = el('ul', {}, ...skills.observed.map(item => el('li', {},
     el('p', {}, `Skill observada: ${item.skill.name ?? item.skill.id ?? 'identidad no expuesta'}`),
     el('p', { class: 'notice' },
       `Origen: ${item.skill.origin === 'successful-skill-tool-result'
         ? 'resultado correcto de una llamada de skill' : 'evento público de activación del runtime'}`
       + ` · sesión ${item.sessionID} · mensaje ${item.messageID ?? 'desconocido'} · llamada ${item.callID ?? 'desconocida'}`),
+    provenance(item),
     el('p', { class: 'notice' }, `SHA-256 del contenido filtrado: ${item.skill.sha256}`),
     el('details', {}, el('summary', {}, 'Contenido autorizado'), el('pre', {}, item.skill.text)))));
   const admitted = el('ul', {}, ...skills.admitted.map(item => el('li', {},
     `Skill admitida ${item.value?.id ?? 'desconocida'}${item.value?.name ? ` (${item.value.name})` : ''}`
-    + ` · mensaje ${item.messageID ?? 'desconocido'} · la admisión no prueba despacho por el modelo`)));
+    + ` · mensaje ${item.messageID ?? 'desconocido'} · la admisión no prueba despacho por el modelo`,
+    provenance(item))));
   const available = el('ul', {}, ...skills.available.flatMap(observation =>
     (Array.isArray(observation.value) ? observation.value : []).map(skill => el('li', {},
-      `${skill.id}${skill.name ? ` (${skill.name})` : ''}`))));
+      `${skill.id}${skill.name ? ` (${skill.name})` : ''}`, provenance(observation)))));
   const definitions = el('ul', {}, ...skills.definitions.map(item => el('li', {},
     el('p', {}, `Definición observada (${item.source}): ${item.value?.id ?? item.identity ?? 'identidad desconocida'}${item.value?.name ? ` (${item.value.name})` : ''}`),
     el('p', { class: 'notice' },
       `Leída después del hecho (${new Date(item.observationTime).toISOString()}); no es una foto histórica de ninguna activación.`
       + `${item.value?.path ? ` Ruta: ${item.value.path}.` : ''}`),
+    provenance(item),
     item.value?.content !== undefined && item.value?.content !== null
       ? el('details', {}, el('summary', {}, 'Contenido autorizado'), el('pre', {}, item.value.content)) : null,
     item.omissions?.length ? el('p', { class: 'notice' }, `Omisiones: ${item.omissions.join(', ')}`) : null)));
@@ -753,7 +765,9 @@ function renderTraceCoverage(trace) {
       (coverage.omissions?.length ?? 0) ? omissions : el('p', { class: 'notice' }, 'Sin omisiones registradas.')),
     el('details', {}, el('summary', {}, 'Diagnósticos del registrador en el alcance'),
       (coverage.diagnostics?.length ?? 0) ? diagnostics : el('p', { class: 'notice' }, 'Sin fallos ni lagunas registrados.')),
-    el('details', {}, el('summary', {}, 'Horizonte de lectura por diario'), horizons));
+    el('details', {}, el('summary', {}, 'Horizonte de lectura por diario'),
+      el('p', { class: 'notice' }, 'El horizonte global de la traza es el máximo observado entre los diarios del alcance, no un corte común; los horizontes de cada diario figuran aquí.'),
+      horizons));
 }
 
 function traceSection() {
@@ -820,8 +834,9 @@ function renderExecution() {
         : `no consultable: ${capture?.reason ?? 'desconocido'}`),
       el('dt', {}, 'Alcance de evidencia'), el('dd', {}, capture?.readable
         ? `Árbol de sesiones observado: ${capture.scope.sessionIDs.join(', ')}` : 'desconocido'),
-      el('dt', {}, 'Evidencia hasta'), el('dd', {}, capture?.readable
-        ? (capture.horizon ?? 'sin eventos observados') : 'horizonte desconocido')),
+      el('dt', {}, 'Evidencia hasta (máximo observado)'), el('dd', {}, capture?.readable
+        ? `${capture.horizon ?? 'sin eventos observados'} · máximo observado en el árbol; los horizontes por diario están en la cobertura`
+        : 'horizonte desconocido')),
     el('p', { class: 'notice' }, 'Este corte permite un único envío inicial por ejecución; no hay cierre manual.'),
   ];
   if (state.health?.engine?.reachable === false && !TERMINAL.includes(execution.status)) {

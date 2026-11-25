@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readSession } from '../webapp/evidence.mjs';
+import { readSession, readTrace } from '../webapp/evidence.mjs';
 
 const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
   ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : tmpdir());
@@ -72,4 +72,14 @@ test('una captura ilegible no publica un horizonte ni lagunas inventadas', async
   assert.match(evidence.reason, /Invalid or incomplete capture/);
   assert.equal(evidence.horizon, undefined);
   assert.equal(evidence.gaps, undefined);
+});
+
+test('un diario invï¿½lido produce un fallo explï¿½cito y no bloquea lecturas posteriores', async () => {
+  const directory = await mkdtemp(join(temporary, 'webapp-evidence-invalid-'));
+  await writeFile(join(directory, 'broken.jsonl'), '{"not":"a record"}\n');
+  const first = await readSession(directory, 'ses_root');
+  assert.equal(first.ok, false);
+  assert.match(first.reason, /Invalid or incomplete capture: broken\.jsonl, line 1/);
+  assert.equal((await readSession(directory, 'ses_root')).ok, false);
+  assert.deepEqual(await readTrace(directory, 'ses_root', '--tree'), { ok: false, notInExecution: true });
 });

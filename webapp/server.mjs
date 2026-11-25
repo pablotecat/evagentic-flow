@@ -559,24 +559,13 @@ export async function startApp({ configPath, port: requestedPort }) {
     if (trace && request.method === 'GET') {
       const execution = store.byId(trace[1]);
       if (!execution) return json(response, 404, { error: 'unknown-execution' });
-      if (!execution.sessionID) {
-        return json(response, 200, { executionID: execution.id, readable: false, reason: 'session-not-confirmed' });
-      }
-      const evidence = await readSession(config.captureDirectory, execution.sessionID);
-      if (!evidence.ok) {
-        return json(response, 200, { executionID: execution.id, rootSessionID: execution.sessionID,
-          readable: false, reason: evidence.reason });
-      }
-      const requested = url.searchParams.get('session');
-      if (requested && requested !== execution.sessionID
-        && !evidence.scope.sessionIDs.includes(requested)) {
-        return json(response, 404, { error: 'session-not-in-execution' });
-      }
-      const read = await readTrace(config.captureDirectory, execution.sessionID, requested);
-      if (!read.ok) {
-        return json(response, 200, { executionID: execution.id, rootSessionID: execution.sessionID,
-          readable: false, reason: read.reason });
-      }
+      const unreadable = reason => json(response, 200, { executionID: execution.id,
+        ...execution.sessionID ? { rootSessionID: execution.sessionID } : {}, readable: false, reason });
+      if (!execution.sessionID) return unreadable('session-not-confirmed');
+      const read = await readTrace(config.captureDirectory, execution.sessionID,
+        url.searchParams.get('session'));
+      if (read.notInExecution) return json(response, 404, { error: 'session-not-in-execution' });
+      if (!read.ok) return unreadable(read.reason);
       return json(response, 200, { executionID: execution.id,
         rootSessionID: execution.sessionID, ...read });
     }

@@ -87,3 +87,36 @@ test('UI pura: la detención distingue solicitud, desenlace por sesión y fallo 
   assert.ok(recorder.includes('Motivo público declarado: synthetic-reason'));
   assert.ok(recorder.includes('no hay desbloqueo automático'));
 });
+
+test('UI pura: una traza tardía no se pinta bajo otra selección', async t => {
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(new URL('../webapp/public/index.html', import.meta.url).href);
+  await page.addScriptTag({ content: await readFile(new URL('../webapp/public/app.js', import.meta.url), 'utf8') });
+  const result = await page.evaluate(async () => {
+    const pending = new Map();
+    api = path => new Promise(resolve => pending.set(path, resolve));
+    renderConversation = () => {};
+    state.selected = 'exec-a';
+    state.selectedSession = null;
+    const late = refreshTrace();
+    state.selected = 'exec-b';
+    state.trace = null;
+    const current = refreshTrace();
+    pending.get('/api/executions/exec-b/trace')({ readable: true, selectedSessionID: 'b' });
+    await current;
+    pending.get('/api/executions/exec-a/trace')({ readable: true, selectedSessionID: 'a' });
+    await late;
+    const afterExecution = state.trace?.selectedSessionID;
+    state.selectedSession = 'child';
+    const stale = refreshTrace();
+    state.selectedSession = 'other';
+    state.trace = null;
+    pending.get('/api/executions/exec-b/trace?session=child')({ readable: true, selectedSessionID: 'child' });
+    await stale;
+    return { afterExecution, afterSession: state.trace };
+  });
+  assert.equal(result.afterExecution, 'b');
+  assert.equal(result.afterSession, null);
+});
