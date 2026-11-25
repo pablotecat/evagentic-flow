@@ -36,4 +36,11 @@ export const launchExecution = (app, body) => appFetch(app, '/api/executions', {
   body: JSON.stringify(body),
 });
 
+export const replyInteraction = (app, executionId, body) => appFetch(app,
+  `/api/executions/${executionId}/interactions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
 export const executionDetail = (app, id) => appFetch(app, `/api/executions/${id}`);

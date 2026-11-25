@@ -59,6 +59,33 @@ export async function readSession(captureDirectory, sessionID) {
   const lastObserved = scoped.reduce((latest, row) =>
     latest === null || row.observedAt > latest ? row.observedAt : latest, null);
   const reference = row => ({ captureID: row.captureID, arrival: row.arrival, observedAt: row.observedAt });
+  const interactionKey = row =>
+    `${row.sessionID}\u0000${row.interaction.kind}\u0000${row.interaction.requestID}`;
+  const resolvedKeys = new Set();
+  for (const row of scoped) {
+    if (row.interaction?.requestID && row.interaction.phase !== 'requested') resolvedKeys.add(interactionKey(row));
+  }
+  const requests = new Map();
+  const resolved = [];
+  const identity = entry => `${entry.sessionID}\u0000${entry.kind}\u0000${entry.requestID}`;
+  for (const row of scoped) {
+    const interaction = row.interaction;
+    if (!interaction?.requestID) continue;
+    const entry = {
+      kind: interaction.kind,
+      sessionID: row.sessionID,
+      requestID: interaction.requestID,
+      request: interaction.request ?? null,
+      observedAt: row.observedAt,
+    };
+    if (interaction.phase !== 'requested') resolved.push({ ...entry,
+      phase: interaction.phase, response: interaction.response ?? null });
+    else requests.set(identity(entry), entry);
+  }
+  for (const entry of resolved) entry.request = requests.get(identity(entry))?.request ?? entry.request;
+  const pending = [...requests.entries()]
+    .filter(([key]) => !resolvedKeys.has(key))
+    .map(([, entry]) => entry);
   return {
     ok: true,
     rows: read.rows,
@@ -75,5 +102,6 @@ export async function readSession(captureDirectory, sessionID) {
     omissions: scoped.filter(row => row.omissions?.length)
       .map(row => ({ ...reference(row), sessionID: row.sessionID, type: row.type, omissions: row.omissions })),
     horizon: lastObserved === null ? null : new Date(lastObserved).toISOString(),
+    interactions: { pending, resolved },
   };
 }

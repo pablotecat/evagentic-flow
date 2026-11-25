@@ -7,7 +7,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { execFile } from 'node:child_process';
 import { eventually, fixture, records } from './support/instance.mjs';
-import { appFetch, createExecution, executionDetail, launchExecution, launchWebapp } from './support/webapp.mjs';
+import { appFetch, createExecution, executionDetail, launchExecution, launchWebapp, replyInteraction } from './support/webapp.mjs';
 import { startApp } from '../webapp/server.mjs';
 
 test('el cleanup cierra la app incluso si una aserción falla antes del cierre explícito', async () => {
@@ -535,3 +535,182 @@ test('una opción elegida que no está expuesta se rechaza explícitamente sin d
   assert.equal(offline.body.state, 'engine-unreachable');
   assert.equal(offline.body.agents, null);
 });
+
+const pendingInteraction = (app, id, filter) => eventually(async () => {
+  const detail = (await executionDetail(app, id)).body;
+  return detail.interactions?.pending?.find(filter) ?? undefined;
+}, 'pending interaction was not surfaced');
+
+const answerValue = field => {
+  if (field.type === 'boolean') return true;
+  if (field.type === 'number' || field.type === 'integer') return 1;
+  const first = (field.options ?? [])[0];
+  if (field.type === 'multiselect') return [first?.value ?? first?.label ?? 'Proceed'].filter(Boolean);
+  return first?.value ?? first?.label ?? 'Continuar sintético';
+};
+
+test('la app responde preguntas y permisos nativos de la raíz y subejecuciones sin doble respuesta ni solicitudes ajenas',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true,
+      config: { secrets: ['synthetic-secret-42'] } });
+    const { app, configPath } = await launchWebapp(t, instance);
+    const created = await createExecution(app, 'intervencion-raiz', 'SYNTHETIC_HUMAN');
+    assert.equal(created.status, 201);
+    const id = created.body.execution.id;
+    const root = await eventually(async () => {
+      const sessionID = (await executionDetail(app, id)).body.execution.sessionID;
+      return sessionID ?? undefined;
+    }, 'root session was not confirmed');
+    const rootQuestion = await pendingInteraction(app, id,
+      item => item.kind === 'form' && item.sessionID === root);
+    assert.ok(rootQuestion.requestID);
+    assert.ok(rootQuestion.request.fields.length >= 1);
+    assert.equal(typeof rootQuestion.request.title, 'string');
+    const rootField = rootQuestion.request.fields[0];
+    let detail = (await executionDetail(app, id)).body;
+    assert.equal(detail.execution.status, 'running', 'an execution waiting for intervention was not running');
+    assert.equal(detail.execution.sessionID, root);
+    const rootRequest = (await records(instance.captureDirectory))
+      .find(row => row.type === 'form.created' && row.sessionID === root);
+    assert.equal(rootRequest.interaction.requestID, rootQuestion.requestID);
+
+    const child = (await instance.api('/api/session', { parentID: root,
+      location: { directory: instance.projects[0] },
+      permissions: [{ action: 'synthetic.approval', resource: '*', effect: 'ask' }] })).data;
+    await instance.api(`/api/session/${child.id}/prompt`, { text: 'SYNTHETIC_HUMAN' });
+    const childQuestion = await pendingInteraction(app, id,
+      item => item.kind === 'form' && item.sessionID === child.id);
+    assert.notEqual(childQuestion.sessionID, root);
+    const childField = childQuestion.request.fields[0];
+
+    const foreign = (await instance.api('/api/session',
+      { location: { directory: instance.projects[0] } })).data;
+    const foreignForm = (await instance.api(`/api/session/${foreign.id}/form`, {
+      title: 'Pregunta ajena sintética', fields: [{ key: 'answer', type: 'string' }] })).data;
+    detail = (await executionDetail(app, id)).body;
+    assert.ok(!detail.interactions.pending.some(item => item.sessionID === foreign.id),
+      'a foreign interaction leaked into the execution detail');
+    const foreignReply = await replyInteraction(app, id, { kind: 'form', sessionID: foreign.id,
+      requestID: foreignForm.id, answer: { answer: 'Respuesta ajena' } });
+    assert.equal(foreignReply.status, 403);
+    assert.equal(foreignReply.body.error, 'session-not-in-execution');
+    const foreignPending = (await instance.api(`/api/session/${foreign.id}/form`)).data;
+    assert.equal(foreignPending.length, 1, 'a foreign interaction was answered from the app');
+    assert.ok(!(await records(instance.captureDirectory))
+      .some(row => row.type === 'form.replied' && row.sessionID === foreign.id));
+
+    const unauthorized = await replyInteraction(app, id, { kind: 'form', sessionID: root,
+      requestID: rootQuestion.requestID, answer: { [rootField.key]: 'x', ajeno: 'y' } });
+    assert.equal(unauthorized.status, 400);
+    assert.equal(unauthorized.body.error, 'answer-fields-not-authorized');
+    const missing = await replyInteraction(app, id, { kind: 'form', sessionID: root,
+      requestID: 'frm_missing', answer: { [rootField.key]: 'x' } });
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error, 'unknown-interaction');
+
+    const childAnswer = await replyInteraction(app, id, { kind: 'form', sessionID: child.id,
+      requestID: childQuestion.requestID, answer: { [childField.key]: answerValue(childField) } });
+    assert.equal(childAnswer.status, 200);
+    assert.equal(childAnswer.body.interaction.phase, 'replied');
+    const childPermission = await pendingInteraction(app, id,
+      item => item.kind === 'permission' && item.sessionID === child.id);
+    assert.equal(childPermission.request.action, 'synthetic.approval');
+    assert.deepEqual(childPermission.request.resources, ['Synthetic resource [REDACTED]']);
+    const badDecision = await replyInteraction(app, id, { kind: 'permission', sessionID: child.id,
+      requestID: childPermission.requestID, decision: 'forever' });
+    assert.equal(badDecision.status, 400);
+    assert.equal(badDecision.body.error, 'invalid-request');
+    const childDecision = await replyInteraction(app, id, { kind: 'permission', sessionID: child.id,
+      requestID: childPermission.requestID, decision: 'once' });
+    assert.equal(childDecision.status, 200);
+
+    await app.close();
+    const restarted = await startApp({ configPath });
+    t.after(() => restarted.close());
+    const rebuilt = await pendingInteraction(restarted, id,
+      item => item.kind === 'form' && item.sessionID === root);
+    assert.equal(rebuilt.requestID, rootQuestion.requestID, 'a reload did not rebuild pending interactions');
+
+    const rootAnswer = await replyInteraction(restarted, id, { kind: 'form', sessionID: root,
+      requestID: rootQuestion.requestID, answer: { [rootField.key]: answerValue(rootField) } });
+    assert.equal(rootAnswer.status, 200);
+    const duplicated = await replyInteraction(restarted, id, { kind: 'form', sessionID: root,
+      requestID: rootQuestion.requestID, answer: { [rootField.key]: answerValue(rootField) } });
+    assert.equal(duplicated.status, 409);
+    assert.equal(duplicated.body.error, 'interaction-resolved');
+    const rootReplies = await eventually(async () => {
+      const replies = (await records(instance.captureDirectory)).filter(row =>
+        row.type === 'form.replied' && row.sessionID === root
+        && row.interaction.requestID === rootQuestion.requestID);
+      return replies.length ? replies : undefined;
+    }, 'the root reply was not captured');
+    assert.equal(rootReplies.length, 1, 'the same interaction was replied twice');
+
+    const maybeRootPermission = await eventually(async () => {
+      const current = (await executionDetail(restarted, id)).body;
+      if (current.execution.status === 'succeeded') return 'closed';
+      return current.interactions.pending.find(
+        item => item.kind === 'permission' && item.sessionID === root) ?? false;
+    }, 'the root neither finished nor asked for intervention', 30000).catch(() => false);
+    if (maybeRootPermission !== 'closed' && maybeRootPermission !== false) {
+      const rootDecision = await replyInteraction(restarted, id, { kind: 'permission',
+        sessionID: root, requestID: maybeRootPermission.requestID, decision: 'once' });
+      assert.equal(rootDecision.status, 200);
+    }
+
+    await eventually(async () => (await executionDetail(restarted, id)).body.execution.status === 'succeeded',
+      'the execution did not continue after answering its interactions', 240000);
+    detail = (await executionDetail(restarted, id)).body;
+    assert.equal(detail.interactions.pending.length, 0);
+    const resolvedChild = detail.interactions.resolved.find(item =>
+      item.kind === 'form' && item.requestID === childQuestion.requestID);
+    assert.ok(resolvedChild);
+    const expectedAnswer = { [childField.key]: answerValue(childField) };
+    assert.deepEqual(resolvedChild.response,
+      JSON.parse(JSON.stringify(expectedAnswer).replaceAll('synthetic-secret-42', '[REDACTED]')));
+    assert.ok(detail.interactions.resolved.some(item => item.kind === 'permission'
+      && item.sessionID === child.id && item.response.decision === 'once'));
+    assert.equal(detail.execution.id, id);
+    if (maybeRootPermission !== 'closed' && maybeRootPermission !== false) {
+      assert.ok(detail.interactions.resolved.some(item => item.kind === 'permission'
+        && item.sessionID === root && item.requestID === maybeRootPermission.requestID));
+    }
+    const admitted = (await records(instance.captureDirectory)).filter(row =>
+      row.type === 'session.inbox.enqueued' && row.sessionID === root && row.content?.role === 'user');
+    assert.equal(admitted.length, 1, 'answering an interaction dispatched the assignment again');
+    const sessions = (await instance.api(
+      `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
+    assert.equal(sessions.filter(session =>
+      (session.title ?? '').startsWith('Flujo en Proyecto ·')).length, 1,
+      'answering an interaction created a second root session');
+  });
+
+test('responder con el motor caído falla de forma explícita sin conceder permisos ni relanzar',
+  { timeout: 300000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true });
+    const { app } = await launchWebapp(t, instance);
+    const created = await createExecution(app, 'intervencion-sin-motor', 'SYNTHETIC_HUMAN');
+    assert.equal(created.status, 201);
+    const id = created.body.execution.id;
+    const root = await eventually(async () => {
+      const sessionID = (await executionDetail(app, id)).body.execution.sessionID;
+      return sessionID ?? undefined;
+    }, 'root session was not confirmed');
+    const question = await pendingInteraction(app, id,
+      item => item.kind === 'form' && item.sessionID === root);
+    const field = question.request.fields[0];
+
+    await instance.stop();
+    const reply = await replyInteraction(app, id, { kind: 'form', sessionID: root,
+      requestID: question.requestID, answer: { [field.key]: answerValue(field) } });
+    assert.equal(reply.status, 503);
+    assert.equal(reply.body.error, 'engine-unreachable');
+    const evidence = await records(instance.captureDirectory);
+    assert.ok(!evidence.some(row => row.type === 'form.replied' && row.sessionID === root),
+      'an unreachable engine produced a reply');
+    const detail = (await executionDetail(app, id)).body;
+    assert.equal(detail.execution.status, 'running');
+    assert.equal(detail.interactions.pending.length, 1, 'the visible wait was lost with the engine down');
+    assert.notEqual((await createExecution(app, 'intervencion-otro', 'No debe lanzarse.')).status, 201,
+      'a failed reply released the project');
+  });

@@ -70,6 +70,24 @@ export function createEngine({ baseURL, password }) {
       if (!result.ok) throw new Error(`messages unavailable: ${result.status}`);
       return result.data?.data ?? [];
     },
+    async forms(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}/form`, { signal });
+      if (!result.ok) throw new Error(`forms unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async permissions(sessionID, signal) {
+      const result = await send(`/api/session/${sessionID}/permission`, { signal });
+      if (!result.ok) throw new Error(`permissions unavailable: ${result.status}`);
+      return result.data?.data ?? [];
+    },
+    async replyForm(sessionID, requestID, answer, signal) {
+      return send(`/api/session/${sessionID}/form/${requestID}/reply`, {
+        method: 'POST', body: { answer }, timeout: 30000, signal });
+    },
+    async replyPermission(sessionID, requestID, decision, signal) {
+      return send(`/api/session/${sessionID}/permission/${requestID}/reply`, {
+        method: 'POST', body: { decision }, timeout: 30000, signal });
+    },
     async setAgent(sessionID, agent, signal) {
       return send(`/api/session/${sessionID}/agent`, { method: 'POST', body: { agent }, timeout: 30000, signal });
     },

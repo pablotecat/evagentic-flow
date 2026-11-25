@@ -360,3 +360,114 @@ test('el chat presenta opciones de la instancia y lanza un comando con el agente
   await page.waitForFunction(() => document.querySelector('#command option[value="synthetic-echo"]') === null,
     undefined, { timeout: 60000 });
 });
+
+async function fillPendingQuestion(page, requestID) {
+  const form = page.locator(`[data-kind="form"][data-request="${requestID}"]`);
+  await form.waitFor();
+  const select = form.locator('select');
+  const checkbox = form.locator('input[type="checkbox"]');
+  if (await select.count()) await select.first().selectOption({ index: 1 });
+  else if (await checkbox.count()) await checkbox.first().check();
+  else await form.locator('input[type="text"], input[type="number"]').first().fill('Continuar synthetic-secret-42');
+  await form.getByRole('button', { name: 'Responder pregunta' }).click();
+}
+
+test('el navegador responde preguntas y permisos nativos y reconstruye las pendientes al recargar',
+  { timeout: 480000 }, async t => {
+    const instance = await fixture(t, { simulation: true, syntheticTools: true,
+      config: { secrets: ['synthetic-secret-42'] } });
+    const { app } = await launchWebapp(t, instance);
+    const browser = await chromium.launch();
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(app.url);
+    await page.waitForFunction(() => document.querySelector('#status')?.textContent
+      ?.includes('Motor: disponible') ?? false, undefined, { timeout: 60000 });
+
+    await upload(page, 'SYNTHETIC_HUMAN');
+    await awaitStatus(page, 'En ejecución');
+    const executionId = (await appFetch(app, '/api/executions')).body.executions[0].id;
+    const root = (await appFetch(app, `/api/executions/${executionId}`)).body.execution.sessionID;
+    await page.waitForSelector(`[data-kind="form"][data-session="${root}"]`);
+    const rootPanel = page.locator(`[data-kind="form"][data-session="${root}"]`);
+    assert.ok((await rootPanel.innerText()).includes('Pregunta nativa'));
+    assert.ok((await rootPanel.innerText()).includes('Sesión raíz'));
+    assert.ok((await page.locator('[aria-label="Intervención"]').innerText())
+      .includes('La ejecución espera intervención'));
+
+    const child = await eventually(async () => {
+      const session = (await instance.api('/api/session', { parentID: root,
+        location: { directory: instance.projects[0] },
+        permissions: [{ action: 'synthetic.approval', resource: '*', effect: 'ask' }] })).data;
+      await instance.api(`/api/session/${session.id}/prompt`, { text: 'SYNTHETIC_HUMAN' });
+      await eventually(async () => (await records(instance.captureDirectory))
+        .some(row => row.sessionID === session.id && row.type === 'form.created'),
+        'child question was not persisted');
+      return session.id;
+    }, 'child session could not be observed');
+    await page.waitForSelector(`[data-kind="form"][data-session="${child}"]`);
+    const childPanelText = await page.locator(`[data-kind="form"][data-session="${child}"]`).innerText();
+    assert.ok(childPanelText.includes('Subejecución'));
+
+    const foreign = (await instance.api('/api/session',
+      { location: { directory: instance.projects[0] } })).data;
+    const foreignForm = (await instance.api(`/api/session/${foreign.id}/form`, {
+      title: 'Pregunta ajena sintética', fields: [{ key: 'answer', type: 'string' }] })).data;
+    assert.equal(await page.locator(`[data-request="${foreignForm.id}"]`).count(), 0,
+      'a foreign interaction appeared in the execution panel');
+
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll('#history button').length >= 1,
+      undefined, { timeout: 60000 });
+    await page.locator('#history button').first().click();
+    await page.waitForSelector(`[data-kind="form"][data-session="${root}"]`);
+    await page.waitForSelector(`[data-kind="form"][data-session="${child}"]`);
+
+    const pending = (await appFetch(app, `/api/executions/${executionId}`)).body.interactions.pending;
+    const childQuestion = pending.find(item => item.kind === 'form' && item.sessionID === child);
+    await fillPendingQuestion(page, childQuestion.requestID);
+    await page.waitForSelector('[data-kind="permission"]');
+    const permissionText = await page.locator('[data-kind="permission"]').innerText();
+    assert.ok(permissionText.includes('Permiso nativo'));
+    assert.ok(permissionText.includes('Subejecución'));
+    assert.ok(permissionText.includes('synthetic.approval'));
+    assert.ok(permissionText.includes('Synthetic resource [REDACTED]'));
+    assert.ok(!permissionText.includes('synthetic-secret-42'));
+    await page.locator('[data-kind="permission"] button[data-decision="once"]').click();
+    await page.waitForFunction(() => !document.querySelector('[data-kind="permission"]'),
+      undefined, { timeout: 60000 });
+
+    const rootQuestion = (await appFetch(app, `/api/executions/${executionId}`))
+      .body.interactions.pending.find(item => item.kind === 'form' && item.sessionID === root);
+    await fillPendingQuestion(page, rootQuestion.requestID);
+    for (let round = 0; round < 3; round++) {
+      const outcome = await page.waitForFunction(() => {
+        const status = document.querySelector('#execution-status')?.textContent ?? '';
+        if (status.includes('Finalizada técnicamente')) return 'final';
+        if (document.querySelector('[data-kind="permission"]')) return 'permission';
+        return false;
+      }, undefined, { polling: 750, timeout: 240000 });
+      if (await page.evaluate(() => document.querySelector('#execution-status')?.textContent
+        ?.includes('Finalizada técnicamente') ?? false)) break;
+      if (outcome !== 'permission') break;
+      await page.locator('[data-kind="permission"] button[data-decision="once"]').first().click();
+      await page.waitForFunction(() => !document.querySelector('[data-kind="permission"]'),
+        undefined, { timeout: 60000 });
+    }
+    await awaitStatus(page, 'Finalizada técnicamente', 240000);
+
+    await page.getByText('Respuestas registradas en la captura', { exact: true }).click();
+    const evidenceText = await page.locator('[aria-label="Respuestas registradas"]').innerText();
+    assert.ok(evidenceText.includes('once'), 'the permission decision was not consultable');
+    assert.ok(evidenceText.includes('cliente externo no identificado'),
+      'the authorized evidence lost its unattributed provenance');
+    const board = await page.locator('#conversation').innerText();
+    assert.ok(!board.includes('synthetic-secret-42'), 'interaction answers bypassed capture redaction');
+    assert.equal(await admittedCount(instance), 2,
+      'answering native interactions re-sent or dispatched work');
+    const sessions = (await instance.api(
+      `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
+    assert.equal(sessions.filter(session =>
+      (session.title ?? '').startsWith('Flujo en Proyecto ·')).length, 1,
+      'answering native interactions created another root session');
+  });

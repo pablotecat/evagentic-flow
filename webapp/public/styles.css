@@ -208,3 +208,77 @@ aside {
 #history .empty {
   color: #66717f;
 }
+
+#interactions {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #d5dae2;
+  border-radius: 8px;
+  background: #faf6ec;
+}
+
+#interactions h3,
+#interactions h4 {
+  margin: 0 0 0.35rem;
+}
+
+#interactions form,
+#interactions section {
+  border: 1px solid #d5dae2;
+  border-radius: 6px;
+  background: white;
+  padding: 0.6rem 0.8rem;
+  margin: 0.5rem 0;
+}
+
+#interactions label {
+  display: block;
+  font-size: 0.85rem;
+  color: #45505e;
+  margin-top: 0.4rem;
+}
+
+#interactions input[type='text'],
+#interactions input[type='number'],
+#interactions select {
+  display: block;
+  width: 100%;
+  margin: 0.25rem 0 0;
+  padding: 0.35rem;
+  font: inherit;
+  border: 1px solid #b8c0cc;
+  border-radius: 6px;
+  background: white;
+}
+
+#interactions fieldset {
+  border: 1px solid #d5dae2;
+  border-radius: 6px;
+  margin: 0.4rem 0;
+  padding: 0.4rem 0.6rem;
+}
+
+#interactions button {
+  padding: 0.45rem 1.1rem;
+  margin-top: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #29527a;
+  background: #29527a;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+#interactions button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+#interactions .permission-actions button {
+  margin-right: 0.5rem;
+}
+
+#interactions .permission-actions button[data-decision='reject'] {
+  border-color: #b23c3c;
+  background: #b23c3c;
+}

@@ -16,6 +16,22 @@ const DISPATCH_LABELS = {
   'selection-unavailable': 'Despacho: opción elegida no disponible; no se envió el encargo ni se sustituyó por otra.',
 };
 
+const INTERACTION_ERRORS = {
+  'invalid-json': 'La respuesta enviada no tenía un formato válido.',
+  'invalid-request': 'La respuesta no era válida para la solicitud pendiente; no se ha enviado nada.',
+  'invalid-answer': 'El tipo de una respuesta no coincide con el campo público admitido.',
+  'answer-fields-not-authorized': 'La respuesta incluía campos no autorizados por la solicitud observada.',
+  'missing-required-field': 'Falta una respuesta obligatoria de la solicitud.',
+  'request-not-observable': 'La captura no permite comprobar los campos admisibles; no se ha respondido nada.',
+  'unknown-interaction': 'No existe esa solicitud pendiente para esta ejecución.',
+  'interaction-resolved': 'La solicitud ya estaba resuelta o desaparecida; no se ha vuelto a responder.',
+  'session-not-in-execution': 'La solicitud pertenece a otra sesión o ejecución; no se ha respondido nada ajeno.',
+  'execution-terminal': 'La ejecución ya está cerrada; ya no se admite responder aquí.',
+  'evidence-unavailable': 'La evidencia no está consultable; no se ha respondido nada.',
+  'engine-unreachable': 'No se pudo consultar o responder en el motor; no se ha concedido ningún permiso.',
+  'reply-failed': 'El motor rechazó la respuesta; no se ha concedido ningún permiso ni relanzado el encargo.',
+};
+
 const state = {
   health: null,
   connected: null,
@@ -31,6 +47,9 @@ const state = {
   agent: '',
   model: '',
   command: '',
+  interactionAnswers: {},
+  interactionError: null,
+  replying: false,
 };
 
 const statusLine = document.querySelector('#status');
@@ -88,6 +107,168 @@ function renderMessages() {
       : 'Sin respuesta observada en la captura; no se reconstruye texto no capturado.')));
   }
   return messages;
+}
+
+const sessionLabel = (execution, sessionID) => sessionID === execution.sessionID
+  ? 'Sesión raíz' : `Subejecución ${sessionID}`;
+
+function onInteractionInput(event) {
+  const target = event.target;
+  const fieldKey = target.dataset?.field;
+  const wrap = target.closest('[data-request]');
+  if (!fieldKey || !wrap) return;
+  const requestID = wrap.dataset.request;
+  const answers = state.interactionAnswers[requestID] ?? (state.interactionAnswers[requestID] = {});
+  if (target.type === 'checkbox' && target.dataset.group === 'multiselect') {
+    const values = new Set(Array.isArray(answers[fieldKey]) ? answers[fieldKey] : []);
+    if (target.checked) values.add(target.value);
+    else values.delete(target.value);
+    answers[fieldKey] = [...values];
+  } else if (target.type === 'checkbox') answers[fieldKey] = target.checked;
+  else answers[fieldKey] = target.value;
+}
+
+function renderInteractionField(requestID, field) {
+  const stored = state.interactionAnswers[requestID]?.[field.key];
+  const label = `${field.title ?? field.key}${field.required ? ' *' : ''}`;
+  if (field.type === 'boolean') {
+    const input = el('input', { type: 'checkbox', 'data-field': field.key });
+    input.checked = stored === true;
+    return [el('label', {}, label, input)];
+  }
+  if (field.type === 'multiselect') {
+    const group = el('fieldset', {}, el('legend', {}, label));
+    for (const option of Array.isArray(field.options) ? field.options : []) {
+      const value = typeof option?.value === 'string' ? option.value
+        : typeof option?.label === 'string' ? option.label : null;
+      if (value === null) continue;
+      const input = el('input', { type: 'checkbox', 'data-field': field.key, value, 'data-group': 'multiselect' });
+      input.checked = Array.isArray(stored) && stored.includes(value);
+      group.append(el('label', {}, option.label ?? value, input));
+    }
+    return [group];
+  }
+  if (field.type === 'number' || field.type === 'integer') {
+    const input = el('input', { type: 'number', 'data-field': field.key, step: 'any' });
+    if (typeof stored === 'string' && stored) input.value = stored;
+    return [el('label', {}, label, input)];
+  }
+  if (Array.isArray(field.options) && field.options.length) {
+    const select = el('select', { 'data-field': field.key }, el('option', { value: '' }, '— elegir respuesta —'));
+    for (const option of field.options) {
+      const value = typeof option?.value === 'string' ? option.value : String(option?.label ?? '');
+      select.append(el('option', { value }, option?.label ?? value));
+    }
+    if (typeof stored === 'string' && stored) select.value = stored;
+    const rows = [el('label', {}, label, select)];
+    if (field.custom) {
+      const input = el('input', { type: 'text', 'data-field': field.key, placeholder: 'Respuesta propia' });
+      if (typeof stored === 'string' && stored) input.value = stored;
+      rows.push(el('label', {}, `Respuesta propia para ${field.title ?? field.key}`, input));
+    }
+    return rows;
+  }
+  const input = el('input', { type: 'text', 'data-field': field.key });
+  if (typeof stored === 'string') input.value = stored;
+  return [el('label', {}, label, input)];
+}
+
+function renderQuestion(execution, item) {
+  const requestID = item.requestID;
+  const fields = Array.isArray(item.request?.fields) ? item.request.fields : [];
+  if (!fields.length) {
+    return el('section', { 'data-kind': 'form', 'data-session': item.sessionID, 'data-request': requestID },
+      el('h4', {}, `Pregunta nativa · ${sessionLabel(execution, item.sessionID)}`),
+      el('p', {}, item.request?.title ?? 'Sin título observable'),
+      el('p', { class: 'notice' }, 'La captura no expone los campos admitidos de esta pregunta; no se puede responder desde la app.'));
+  }
+  const form = el('form', { 'data-kind': 'form', 'data-session': item.sessionID, 'data-request': requestID },
+    el('h4', {}, `Pregunta nativa · ${sessionLabel(execution, item.sessionID)}`),
+    el('p', {}, item.request?.title ?? 'Sin título observable'),
+    ...fields.flatMap(field => renderInteractionField(requestID, field)),
+    el('button', { type: 'submit', ...(state.replying ? { disabled: '' } : {}) }, 'Responder pregunta'));
+  form.addEventListener('input', onInteractionInput);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    const answers = state.interactionAnswers[requestID] ?? {};
+    const answer = {};
+    for (const field of fields) {
+      const raw = answers[field.key];
+      if (raw === undefined || raw === '') continue;
+      answer[field.key] = field.type === 'number' || field.type === 'integer' ? Number(raw) : raw;
+    }
+    replyInteraction({ kind: 'form', sessionID: item.sessionID, requestID, answer });
+  });
+  return form;
+}
+
+function renderPermission(execution, item) {
+  const request = item.request ?? {};
+  const section = el('section', { 'data-kind': 'permission', 'data-session': item.sessionID, 'data-request': item.requestID },
+    el('h4', {}, `Permiso nativo · ${sessionLabel(execution, item.sessionID)}`),
+    el('p', {}, `Acción: ${typeof request.action === 'string' ? request.action : 'desconocida'}`),
+    el('p', {}, `Alcance: ${Array.isArray(request.resources) && request.resources.length
+      ? request.resources.join(' · ') : 'desconocido'}`),
+    typeof request.message === 'string' ? el('p', {}, `Mensaje: ${request.message}`) : null,
+    el('p', { class: 'notice' },
+      'La decisión se envía como decisión nativa de OpenCode; «Permitir siempre» sólo persiste el permiso si el runtime lo admite para esa acción.'),
+    el('div', { class: 'permission-actions' },
+      el('button', { type: 'button', 'data-decision': 'once', ...(state.replying ? { disabled: '' } : {}) }, 'Permitir una vez'),
+      el('button', { type: 'button', 'data-decision': 'always', ...(state.replying ? { disabled: '' } : {}) }, 'Permitir siempre'),
+      el('button', { type: 'button', 'data-decision': 'reject', ...(state.replying ? { disabled: '' } : {}) }, 'Rechazar')));
+  for (const button of section.querySelectorAll('button')) {
+    button.addEventListener('click', () => replyInteraction({ kind: 'permission',
+      sessionID: item.sessionID, requestID: item.requestID, decision: button.dataset.decision }));
+  }
+  return section;
+}
+
+function renderInteractions() {
+  const detail = state.detail;
+  const execution = detail?.execution;
+  const interactions = detail?.interactions ?? { pending: [], resolved: [] };
+  if (!execution) return [];
+  const sections = [];
+  if (interactions.pending.length) {
+    sections.push(el('section', { id: 'interactions', 'aria-label': 'Intervención' },
+      el('h3', {}, 'Esperando intervención'),
+      el('p', { class: 'notice' },
+        'La ejecución espera intervención: conserva su identidad, no se cierra ni falla por esperar, y responder no lanza otro encargo.'),
+      ...interactions.pending.map(item => item.kind === 'form'
+        ? renderQuestion(execution, item) : renderPermission(execution, item)),
+      state.interactionError ? el('p', { role: 'alert', class: 'error' }, state.interactionError) : null));
+  } else if (state.interactionError) {
+    sections.push(el('p', { role: 'alert', class: 'error' }, state.interactionError));
+  }
+  if (interactions.resolved.length) {
+    sections.push(el('details', { 'aria-label': 'Respuestas registradas' },
+      el('summary', {}, 'Respuestas registradas en la captura'),
+      el('ul', {}, ...interactions.resolved.map(item => el('li', {},
+        `${item.kind === 'permission' ? 'Permiso' : 'Pregunta'} · ${sessionLabel(execution, item.sessionID)} · ${item.phase === 'cancelled' ? 'cancelada' : 'respondida'} · ${JSON.stringify(item.response ?? {})}`))),
+      el('p', { class: 'notice' },
+        'La captura no atribuye las respuestas a una persona autenticada: su procedencia es cliente externo no identificado.')));
+  }
+  return sections;
+}
+
+async function replyInteraction(payload) {
+  if (state.replying || state.selected === null) return;
+  state.replying = true;
+  state.interactionError = null;
+  try {
+    await api(`/api/executions/${state.selected}/interactions`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    delete state.interactionAnswers[payload.requestID];
+    await refreshDetail();
+  } catch (error) {
+    state.interactionError = INTERACTION_ERRORS[error?.body?.error]
+      ?? 'No se pudo responder la solicitud; no se ha concedido ningún permiso ni relanzado el encargo.';
+  } finally {
+    state.replying = false;
+    renderConversation();
+  }
 }
 
 function renderOptionSelect(name, id, entries, value, placeholder, placeholderEmpty) {
@@ -254,6 +435,7 @@ function renderExecution() {
     el('p', { id: 'execution-status' }, `Estado: ${STATUS_LABELS[execution.status] ?? execution.status}`),
     el('p', { class: 'dispatch' }, DISPATCH_LABELS[execution.dispatch] ?? DISPATCH_LABELS.unconfirmed),
     renderMessages(),
+    ...renderInteractions(),
     el('dl', { class: 'identity' },
       el('dt', {}, 'Ejecución'), el('dd', {}, execution.id),
       ...selectionRows,
@@ -310,6 +492,8 @@ function renderHistory() {
       state.selected = execution.id;
       state.detail = null;
       state.error = null;
+      state.interactionError = null;
+      state.interactionAnswers = {};
       renderConversation();
       refreshDetail();
     });
@@ -321,6 +505,8 @@ document.querySelector('#new-chat').addEventListener('click', () => {
   state.selected = null;
   state.detail = null;
   state.error = null;
+  state.interactionError = null;
+  state.interactionAnswers = {};
   state.draft = '';
   state.agent = '';
   state.model = '';

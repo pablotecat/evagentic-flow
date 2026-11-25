@@ -101,6 +101,33 @@ export async function startApp({ configPath, port: requestedPort }) {
     if (locks.get(execution.project) === execution.id) locks.delete(execution.project);
   };
 
+  const validAnswerValue = (field, value) => {
+    switch (field.type) {
+      case 'string': return typeof value === 'string';
+      case 'number': return typeof value === 'number' && Number.isFinite(value);
+      case 'integer': return typeof value === 'number' && Number.isInteger(value);
+      case 'boolean': return typeof value === 'boolean';
+      case 'multiselect': return Array.isArray(value) && value.every(item => typeof item === 'string');
+      default: return false;
+    }
+  };
+
+  const livePending = async pending => {
+    if (!pending.length) return pending;
+    const health = await engine.info();
+    if (!health.ok) return pending;
+    const listings = new Map();
+    for (const sessionID of new Set(pending.map(item => item.sessionID))) {
+      try {
+        const [forms, permissions] = await Promise.all([engine.forms(sessionID), engine.permissions(sessionID)]);
+        listings.set(sessionID,
+          { form: new Set(forms.map(item => item?.id)), permission: new Set(permissions.map(item => item?.id)) });
+      } catch { }
+    }
+    return pending.filter(item => !listings.has(item.sessionID)
+      || listings.get(item.sessionID)[item.kind]?.has(item.requestID));
+  };
+
   const observeSelection = async (execution, sessionID) => {
     const deadline = Date.now() + 5000;
     let knownAgent = null;
@@ -391,6 +418,7 @@ export async function startApp({ configPath, port: requestedPort }) {
       await reconcile(execution);
       const evidence = execution.sessionID
         ? await readSession(config.captureDirectory, execution.sessionID) : null;
+      const pending = evidence?.ok ? await livePending(evidence.interactions.pending) : [];
       return json(response, 200, {
         execution: publicExecution(execution),
         conversation: evidence?.ok ? { entries: evidence.entries, responses: evidence.responses }
@@ -400,7 +428,78 @@ export async function startApp({ configPath, port: requestedPort }) {
             horizon: evidence.horizon, scope: evidence.scope, gaps: evidence.gaps, omissions: evidence.omissions }
           : { readable: false, reason: evidence?.reason ?? 'session-not-confirmed',
             captureIDs: [], recorderFailed: false, horizon: null },
+        interactions: evidence?.ok
+          ? { pending, resolved: evidence.interactions.resolved }
+          : { pending: [], resolved: [] },
       });
+    }
+    const interaction = url.pathname.match(/^\/api\/executions\/([^/]+)\/interactions$/);
+    if (interaction && request.method === 'POST') {
+      let body;
+      try { body = JSON.parse(await readBody(request)); }
+      catch { return json(response, 400, { error: 'invalid-json' }); }
+      const execution = store.byId(interaction[1]);
+      if (!execution) return json(response, 404, { error: 'unknown-execution' });
+      if (isTerminal(execution)) return json(response, 409, { error: 'execution-terminal' });
+      if (!execution.sessionID) return json(response, 404, { error: 'unknown-interaction' });
+      const kind = body?.kind;
+      const sessionID = body?.sessionID;
+      const requestID = body?.requestID;
+      if (!['form', 'permission'].includes(kind) || typeof sessionID !== 'string'
+        || typeof requestID !== 'string' || sessionID.length < 1 || sessionID.length > 200
+        || requestID.length < 1 || requestID.length > 200) {
+        return json(response, 400, { error: 'invalid-request' });
+      }
+      const evidence = await readSession(config.captureDirectory, execution.sessionID);
+      if (!evidence.ok) return json(response, 503, { error: 'evidence-unavailable' });
+      if (!evidence.scope.sessionIDs.includes(sessionID)) {
+        return json(response, 403, { error: 'session-not-in-execution' });
+      }
+      const sameIdentity = item => item.kind === kind && item.sessionID === sessionID
+        && item.requestID === requestID;
+      const pending = evidence.interactions.pending.find(sameIdentity);
+      if (!pending) {
+        const resolved = evidence.interactions.resolved.some(sameIdentity);
+        return json(response, resolved ? 409 : 404,
+          { error: resolved ? 'interaction-resolved' : 'unknown-interaction' });
+      }
+      if (kind === 'permission') {
+        if (!['once', 'always', 'reject'].includes(body.decision)) {
+          return json(response, 400, { error: 'invalid-request' });
+        }
+      } else {
+        const answer = body.answer;
+        if (typeof answer !== 'object' || answer === null || Array.isArray(answer)) {
+          return json(response, 400, { error: 'invalid-request' });
+        }
+        const fields = Array.isArray(pending.request?.fields) ? pending.request.fields : null;
+        if (!fields) return json(response, 409, { error: 'request-not-observable' });
+        for (const [key, value] of Object.entries(answer)) {
+          const field = fields.find(item => item?.key === key);
+          if (!field) return json(response, 400, { error: 'answer-fields-not-authorized' });
+          if (!validAnswerValue(field, value)) return json(response, 400, { error: 'invalid-answer' });
+        }
+        for (const field of fields) {
+          if (field?.required && !field.when && !(field.key in answer)) {
+            return json(response, 400, { error: 'missing-required-field' });
+          }
+        }
+      }
+      let listing;
+      try {
+        listing = kind === 'form' ? await engine.forms(sessionID) : await engine.permissions(sessionID);
+      } catch { return json(response, 503, { error: 'engine-unreachable' }); }
+      if (!listing.some(item => item?.id === requestID)) {
+        return json(response, 409, { error: 'interaction-resolved' });
+      }
+      let result;
+      try {
+        result = kind === 'permission'
+          ? await engine.replyPermission(sessionID, requestID, body.decision)
+          : await engine.replyForm(sessionID, requestID, body.answer);
+      } catch { return json(response, 503, { error: 'engine-unreachable' }); }
+      if (!result.ok) return json(response, 502, { error: 'reply-failed', engineStatus: result.status });
+      return json(response, 200, { interaction: { kind, sessionID, requestID, phase: 'replied' } });
     }
     return json(response, 404, { error: 'not-found' });
   }

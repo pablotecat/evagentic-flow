@@ -92,6 +92,35 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   La app puede relanzarse en el mismo puerto
   (puerto interno opcional) para comprobar que la reconstrucción parte del
   índice persistente, no de la memoria del navegador.
+- **Preguntas y permisos nativos desde el chat ([#29](https://github.com/pablotecat/evagentic-flow/issues/29)).**
+  Responder una interacción es un contrato propio (`POST
+  /api/executions/{id}/interactions`) que no crea turnos, sesiones ni
+  ejecuciones: el encargo continúa porque la respuesta nativa alimenta la
+  espera del runtime, y el candado por proyecto decide igual que antes. La
+  identidad observada es tipo (`form`/`permission`) + sesión + solicitud
+  pública, sólo del árbol de sesiones acreditado por la captura de esa
+  ejecución: una sesión ajena o global se rechaza explícitamente (`403`).
+  Las pendientes se reconstruyen leyendo la captura autorizada (el filtro de
+  contenido ya redactó campos, títulos, acción y alcance) y se contrastan con
+  el listado vivo público (`GET /api/session/{id}/form` y
+  `GET /api/session/{id}/permission`): una solicitud resuelta, cancelada o
+  desaparecida no se ofrece ni se responde otra vez; con el motor caído las
+  pendientes de la captura permanecen visibles como espera y la respuesta
+  devuelve un error explícito. Antes de enviar, la respuesta revalida la
+  solicitud en el listado vivo y el envío serializado del servidor impide la
+  doble respuesta ante el doble clic: `409 interaction-resolved` en vez de
+  una segunda réplica. Las respuestas de formulario sólo admiten claves y
+  tipos de los campos públicos capturados (los ocultos y desconocidos se
+  excluyen como en la captura); los permisos sólo aceptan las decisiones
+  nativas `once`, `always` y `reject` elegidas expresamente, sin concesión
+  por defecto: un fallo de lectura, listado o envío no concede nada ni
+  relanza nada. El índice persistente no guarda preguntas, respuestas ni
+  objetos de la API del runtime: el contenido consultable procede
+  exclusivamente de la captura filtrada, con su procedencia de «cliente
+  externo no identificado», no una identidad humana autenticada que el
+  runtime no aporta. Mientras hay pendientes, la ejecución se muestra en
+  marcha con su identidad y un aviso propio de espera; el cierre técnico
+  existente ya exige formularios y permisos despejados.
 - **Seguridad local.** El servidor sólo escucha en `127.0.0.1` y rechaza
   peticiones cuyo `Host` u `Origin` no sea la propia interfaz, para que
   páginas externas no puedan despachar trabajo. No usa cookies ni acceso
@@ -109,6 +138,10 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   proyecto ocupado, desenlace pendiente tras pérdida, persistencia tras
   reinicio de la app, lectura del histórico con el motor caído y rechazo de
   orígenes ajenos.
+  #29 añade responder preguntas y permisos nativos desde la API: campos
+  públicos y decisiones nativas, aislamiento de sesión ajena, errores
+  explícitos sin concesión por defecto, reconstrucción tras reinicio,
+  doble respuesta rechazada y evidencia consultable.
 - `test/browser.test.mjs`: navegador real (Playwright) con app, OpenCode y
   registrador reales y proveedor HTTP sintético — estado
   disponible/no disponible, envío único, respuesta y finalización técnica,
@@ -120,6 +153,11 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   desconexión, reconciliación desde el índice sin reenvío) y caída del motor
   en curso con aviso de desenlace pendiente, proyecto ocupado al reconectar
   y consulta histórica sin motor.
+  #29 añade la frontera vertical de intervención: pregunta nativa de la raíz
+  y de una subejecución autorizada distinguidas en el panel, solicitud ajena
+  no mostrada, recarga que reconstruye las pendientes, respuesta del
+  navegador que continúa el mismo encargo (pregunta y permiso con decisión
+  nativa) y evidencia consultable con procedencia no atribuida.
 
 ## Límites
 
@@ -137,3 +175,8 @@ del [ADR 0005](0005-captura-local-integrada-en-opencode.md): las conserva.
   selección de agente y modelo, la ejecución de comandos públicos con argumentos
   y el rechazo explícito de opciones desaparecidas:
   [ADR 0011](0011-opciones-y-comandos-publicos.md).
+- El contraste de pendientes con el listado vivo depende de que OpenCode exponga
+  el formulario o permiso con el mismo identificador público que la captura
+  conservó; una respuesta observada en la captura siempre priva sobre el listado.
+- El corte [#29](https://github.com/pablotecat/evagentic-flow/issues/29) no
+  implementa la detención solicitada, el árbol visual ni la línea temporal.
