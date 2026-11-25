@@ -5,6 +5,8 @@ const TERMINAL = new Set(['succeeded', 'failed', 'interrupted']);
 
 export const isTerminal = execution => typeof execution?.status === 'string' && TERMINAL.has(execution.status);
 
+export const commandMetadata = command => typeof command?.name === 'string' ? { name: command.name } : null;
+
 export function createStore(dataDirectory) {
   const file = join(dataDirectory, 'executions.json');
   const review = join(dataDirectory, 'index-review-required');
@@ -28,7 +30,10 @@ export function createStore(dataDirectory) {
       if (failed) throw new Error('app index requires review');
       try {
         await access(review);
-        const snapshot = executions.map(item => item === execution ? { ...item, ...changes } : item);
+        const snapshot = executions.map(item => {
+          const candidate = item === execution ? { ...item, ...changes } : item;
+          return { ...candidate, requestedCommand: commandMetadata(candidate.requestedCommand) };
+        });
         const temporary = `${file}.writing`;
         await writeFile(temporary, `${JSON.stringify({ version: 1, executions: snapshot }, null, 2)}\n`);
         await rename(temporary, file);
@@ -55,7 +60,8 @@ export function createStore(dataDirectory) {
             || typeof execution.requestKey !== 'string' || typeof execution.status !== 'string')) {
           throw new Error('invalid app store');
         }
-        for (const execution of parsed.executions) link(execution);
+        for (const execution of parsed.executions) link({ ...execution,
+          requestedCommand: commandMetadata(execution.requestedCommand) });
       }
       if (!failed) {
         await mkdir(dataDirectory, { recursive: true });

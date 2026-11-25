@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createEngine } from './engine.mjs';
-import { createStore, isTerminal } from './store.mjs';
+import { commandMetadata, createStore, isTerminal } from './store.mjs';
 import { latestLifecycle, readRows, readSession } from './evidence.mjs';
 
 const TERMINAL_PHASES = ['succeeded', 'failed', 'interrupted'];
@@ -89,7 +89,7 @@ export async function startApp({ configPath, port: requestedPort }) {
     promptMessageID: execution.promptMessageID,
     requestedAgent: execution.requestedAgent ?? null,
     requestedModel: execution.requestedModel ?? null,
-    requestedCommand: execution.requestedCommand ?? null,
+    requestedCommand: commandMetadata(execution.requestedCommand),
     knownAgent: execution.knownAgent ?? null,
     knownAgentSource: execution.knownAgentSource ?? null,
     knownModel: publicModel(execution.knownModel),
@@ -126,7 +126,7 @@ export async function startApp({ configPath, port: requestedPort }) {
     } catch { }
   };
 
-  const dispatch = async (execution, text) => {
+  const dispatch = async (execution, text, commandArguments) => {
     let session;
     try {
       session = await engine.createSession({ location: { directory: config.projectDirectory },
@@ -177,9 +177,8 @@ export async function startApp({ configPath, port: requestedPort }) {
     try {
       await exclusive(() => store.update(execution, { dispatch: 'possibly-sent' }));
       if (execution.requestedCommand) {
-        const result = await engine.runCommand(session.id, execution.requestedCommand.name,
-          execution.requestedCommand.arguments, lifecycle.signal);
-        if (result.status === 404) return await failClosed('command-unavailable');
+        await engine.runCommand(session.id, execution.requestedCommand.name,
+          commandArguments, lifecycle.signal);
         return;
       }
       prompt = await engine.prompt(session.id, text, lifecycle.signal);
@@ -316,6 +315,11 @@ export async function startApp({ configPath, port: requestedPort }) {
       if (!validRequest) {
         return json(response, 400, { error: 'invalid-request' });
       }
+      const existing = store.byKey(body.requestKey);
+      if (existing) {
+        await reconcile(existing);
+        return json(response, 200, { execution: publicExecution(existing) });
+      }
       if (agent || model || command) {
         const health = await engine.info();
         if (health.ok) {
@@ -332,11 +336,6 @@ export async function startApp({ configPath, port: requestedPort }) {
             return json(response, 422, { error: 'selection-unavailable', kind: 'command', option: command.name });
           }
         }
-      }
-      const existing = store.byKey(body.requestKey);
-      if (existing) {
-        await reconcile(existing);
-        return json(response, 200, { execution: publicExecution(existing) });
       }
       if (store.failed()) return json(response, 503, { error: 'index-review-required' });
       if (locks.has(config.projectKey)) {
@@ -360,7 +359,7 @@ export async function startApp({ configPath, port: requestedPort }) {
         finishedAt: null,
         requestedAgent: agent,
         requestedModel: model,
-        requestedCommand: command,
+        requestedCommand: commandMetadata(command),
         knownAgent: null,
         knownAgentSource: null,
         knownModel: null,
@@ -376,7 +375,8 @@ export async function startApp({ configPath, port: requestedPort }) {
         store.remove(execution);
         throw error;
       }
-      if (!closing) dispatch(execution, text).catch(error => console.error('App dispatch state could not be persisted:', error));
+      if (!closing) dispatch(execution, text, command?.arguments)
+        .catch(error => console.error('App dispatch state could not be persisted:', error));
       return json(response, 201, { execution: publicExecution(execution) });
     }
     if (url.pathname === '/api/executions' && request.method === 'GET') {

@@ -353,7 +353,7 @@ const selectionFixtureOptions = {
 
 test('la app expone opciones de la instancia y lanza un encargo con agente, modelo y comando elegidos', { timeout: 300000 }, async t => {
   const instance = await fixture(t, selectionFixtureOptions);
-  const { app } = await launchWebapp(t, instance);
+  const { app, configPath } = await launchWebapp(t, instance);
 
   const options = await appFetch(app, '/api/options');
   assert.equal(options.status, 200);
@@ -364,14 +364,17 @@ test('la app expone opciones de la instancia y lanza un encargo con agente, mode
   assert.ok(options.body.commands.some(command => command.name === 'synthetic-echo'));
   assert.ok(options.body.commands.some(command => command.name === 'review'));
 
-  const created = await launchExecution(app, { requestKey: 'corte-27-uno',
+  const request = { requestKey: 'corte-27-uno',
     agent: 'synthetic-choice', model: 'synthetic/synthetic#low',
-    command: { name: 'synthetic-echo', arguments: 'argumento-alfa valor-beta' } });
+    command: { name: 'synthetic-echo', arguments: 'argumento-alfa valor-beta synthetic-secret-42',
+      extra: { secret: 'synthetic-extra-secret' } } };
+  const created = await launchExecution(app, request);
   assert.equal(created.status, 201);
   const id = created.body.execution.id;
   assert.equal(created.body.execution.requestedAgent, 'synthetic-choice');
   assert.equal(created.body.execution.requestedModel, 'synthetic/synthetic#low');
   assert.equal(created.body.execution.requestedCommand.name, 'synthetic-echo');
+  assert.deepEqual(created.body.execution.requestedCommand, { name: 'synthetic-echo' });
 
   const completed = await eventually(async () => {
     const detail = await executionDetail(app, id);
@@ -384,7 +387,7 @@ test('la app expone opciones de la instancia y lanza un encargo con agente, mode
   assert.equal(completed.execution.knownModelSource, 'public-session');
   assert.ok(completed.execution.selectionObservedAt);
   assert.equal(completed.conversation.entries.length, 1);
-  assert.equal(completed.conversation.entries[0].text, 'Encargo sintético de comando: argumento-alfa valor-beta');
+  assert.equal(completed.conversation.entries[0].text, 'Encargo sintético de comando: argumento-alfa valor-beta [REDACTED]');
   assert.equal(completed.conversation.responses.length, 1);
   assert.match(completed.conversation.responses[0].text, /respuesta autorizada/i);
 
@@ -392,18 +395,91 @@ test('la app expone opciones de la instancia y lanza un encargo con agente, mode
     .filter(event => event.event === 'request' && event.routeKey === 'model');
   assert.ok(traffic.length >= 1, 'no synthetic model traffic for the command execution');
 
-  const retried = await launchExecution(app, { requestKey: 'corte-27-uno',
-    agent: 'synthetic-choice', model: 'synthetic/synthetic#low',
-    command: { name: 'synthetic-echo', arguments: 'argumento-alfa valor-beta' } });
+  const retried = await launchExecution(app, request);
   assert.equal(retried.status, 200);
   assert.equal(retried.body.execution.id, id);
   const admitted = (await records(instance.captureDirectory)).filter(row =>
-    row.type === 'session.inbox.enqueued' && row.content?.text === 'Encargo sintético de comando: argumento-alfa valor-beta');
+    row.type === 'session.inbox.enqueued' && row.content?.text === 'Encargo sintético de comando: argumento-alfa valor-beta [REDACTED]');
   assert.equal(admitted.length, 1, 'a repeated request key dispatched the command twice');
   const sessions = (await instance.api(
     `/api/session?directory=${encodeURIComponent(instance.projects[0])}`)).data;
   assert.equal(sessions.filter(session => (session.title ?? '').startsWith('Flujo en Proyecto ·')).length, 1,
     'the idempotent retry created a second root session');
+
+  const indexPath = join(instance.root, 'webapp-data', 'executions.json');
+  const index = await readFile(indexPath, 'utf8');
+  for (const exposed of [index, JSON.stringify(completed), JSON.stringify((await appFetch(app, '/api/executions')).body)]) {
+    assert.ok(!exposed.includes('synthetic-secret-42'));
+    assert.ok(!exposed.includes('synthetic-extra-secret'));
+    assert.ok(!exposed.includes('"arguments"'));
+  }
+
+  await rm(join(instance.root, 'config/opencode/commands/synthetic-echo.md'));
+  await eventually(async () => !(await appFetch(app, '/api/options')).body.commands
+    .some(command => command.name === 'synthetic-echo'), 'deleted command still listed', 30000);
+  const vanishedRetry = await launchExecution(app, request);
+  assert.equal(vanishedRetry.status, 200);
+  assert.equal(vanishedRetry.body.execution.id, id);
+  await instance.stop();
+  const offlineRetry = await launchExecution(app, request);
+  assert.equal(offlineRetry.status, 200);
+  assert.equal(offlineRetry.body.execution.id, id);
+
+  await app.close();
+  const legacy = JSON.parse(index);
+  legacy.executions[0].requestedCommand = request.command;
+  const legacyText = JSON.stringify(legacy);
+  await writeFile(indexPath, legacyText);
+  const restarted = await startApp({ configPath });
+  t.after(() => restarted.close());
+  const legacyDetail = await executionDetail(restarted, id);
+  assert.deepEqual(legacyDetail.body.execution.requestedCommand, { name: 'synthetic-echo' });
+  for (const body of [legacyDetail.body, (await appFetch(restarted, '/api/executions')).body,
+    (await launchExecution(restarted, request)).body]) {
+    assert.ok(!JSON.stringify(body).includes('synthetic-secret-42'));
+    assert.ok(!JSON.stringify(body).includes('synthetic-extra-secret'));
+  }
+  assert.equal(await readFile(indexPath, 'utf8'), legacyText, 'loading history must not destroy legacy evidence');
+  const captureBefore = JSON.stringify(await records(instance.captureDirectory));
+  assert.equal((await createExecution(restarted, 'legacy-next-offline', 'Otro encargo sintético.')).status, 201);
+  const rewritten = await readFile(indexPath, 'utf8');
+  assert.ok(!rewritten.includes('synthetic-secret-42'));
+  assert.ok(!rewritten.includes('synthetic-extra-secret'));
+  assert.ok(!rewritten.includes('"arguments"'));
+  assert.equal(JSON.stringify(await records(instance.captureDirectory)), captureBefore,
+    'sanitizing the app index must not modify recorder evidence');
+});
+
+test('un error 404 ajeno al comando conserva el envío posible y la exclusión', { timeout: 180000 }, async t => {
+  const instance = await fixture(t, { ...selectionFixtureOptions, removeCommandSession: true });
+  const { app } = await launchWebapp(t, instance);
+  const options = await appFetch(app, '/api/options');
+  assert.ok(options.body.commands.some(command => command.name === 'synthetic-echo'));
+  const request = { requestKey: 'ambiguous-command', command: {
+    name: 'synthetic-echo', arguments: 'Encargo sin sesión disponible.' } };
+  const created = await launchExecution(app, request);
+  assert.equal(created.status, 201);
+  const sessionID = await eventually(async () => readFile(join(instance.root, 'command-session-removed'), 'utf8'),
+    'the real plugin did not remove the session');
+  const response = await fetch(`${instance.url()}/api/session/${sessionID}/command`, {
+    method: 'POST', headers: { 'content-type': 'application/json',
+      authorization: `Basic ${Buffer.from('opencode:synthetic-instance-password').toString('base64')}` },
+    body: JSON.stringify({ name: 'synthetic-echo', text: request.command.arguments }),
+  });
+  const error = await response.text();
+  assert.equal(response.status, 404, error);
+  assert.ok(!error.includes('CommandNotFoundError'), error);
+  await eventually(async () => (await executionDetail(app, created.body.execution.id))
+    .body.execution.dispatch === 'possibly-sent', 'command was not attempted');
+  const detail = await executionDetail(app, created.body.execution.id);
+  assert.equal(detail.body.execution.status, 'pending');
+  assert.equal(detail.body.execution.finishedAt, null);
+  assert.equal((await createExecution(app, 'ambiguous-other', 'No debe lanzarse.')).status, 409);
+  const retry = await launchExecution(app, request);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.execution.id, created.body.execution.id);
+  assert.equal(await readFile(join(instance.root, 'command-session-removed'), 'utf8'), sessionID,
+    'an ambiguous response must not create another root session');
 });
 
 test('una opción elegida que no está expuesta se rechaza explícitamente sin despachar el encargo', { timeout: 300000 }, async t => {

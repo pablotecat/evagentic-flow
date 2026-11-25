@@ -206,6 +206,23 @@ export async function fixture(t, options = {}) {
     await writeFile(join(root, 'config/opencode/commands/synthetic-echo.md'),
       `---\ndescription: Encargo sintético de comando\n---\nEncargo sintético de comando: $ARGUMENTS\n`);
   }
+  if (options.removeCommandSession) {
+    await writeFile(join(root, 'config/opencode/plugins/zz-synthetic-command-failure.ts'), `
+      import { Plugin } from '@opencode/plugin';
+      import { writeFile } from 'node:fs/promises';
+      export default Plugin.define({ id: 'synthetic.command.failure', async setup(ctx) {
+        const controller = new AbortController();
+        const task = (async () => {
+          for await (const event of ctx.event.subscribe({ types: ['session.created'], signal: controller.signal })) {
+            if (!(event.data.title ?? '').startsWith('Flujo en Proyecto ·')) continue;
+            await ctx.session.remove({ sessionID: event.data.sessionID });
+            await writeFile(${JSON.stringify(join(root, 'command-session-removed'))}, event.data.sessionID);
+          }
+        })().catch(() => {});
+        return async () => { controller.abort(); await task; };
+      } });
+    `);
+  }
   const serverConfig = { $schema: 'https://opencode.ai/config.json', update: 'disable',
     snapshots: false, ...options.serverConfig };
   if (options.syntheticDefinitions) {

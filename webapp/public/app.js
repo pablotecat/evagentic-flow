@@ -14,7 +14,6 @@ const DISPATCH_LABELS = {
   'possibly-sent': 'Despacho: envío posible; admisión sin confirmar. El encargo no se reenviará automáticamente.',
   unconfirmed: 'Despacho: sin confirmar; el encargo no se reenviará automáticamente.',
   'selection-unavailable': 'Despacho: opción elegida no disponible; no se envió el encargo ni se sustituyó por otra.',
-  'command-unavailable': 'Despacho: comando no disponible; no se envió el encargo ni se sustituyó por otro.',
 };
 
 const state = {
@@ -248,7 +247,7 @@ function renderExecution() {
     el('dd', {}, `Elegido: ${execution.requestedModel ?? 'ninguno'} · Conocido: ${knownModel}`));
   selectionRows.push(el('dt', {}, 'Comando'),
     el('dd', {}, execution.requestedCommand
-      ? `${execution.requestedCommand.name} · argumentos: ${execution.requestedCommand.arguments}`
+      ? execution.requestedCommand.name
       : 'encargo directo sin comando'));
   const panel = [
     el('h2', {}, `Ejecución ${execution.id.slice(0, 8)}`),

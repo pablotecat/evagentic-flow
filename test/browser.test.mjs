@@ -322,7 +322,7 @@ test('el chat presenta opciones de la instancia y lanza un comando con el agente
   await page.getByLabel('Agente').selectOption('synthetic-choice');
   await page.getByLabel('Modelo').selectOption('synthetic/synthetic#low');
   await page.getByLabel('Comando').selectOption('synthetic-echo');
-  await upload(page, 'argumento-navegador valor-dos');
+  await upload(page, 'argumento-navegador valor-dos synthetic-secret-42');
   await awaitStatus(page, 'Finalizada técnicamente', 240000);
 
   const board = await page.locator('#conversation').innerText();
@@ -331,8 +331,9 @@ test('el chat presenta opciones de la instancia y lanza un comando con el agente
   assert.ok(board.includes('API pública de la sesión'), 'the board lost the selection provenance');
   assert.ok(board.includes('synthetic/synthetic#low'));
   assert.ok(board.includes('synthetic-echo'));
+  assert.ok(!board.includes('synthetic-secret-42'), 'command metadata bypassed capture redaction');
   const messages = await page.locator('[aria-label="Mensajes"]').innerText();
-  assert.ok(messages.includes('Encargo sintético de comando: argumento-navegador valor-dos'));
+  assert.ok(messages.includes('Encargo sintético de comando: argumento-navegador valor-dos [REDACTED]'));
   assert.ok(messages.includes('Respuesta autorizada'));
   assert.ok(!messages.includes('synthetic-secret-42'));
   assert.equal(await admittedCount(instance), 1, 'the browser dispatched the command more than once');
