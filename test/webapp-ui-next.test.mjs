@@ -516,8 +516,10 @@ test('UI /next: cabecera de ejecución con Detener, chips y cajón de metadatos 
       omissions: [{ sessionID: 'ses_sub_exec', captureID: 'cap-002', arrival: 7, type: 'recorder.observation', omissions: ['non-text-fields-not-captured'] }],
     },
   };
-  let stopped = false;
-  const stopResponse = { requested: true, requestedAt: 1700000000000,
+  let phase = 'running';
+  const stopUnconfirmed = { requested: true, requestedAt: 1700000000000,
+    sessions: [{ sessionID: 'ses_root_exec', result: 'accepted', stop: 'unconfirmed' }] };
+  const stopConfirmed = { requested: true, requestedAt: 1700000000000,
     sessions: [{ sessionID: 'ses_root_exec', result: 'accepted', stop: 'confirmed' }] };
   const { app, page, stopCalls } = await openUi(t, {
     list: () => jsonResponse({ executions: [
@@ -526,13 +528,23 @@ test('UI /next: cabecera de ejecución con Detener, chips y cajón de metadatos 
     ] }),
     detail: id => {
       if (id !== running) return jsonResponse(detail(id));
-      if (!stopped) return jsonResponse(runningDetail);
-      return jsonResponse({ ...runningDetail, execution: { ...runningDetail.execution, stop: { requested: true, requestedAt: 1700000000000 } },
-        stop: stopResponse });
+      if (phase === 'running') return jsonResponse(runningDetail);
+      if (phase === 'stopping') {
+        return jsonResponse({ ...runningDetail,
+          execution: { ...runningDetail.execution, status: 'running', stop: { requested: true, requestedAt: 1700000000000 } },
+          stop: stopUnconfirmed });
+      }
+      return jsonResponse({ ...runningDetail,
+        execution: { ...runningDetail.execution, status: 'interrupted', stop: { requested: true, requestedAt: 1700000000000 } },
+        stop: stopConfirmed });
     },
     stop: () => {
-      stopped = true;
-      return jsonResponse({ stop: stopResponse });
+      if (phase === 'running') {
+        phase = 'stopping';
+        return jsonResponse({ stop: stopUnconfirmed });
+      }
+      phase = 'interrupted';
+      return jsonResponse({ stop: stopConfirmed });
     },
   });
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
@@ -570,10 +582,16 @@ test('UI /next: cabecera de ejecución con Detener, chips y cajón de metadatos 
   await detener.click();
   await waitForText(page, 'Detención solicitada');
   await waitForText(page, 'Solicitud: aceptada');
-  await waitForText(page, 'Detención: confirmada');
+  await waitForText(page, 'Detención: no confirmada');
   assert.equal(stopCalls.length, 1);
   assert.equal(stopCalls[0].id, running);
   assert.deepEqual(stopCalls[0].body, {});
+  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 1);
+
+  await page.getByRole('button', { name: 'Detener' }).click();
+  await waitForText(page, 'Detención: confirmada');
+  await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).some(el => el.textContent?.trim() === 'Detener'));
+  assert.equal(stopCalls.length, 2);
   assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 0);
 
   await page.locator(`[data-id="${terminal}"]`).click();
@@ -583,20 +601,36 @@ test('UI /next: cabecera de ejecución con Detener, chips y cajón de metadatos 
 
 test('UI /next: banda prioritaria con fallo del registrador visible en todas las pestañas', { timeout: 120000 }, async t => {
   const failing = 'cccccccc-4444-4444-4444-444444444444';
-  let declared = true;
-  const failingDetail = () => ({
-    ...detail(failing),
-    execution: execution(failing, { status: 'running', sessionID: 'ses_root_f' }),
-    recorder: declared
-      ? { readable: true, status: 'failed', reason: 'Razón pública sintética', notice: 'Aviso público sintético',
-        reviewRequired: true, pilotReady: false, interruption: { requested: true, stop: 'unconfirmed' },
-        source: 'public-session-metadata' }
-      : { readable: false, reason: 'engine-unreachable' },
-    capture: declared
-      ? { readable: true, captureIDs: ['cap-f'], recorderFailed: false, horizon: null,
-        scope: { sessionIDs: ['ses_root_f'] }, gaps: [], omissions: [] }
-      : { readable: false, reason: 'destino de captura roto', recorderFailed: true, captureIDs: [], horizon: null },
-  });
+  let mode = 'failed-readable';
+  const failingDetail = () => {
+    if (mode === 'failed-readable') {
+      return {
+        ...detail(failing),
+        execution: execution(failing, { status: 'running', sessionID: 'ses_root_f' }),
+        recorder: { readable: true, status: 'failed', reason: 'Razón pública sintética', notice: 'Aviso público sintético',
+          reviewRequired: true, pilotReady: false, interruption: { requested: true, stop: 'unconfirmed' },
+          source: 'public-session-metadata' },
+        capture: { readable: true, captureIDs: ['cap-f'], recorderFailed: false, horizon: null,
+          scope: { sessionIDs: ['ses_root_f'] }, gaps: [], omissions: [] },
+      };
+    }
+    if (mode === 'capture-failed-unreadable') {
+      return {
+        ...detail(failing),
+        execution: execution(failing, { status: 'running', sessionID: 'ses_root_f' }),
+        recorder: { readable: false, reason: 'engine-unreachable' },
+        capture: { readable: false, reason: 'destino de captura roto', recorderFailed: true, captureIDs: [], horizon: null },
+      };
+    }
+    return {
+      ...detail(failing),
+      execution: execution(failing, { status: 'running', sessionID: 'ses_root_f' }),
+      recorder: { readable: true, status: 'ready', reason: 'Revisión pendiente sintética', notice: null,
+        reviewRequired: true, pilotReady: false, interruption: null, source: 'public-session-metadata' },
+      capture: { readable: true, captureIDs: ['cap-f'], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root_f'] }, gaps: [], omissions: [] },
+    };
+  };
   const { page } = await openUi(t, {
     list: () => jsonResponse({ executions: [execution(failing, { status: 'running', sessionID: 'ses_root_f' })] }),
     detail: () => jsonResponse(failingDetail()),
@@ -620,8 +654,17 @@ test('UI /next: banda prioritaria con fallo del registrador visible en todas las
     assert.ok((await banner.innerText()).includes('Fallo del registrador'));
   }
 
-  declared = false;
+  mode = 'capture-failed-unreadable';
   await waitForText(page, 'Estado de captura: no consultable (destino de captura roto)');
+  const unreadableText = await banner.innerText();
+  assert.ok(unreadableText.includes('No se pudieron leer los metadatos públicos del registrador en el motor (engine-unreachable)'));
+  assert.equal(unreadableText.includes('Revisión requerida según la evidencia pública del motor.'), false);
+
+  mode = 'review-required-ready';
+  await waitForText(page, 'Motivo público declarado: Revisión pendiente sintética.');
+  const reviewOnlyText = await banner.innerText();
+  assert.ok(reviewOnlyText.includes('Fallo del registrador'));
+  assert.ok(reviewOnlyText.includes('Revisión requerida según la evidencia pública del motor.'));
 });
 
 test('UI /next: banda prioritaria con motor inaccesible en ejecución no terminal', { timeout: 120000 }, async t => {
@@ -687,7 +730,8 @@ test('UI /next: banda prioritaria con detención solicitada por sesión y árbol
   assert.ok(text.includes('Subejecución ses_sub_s · Solicitud: sin comprobar · Detención: no confirmada · desenlace público: desconocido'));
   assert.ok(text.includes('No se pudo verificar el árbol de sesiones; los descendientes nuevos no pudieron comprobarse.'));
   assert.ok(text.includes('No se pudo comprobar el desenlace público de la detención; se mantiene no confirmada y el trabajo no se relanza.'));
-  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 1);
+  assert.equal(await page.evaluate(() => document.querySelectorAll('[role="alert"] [role="alert"]').length), 0);
 });
 
 test('UI /next: banda prioritaria con intervenciones pendientes, salto directo y errores de lectura', { timeout: 120000 }, async t => {
@@ -786,12 +830,20 @@ test('UI /next: Conversación en Markdown seguro con bloques copiables y conmuta
   assert.equal(await page.evaluate(() => window.__pwned2), undefined);
   assert.equal(await page.evaluate(() => document.querySelectorAll('main img, main script').length), 0);
   const safeLink = page.getByRole('link', { name: 'enlace seguro' });
-  const unsafeLink = page.getByRole('link', { name: 'enlace peligroso' });
   await safeLink.waitFor();
-  await unsafeLink.waitFor();
   assert.equal(await safeLink.getAttribute('href'), 'https://example.com');
-  const unsafeHref = await unsafeLink.getAttribute('href');
-  assert.ok(unsafeHref === null || unsafeHref === '' || !unsafeHref.startsWith('javascript'));
+  assert.equal(await safeLink.getAttribute('target'), '_blank');
+  assert.equal(await page.getByRole('link', { name: 'enlace peligroso' }).count(), 0);
+  const unsafeText = page.getByText('enlace peligroso', { exact: true });
+  await unsafeText.waitFor();
+  const unsafeInfo = await unsafeText.evaluate(el => ({
+    href: el.getAttribute('href'),
+    target: el.getAttribute('target'),
+    anchorAncestor: Boolean(el.closest('a')),
+  }));
+  assert.equal(unsafeInfo.href, null);
+  assert.equal(unsafeInfo.target, null);
+  assert.equal(unsafeInfo.anchorAncestor, false);
 
   dispatchState = 'possibly-sent';
   await waitForText(page, 'Despacho: envío posible; admisión sin confirmar. El encargo no se reenviará automáticamente.');
@@ -815,7 +867,9 @@ const formFields = [
   { key: 'choice', type: 'string', title: 'Elección', options: [{ value: 'a', label: 'Opción A' }, { value: 'b', label: 'Opción B' }], custom: true },
   { key: 'extra', type: 'string', title: 'Extra condicional', when: { field: 'choice', equals: 'a' } },
   { key: 'flag', type: 'boolean', title: 'Confirmación', required: true },
+  { key: 'whenUnchecked', type: 'string', title: 'Visible sin marcar', when: { field: 'flag', equals: false } },
   { key: 'count', type: 'integer', title: 'Cantidad' },
+  { key: 'whenFortyTwo', type: 'string', title: 'Visible con 42', when: { field: 'count', equals: 42 } },
 ];
 
 const formPending = [
@@ -855,7 +909,17 @@ test('UI /next: preguntas nativas con borradores aislados, valor propio, boolean
   assert.equal(await page.locator('[data-request="form-root"] input[data-field="answer"]').inputValue(), 'respuesta raíz');
   assert.equal(await page.locator('[data-request="form-shared"] input[data-field="answer"]').inputValue(), 'respuesta sub');
   assert.equal(await page.locator('[data-request="form-root"] input[data-field="flag"]').isChecked(), false);
+  await page.locator('[data-request="form-root"] [data-field="whenUnchecked"]').waitFor();
+  await page.locator('[data-request="form-root"] input[data-field="flag"]').check();
+  assert.equal(await page.locator('[data-request="form-root"] [data-field="whenUnchecked"]').count(), 0);
+  await page.locator('[data-request="form-root"] input[data-field="flag"]').uncheck();
+  await page.locator('[data-request="form-root"] [data-field="whenUnchecked"]').waitFor();
+
+  assert.equal(await page.locator('[data-request="form-root"] [data-field="whenFortyTwo"]').count(), 0);
+  await page.locator('[data-request="form-root"] input[data-field="count"]').fill('42');
+  await page.locator('[data-request="form-root"] [data-field="whenFortyTwo"]').waitFor();
   await page.locator('[data-request="form-root"] input[data-field="count"]').fill('7');
+  assert.equal(await page.locator('[data-request="form-root"] [data-field="whenFortyTwo"]').count(), 0);
 
   await rootForm.getByRole('button', { name: 'Responder pregunta' }).click();
   await page.waitForTimeout(500);
@@ -887,7 +951,7 @@ test('UI /next: permisos con decisión explícita, errores honestos, pérdida de
         { kind: 'permission', sessionID: 'ses_root_g', requestID: 'perm-old', phase: 'replied',
           response: { decision: 'once' } },
         { kind: 'form', sessionID: 'ses_sub_g', requestID: 'form-old', phase: 'cancelled',
-          response: { picked: ['a', 'b'], flag: true } },
+          response: { picked: ['a', 'b'], flag: true, frequency: 'once' } },
       ],
       readErrors: [{ error: 'engine-unreachable' }],
     },
@@ -903,6 +967,7 @@ test('UI /next: permisos con decisión explícita, errores honestos, pérdida de
   await page.getByText('Alcance: salida.txt').waitFor();
   await page.getByText('Mensaje: ¿Autorizar la escritura?').waitFor();
   await page.getByText('su vigencia no está comprobada').first().waitFor();
+  assert.equal(await page.locator('[role="alert"]', { hasText: 'su vigencia no está comprobada' }).count(), 1);
   assert.equal(replyCalls.length, 0);
 
   await page.getByRole('button', { name: 'Permitir siempre' }).click();
@@ -933,6 +998,11 @@ test('UI /next: permisos con decisión explícita, errores honestos, pérdida de
   assert.ok(resolvedText.includes('Pregunta · Subejecución ses_sub_g · cancelada'));
   assert.ok(resolvedText.includes('a · b'));
   assert.ok(resolvedText.includes('sí'));
+  const resolvedFormText = await resolved.locator('[data-resolved="ses_sub_g:form:form-old"]').innerText();
+  assert.ok(resolvedFormText.includes('once'));
+  assert.equal(resolvedFormText.includes('Permitir una vez'), false);
+  const resolvedPermText = await resolved.locator('[data-resolved="ses_root_g:permission:perm-old"]').innerText();
+  assert.ok(resolvedPermText.includes('Permitir una vez'));
   assert.ok(resolvedText.includes('La captura no atribuye las respuestas a una persona autenticada: su procedencia es cliente externo no identificado.'));
   assert.ok(!resolvedText.includes('{"decision"'));
   assert.ok(!resolvedText.includes('["a","b"]'));
@@ -1012,4 +1082,71 @@ test('UI /next: protección contra respuestas obsoletas al cambiar de ejecución
   assert.ok(panelText.includes(`Entrada exclusiva de la ejecución ${execB}`));
   assert.ok(!panelText.includes(`Entrada exclusiva de la ejecución ${execA}`));
   assert.ok((await page.getByRole('heading', { name: 'Ejecución ffffffff' }).innerText()).includes('ffffffff'));
+});
+
+test('UI /next: salto directo con identificadores con dos puntos y foco en clics repetidos', { timeout: 120000 }, async t => {
+  const execId = '12121212-aaaa-4121-8121-121212121212';
+  const colonDetail = {
+    ...detail(execId),
+    execution: execution(execId, { status: 'running', sessionID: 'ses:root:1' }),
+    capture: { readable: true, captureIDs: ['cap-colon'], recorderFailed: false, horizon: null,
+      scope: { sessionIDs: ['ses:root:1'] }, gaps: [], omissions: [] },
+    interactions: {
+      pending: [
+        { kind: 'form', sessionID: 'ses:root:1', requestID: 'req:form:42',
+          request: { title: 'Pregunta con dos puntos', fields: [{ key: 'note', type: 'string', title: 'Nota' }] },
+          observedAt: 1700000000000 },
+      ],
+      resolved: [],
+      readErrors: [],
+    },
+  };
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(execId, { status: 'running', sessionID: 'ses:root:1' })] }),
+    detail: () => jsonResponse(colonDetail),
+  });
+  await page.locator(`[data-id="${execId}"]`).click();
+  await page.getByRole('tab', { name: 'Traza' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Traza');
+
+  const jumpButton = page.getByRole('button', { name: 'Ir a la solicitud' });
+  await jumpButton.click();
+  await page.waitForFunction(() => location.hash.endsWith('/conversation'));
+  await page.waitForFunction(() =>
+    document.activeElement?.closest('[data-session="ses:root:1"][data-request="req:form:42"]') !== null);
+
+  await page.getByRole('tab', { name: 'Conversación' }).focus();
+  assert.equal(await page.evaluate(() =>
+    document.activeElement?.closest('[data-session="ses:root:1"][data-request="req:form:42"]') !== null), false);
+
+  await jumpButton.click();
+  await page.waitForFunction(() =>
+    document.activeElement?.closest('[data-session="ses:root:1"][data-request="req:form:42"]') !== null);
+});
+
+test('UI /next: sondeo lento de detalle (>1,5 s) no solapa peticiones ni deja de actualizar', { timeout: 120000 }, async t => {
+  const slowId = '34343434-bbbb-4343-8343-343434343434';
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let completed = 0;
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(slowId, { status: 'running', sessionID: 'ses_slow' })] }),
+    detail: async () => {
+      inFlight++;
+      if (inFlight > maxInFlight) maxInFlight = inFlight;
+      await new Promise(resolve => setTimeout(resolve, 1800));
+      inFlight--;
+      completed++;
+      return jsonResponse({
+        ...detail(slowId),
+        execution: execution(slowId, { status: 'running', sessionID: 'ses_slow' }),
+        conversation: { entries: [{ text: 'Encargo lento.' }], responses: [{ text: `Respuesta lenta ${completed}.` }] },
+      });
+    },
+  });
+  await page.locator(`[data-id="${slowId}"]`).click();
+  await waitForText(page, 'Respuesta lenta 1.');
+  await waitForText(page, 'Respuesta lenta 2.');
+  assert.equal(maxInFlight, 1);
+  assert.ok(completed >= 2);
 });

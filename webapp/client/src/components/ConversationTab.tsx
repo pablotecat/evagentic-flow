@@ -1,13 +1,20 @@
 import { useEffect, useState } from 'react';
-import type { ExecutionDetail } from '../api/types';
+import type { ExecutionDetail, PendingInteraction } from '../api/types';
 import { noticeClass } from '../lib/ui';
 import { DISPATCH_LABELS } from '../lib/labels';
 import { Markdown } from './Markdown';
 import { ConversationInteractions } from './ConversationInteractions';
 
+export type FocusRequest = {
+  kind: PendingInteraction['kind'];
+  sessionID: string;
+  requestID: string;
+  nonce: number;
+};
+
 type Props = {
   detail: ExecutionDetail;
-  focusRequest: string | null;
+  focusRequest: FocusRequest | null;
 };
 
 function Message({ heading, text, shellClass }: { heading: string; text: string; shellClass: string }) {
@@ -37,9 +44,12 @@ export function ConversationTab({ detail, focusRequest }: Props) {
   const conversation = detail.conversation ?? { entries: [], responses: [] };
   useEffect(() => {
     if (!focusRequest) return;
-    const [kind, sessionID, requestID] = focusRequest.split(':');
-    const selector = `[data-kind="${CSS.escape(kind)}"][data-session="${CSS.escape(sessionID)}"][data-request="${CSS.escape(requestID)}"]`;
-    document.querySelector(selector)?.scrollIntoView({ block: 'center' });
+    const selector = `[data-kind="${CSS.escape(focusRequest.kind)}"][data-session="${CSS.escape(focusRequest.sessionID)}"][data-request="${CSS.escape(focusRequest.requestID)}"]`;
+    const target = document.querySelector<HTMLElement>(selector);
+    if (!target) return;
+    target.scrollIntoView({ block: 'center' });
+    const focusable = target.querySelector<HTMLElement>('input, select, textarea, button');
+    (focusable ?? target).focus();
   }, [focusRequest]);
   return (
     <div className="space-y-4">

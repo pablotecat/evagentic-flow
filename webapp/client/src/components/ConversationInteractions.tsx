@@ -1,6 +1,6 @@
-import type { Execution, ExecutionDetail, FormField, FormFieldOption, PendingInteraction } from '../api/types';
+import type { Execution, ExecutionDetail, FormField, FormFieldOption, PendingInteraction, ResolvedInteraction } from '../api/types';
 import { alertClass, noticeClass } from '../lib/ui';
-import { DECISION_LABELS, readErrorMessage, sessionLabel } from '../lib/labels';
+import { DECISION_LABELS, sessionLabel } from '../lib/labels';
 import { fieldVisible, interactionKey, useInteractionState } from '../hooks/useInteractionState';
 
 const interactionShell = 'rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900';
@@ -12,10 +12,12 @@ const fieldLegendClass = 'text-xs font-medium text-slate-700 dark:text-slate-300
 const optionValue = (option: FormFieldOption): string =>
   typeof option?.value === 'string' ? option.value : typeof option?.label === 'string' ? option.label : '';
 
-const formatResolvedValue = (value: unknown): string => {
+const formatResolvedValue = (kind: ResolvedInteraction['kind'], key: string, value: unknown): string => {
   if (typeof value === 'boolean') return value ? 'sí' : 'no';
   if (Array.isArray(value)) return value.map(item => String(item)).join(' · ');
-  if (typeof value === 'string' && value in DECISION_LABELS) return DECISION_LABELS[value];
+  if (kind === 'permission' && key === 'decision' && typeof value === 'string' && value in DECISION_LABELS) {
+    return DECISION_LABELS[value];
+  }
   if (typeof value === 'object' && value !== null) return JSON.stringify(value);
   return String(value);
 };
@@ -124,7 +126,7 @@ function QuestionForm({ item, execution }: { item: PendingInteraction; execution
   const fields = Array.isArray(item.request?.fields) ? item.request.fields : [];
   if (!fields.length) {
     return (
-      <section data-kind="form" data-session={item.sessionID} data-request={item.requestID} className={interactionShell}>
+      <section tabIndex={-1} data-kind="form" data-session={item.sessionID} data-request={item.requestID} className={interactionShell}>
         <h4 className={interactionHeading}>Pregunta nativa · {sessionLabel(execution, item.sessionID)}</h4>
         <p className="text-sm">{item.request?.title ?? 'Sin título observable'}</p>
         <p className={`${noticeClass} mt-2`}>La captura no expone los campos admitidos de esta pregunta; no se puede responder desde la app.</p>
@@ -133,6 +135,7 @@ function QuestionForm({ item, execution }: { item: PendingInteraction; execution
   }
   return (
     <form
+      tabIndex={-1}
       data-kind="form"
       data-session={item.sessionID}
       data-request={item.requestID}
@@ -144,7 +147,7 @@ function QuestionForm({ item, execution }: { item: PendingInteraction; execution
     >
       <h4 className={interactionHeading}>Pregunta nativa · {sessionLabel(execution, item.sessionID)}</h4>
       <p className="text-sm">{item.request?.title ?? 'Sin título observable'}</p>
-      {fields.filter(field => fieldVisible(field, draft)).map(field => (
+      {fields.filter(field => fieldVisible(field, draft, fields)).map(field => (
         <FieldInput key={field.key} field={field} itemKey={key} />
       ))}
       <button
@@ -162,7 +165,7 @@ function PermissionCard({ item, execution }: { item: PendingInteraction; executi
   const state = useInteractionState();
   const request = item.request ?? {};
   return (
-    <section data-kind="permission" data-session={item.sessionID} data-request={item.requestID} className={`${interactionShell} space-y-2`}>
+    <section tabIndex={-1} data-kind="permission" data-session={item.sessionID} data-request={item.requestID} className={`${interactionShell} space-y-2`}>
       <h4 className={interactionHeading}>Permiso nativo · {sessionLabel(execution, item.sessionID)}</h4>
       <p className="text-sm">Acción: {typeof request.action === 'string' ? request.action : 'desconocida'}</p>
       <p className="text-sm">Alcance: {Array.isArray(request.resources) && request.resources.length
@@ -197,9 +200,6 @@ export function ConversationInteractions({ detail }: { detail: ExecutionDetail }
   const interactions = detail.interactions ?? { pending: [], resolved: [], readErrors: [] };
   return (
     <>
-      {interactions.readErrors.map((error, index) => (
-        <p key={`read-error-${index}`} role="alert" className={alertClass}>{readErrorMessage(error)}</p>
-      ))}
       {interactions.pending.length ? (
         <section aria-label="Intervención" className="space-y-3">
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Esperando intervención</h3>
@@ -233,7 +233,7 @@ export function ConversationInteractions({ detail }: { detail: ExecutionDetail }
                     {Object.entries(item.response).map(([key, value]) => (
                       <div key={key} className="flex flex-wrap gap-x-2">
                         <dt className="font-mono text-xs text-slate-500 dark:text-slate-400">{key}</dt>
-                        <dd className="text-xs text-slate-800 dark:text-slate-200">{formatResolvedValue(value)}</dd>
+                        <dd className="text-xs text-slate-800 dark:text-slate-200">{formatResolvedValue(item.kind, key, value)}</dd>
                       </div>
                     ))}
                   </dl>

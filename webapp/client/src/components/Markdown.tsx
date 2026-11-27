@@ -30,11 +30,11 @@ function CodeBlock({ children }: { children?: ReactNode }) {
 
 const MARKDOWN_COMPONENTS: Components = {
   pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-  a: ({ href, children }) => (
+  a: ({ href, children }) => (href ? (
     <a href={href} target="_blank" rel="noreferrer noopener" className="font-medium text-sky-600 underline underline-offset-2 dark:text-sky-300">
       {children}
     </a>
-  ),
+  ) : <span>{children}</span>),
   h1: ({ children }) => <h1 className="mb-2 mt-3 text-lg font-semibold text-slate-900 first:mt-0 dark:text-slate-50">{children}</h1>,
   h2: ({ children }) => <h2 className="mb-2 mt-3 text-base font-semibold text-slate-900 first:mt-0 dark:text-slate-50">{children}</h2>,
   h3: ({ children }) => <h3 className="mb-1.5 mt-2 text-sm font-semibold text-slate-900 first:mt-0 dark:text-slate-50">{children}</h3>,

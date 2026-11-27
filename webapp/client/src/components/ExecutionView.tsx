@@ -8,7 +8,7 @@ import { noticeClass } from '../lib/ui';
 import { STOP_ERRORS } from '../lib/labels';
 import { ExecutionHeader } from './ExecutionHeader';
 import { PriorityBanner } from './PriorityBanner';
-import { ConversationTab } from './ConversationTab';
+import { ConversationTab, type FocusRequest } from './ConversationTab';
 
 const TAB_LABELS: Record<ExecutionTab, string> = {
   conversation: 'Conversación',
@@ -36,7 +36,7 @@ export function ExecutionView({ id, tab, session, engineReachable }: Props) {
   const [stopping, setStopping] = useState(false);
   const [stopRequest, setStopRequest] = useState<StopResponseBody | null>(null);
   const [stopError, setStopError] = useState<string | null>(null);
-  const [focusRequest, setFocusRequest] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   if (missing && detail === null) {
     return (
       <section aria-label={`Ejecución ${id}`} className="pt-10 lg:pt-20">
@@ -76,7 +76,12 @@ export function ExecutionView({ id, tab, session, engineReachable }: Props) {
   };
   const jumpToRequest = (item: PendingInteraction) => {
     navigate({ view: 'execution', id, tab: 'conversation', session });
-    setFocusRequest(`${item.kind}:${item.sessionID}:${item.requestID}`);
+    setFocusRequest(current => ({
+      kind: item.kind,
+      sessionID: item.sessionID,
+      requestID: item.requestID,
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
   };
   return (
     <section aria-label={`Ejecución ${execution.id}`}>

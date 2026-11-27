@@ -38,7 +38,7 @@ export function ExecutionHeader({ detail, session, stopping, onStop }: Props) {
   const capture = detail.capture;
   const knownModel = execution.knownModel?.value ?? null;
   const terminal = isTerminal(execution.status);
-  const canStop = !terminal && execution.sessionID !== null && !execution.stop.requested;
+  const canStop = !terminal && execution.sessionID !== null;
   const captures = capture?.readable
     ? (capture.captureIDs.length ? capture.captureIDs.join(', ') : 'sin filas de captura de esta ejecución')
     : `no consultable: ${capture?.reason ?? 'desconocido'}`;

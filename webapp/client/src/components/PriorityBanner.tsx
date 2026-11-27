@@ -18,24 +18,27 @@ export function PriorityBanner({ detail, engineReachable, stopRequest, stopError
   const capture = detail.capture;
   const interactions = detail.interactions ?? { pending: [], resolved: [], readErrors: [] };
   const stop = detail.stop ?? { requested: false };
-  const recorderFailed = capture?.recorderFailed
-    || (recorder?.readable === true && recorder.status === 'failed');
+  const recorderAlert = capture?.recorderFailed
+    || (recorder?.readable === true && (recorder.status === 'failed' || recorder.reviewRequired === true));
   const engineOffline = engineReachable === false && !isTerminal(execution.status);
   const hasPending = interactions.pending.length > 0 || interactions.readErrors.length > 0;
-  if (!recorderFailed && !engineOffline && !stop.requested && !hasPending && !stopError) return null;
+  if (!recorderAlert && !engineOffline && !stop.requested && !hasPending && !stopError) return null;
   const captureState = capture?.readable
     ? (capture.recorderFailed ? 'fallo del registrador declarado en la captura' : 'consultable')
     : `no consultable (${capture?.reason ?? 'desconocido'})`;
+  const recorderReviewText = recorder?.readable === true
+    ? (recorder.reviewRequired === false
+      ? 'Revisión no declarada como requerida por el motor.'
+      : 'Revisión requerida según la evidencia pública del motor.')
+    : `No se pudieron leer los metadatos públicos del registrador en el motor (${recorder?.reason ?? 'motivo desconocido'}); la captura declara fallo del registrador y revisión requerida.`;
   return (
     <section role="region" aria-label="Atención prioritaria" data-priority-banner="true" className="mt-2 space-y-2">
-      {recorderFailed && (
+      {recorderAlert && (
         <div role="alert" aria-label="Fallo del registrador" className={`${alertClass} border-red-300 dark:border-red-800`}>
           <h3 className="text-sm font-semibold">Fallo del registrador</h3>
           <p>Aviso: revisar antes de volver a ejecutar. Estado de captura: {captureState}.</p>
           <p>
-            {recorder?.readable === true && recorder.reviewRequired === false
-              ? 'Revisión no declarada como requerida por el motor.'
-              : 'Revisión requerida según la evidencia pública del motor.'}
+            {recorderReviewText}
             {' '}Se conserva el bloqueo durable de la captura: no hay desbloqueo automático, ni por recargar ni por reparar la ruta.
           </p>
           {recorder?.readable === true && recorder.notice ? <p className={noticeClass}>{recorder.notice}</p> : null}
@@ -76,12 +79,12 @@ export function PriorityBanner({ detail, engineReachable, stopRequest, stopError
             })}
           </ul>
           {stop.treeVerified === false ? (
-            <p role="alert" className="mt-2 font-medium">
+            <p className="mt-2 font-medium">
               No se pudo verificar el árbol de sesiones; los descendientes nuevos no pudieron comprobarse.
             </p>
           ) : null}
           {stop.readError ? (
-            <p role="alert" className="mt-2 font-medium">
+            <p className="mt-2 font-medium">
               No se pudo comprobar el desenlace público de la detención; se mantiene no confirmada y el trabajo no se relanza.
             </p>
           ) : null}

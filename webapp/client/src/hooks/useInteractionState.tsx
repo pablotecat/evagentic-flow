@@ -20,13 +20,25 @@ type InteractionStateValue = {
 export const interactionKey = (item: { kind: string; sessionID: string; requestID: string }): string =>
   JSON.stringify([item.kind, item.sessionID, item.requestID]);
 
-export const fieldVisible = (field: FormField, draft: DraftValues | undefined): boolean => {
+export const fieldVisible = (field: FormField, draft: DraftValues | undefined, fields?: FormField[]): boolean => {
   const when = field.when;
   if (when === null || when === undefined || typeof when !== 'object' || typeof (when as { field?: unknown }).field !== 'string') {
     return true;
   }
   const condition = when as { field: string; equals?: unknown };
-  return draft?.[condition.field] === condition.equals;
+  const target = fields?.find(candidate => candidate.key === condition.field);
+  const raw = draft?.[condition.field];
+  if (target?.type === 'boolean' || (target === undefined && typeof condition.equals === 'boolean')) {
+    return (raw === undefined ? false : raw) === condition.equals;
+  }
+  if (target?.type === 'number' || target?.type === 'integer' || typeof condition.equals === 'number') {
+    if (typeof raw === 'string') {
+      if (raw.trim() === '') return false;
+      const numeric = Number(raw);
+      return Number.isFinite(numeric) && numeric === condition.equals;
+    }
+  }
+  return raw === condition.equals;
 };
 
 const InteractionStateContext = createContext<InteractionStateValue | null>(null);
@@ -49,8 +61,7 @@ export function InteractionStateProvider({ id, reload, children }: ProviderProps
   const [error, setError] = useState<string | null>(null);
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
-  const replyingRef = useRef(replying);
-  replyingRef.current = replying;
+  const replyingRef = useRef(false);
 
   const setField = useCallback((key: string, fieldKey: string, value: DraftValue) => {
     setDrafts(current => ({ ...current, [key]: { ...(current[key] ?? {}), [fieldKey]: value } }));
@@ -68,6 +79,7 @@ export function InteractionStateProvider({ id, reload, children }: ProviderProps
 
   const reply = useCallback(async (key: string, payload: Record<string, unknown>) => {
     if (replyingRef.current) return;
+    replyingRef.current = true;
     setReplying(true);
     setError(null);
     try {
@@ -85,6 +97,7 @@ export function InteractionStateProvider({ id, reload, children }: ProviderProps
       const code = isApiFailure(failure) ? failure.body?.error : null;
       setError(INTERACTION_ERRORS[typeof code === 'string' ? code : ''] ?? INTERACTION_ERRORS['reply-unconfirmed']);
     } finally {
+      replyingRef.current = false;
       setReplying(false);
     }
   }, [id, reload]);
@@ -95,7 +108,7 @@ export function InteractionStateProvider({ id, reload, children }: ProviderProps
     const fields = Array.isArray(item.request?.fields) ? item.request.fields : [];
     const answer: Record<string, unknown> = {};
     for (const field of fields) {
-      if (!fieldVisible(field, answers)) continue;
+      if (!fieldVisible(field, answers, fields)) continue;
       const raw = answers[field.key] ?? (field.type === 'boolean' ? false : undefined);
       if (raw === undefined || raw === '') continue;
       answer[field.key] = field.type === 'number' || field.type === 'integer' ? Number(raw) : raw;
