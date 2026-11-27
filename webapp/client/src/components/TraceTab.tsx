@@ -3,6 +3,9 @@ import { noticeClass } from '../lib/ui';
 import { scopeSummary } from './TraceScopeBar';
 import { TraceTree as TraceTreeView } from './TraceTree';
 import { TraceTimeline } from './TraceTimeline';
+import { TraceToolsView } from './TraceToolsView';
+import { TraceMetricsView } from './TraceMetricsView';
+import { TraceSkillsCoverageView } from './TraceSkillsCoverageView';
 
 export const TRACE_DIMENSIONS = [
   { id: 'tree', label: 'Árbol y línea temporal' },
@@ -22,12 +25,6 @@ type Props = {
   dimension: TraceDimension;
   onDimensionChange: (dimension: TraceDimension) => void;
   onSelectSession: (session: string | null) => void;
-};
-
-const PLACEHOLDER_TEXT: Record<Exclude<TraceDimension, 'tree'>, string> = {
-  tools: 'Las llamadas de herramienta con identidad, entrada autorizada, desenlace y evidencia se mostrarán aquí sobre la misma consulta de traza.',
-  metrics: 'Los pasos de modelo y las mediciones con valor, fuente y alcance se mostrarán aquí sobre la misma consulta de traza.',
-  'skills-coverage': 'Las skills observadas, las definiciones y la cobertura de captura se mostrarán aquí sobre la misma consulta de traza.',
 };
 
 export function TraceTab({
@@ -112,9 +109,22 @@ export function TraceTab({
             )}
           </>
         ) : (
-          <div className="space-y-2">
-            <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">{PLACEHOLDER_TEXT[dimension]}</p>
+          <div className="space-y-3">
             <p className={noticeClass}>Alcance activo: {scopeText}.</p>
+            {trace === null ? (
+              <p className={noticeClass}>Consultando la traza de este alcance…</p>
+            ) : !trace.readable ? (
+              <p className={noticeClass}>
+                La traza no está consultable ({trace.reason ?? 'desconocido'}); no se reconstruye contenido no
+                capturado.
+              </p>
+            ) : dimension === 'tools' ? (
+              <TraceToolsView trace={trace} />
+            ) : dimension === 'metrics' ? (
+              <TraceMetricsView trace={trace} />
+            ) : (
+              <TraceSkillsCoverageView trace={trace} />
+            )}
           </div>
         )}
       </div>

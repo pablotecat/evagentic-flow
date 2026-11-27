@@ -1782,3 +1782,551 @@ test('UI /next: línea temporal honesta con esperas sin inicio, escala cero/vac�
   await waitForText(page, '1 espera(s) externa(s) de esta sesión sin inicio observado');
   assert.equal(await page.locator('[data-timeline-scale]').count(), 0);
 });
+
+const toolAttempt = (index, overrides = {}) => ({
+  diagnosticVersion: 1,
+  type: 'diagnostic.tool-attempt',
+  projectID: 'prj-t',
+  sessionID: sessions.root,
+  executionID: null,
+  messageID: `msg_${index}`,
+  callID: `call_${index}`,
+  toolName: 'read',
+  input: { path: `entrada-${index}.txt`, mode: 'utf8' },
+  inputText: null,
+  output: [{ type: 'text', text: `contenido autorizado sintético ${index}` }],
+  error: null,
+  outcome: 'success',
+  startedAt: 1000 + index * 100,
+  calledAt: 1010 + index * 100,
+  endedAt: 1200 + index * 100,
+  retryOf: null,
+  operationID: null,
+  consumption: null,
+  incident: null,
+  evidence: [evRef(30 + index, `evt-tool-${index}`, 'session.tool.success')],
+  omissions: [],
+  horizons: [{ captureID: 'cap-t', arrival: 20, observedAt: 1770000000000 }],
+  ...overrides,
+});
+
+const toolsAttempts = () => [
+  toolAttempt(0),
+  toolAttempt(1, {
+    toolName: 'write',
+    input: null,
+    inputText: 'texto plano de entrada sintético',
+    output: null,
+    error: { type: 'http-error', message: 'fallo sintético de escritura', status: 503 },
+    outcome: 'error',
+    incident: { kind: 'tool-error', cause: null },
+    evidence: [evRef(31, 'evt-tool-1', 'session.tool.failed')],
+  }),
+  toolAttempt(2, {
+    input: { path: 'entrada-0.txt', mode: 'utf8' },
+    output: null,
+    error: null,
+    outcome: 'not-observed',
+    endedAt: null,
+    incident: { kind: 'outcome-not-observed', cause: null },
+    omissions: ['call-start-not-observed'],
+    evidence: [evRef(32, 'evt-tool-2', 'session.tool.input.started')],
+  }),
+  toolAttempt(3, {
+    toolName: 'bash',
+    input: null,
+    inputText: null,
+    output: null,
+    error: null,
+    outcome: 'not-observed',
+    startedAt: null,
+    endedAt: null,
+    incident: { kind: 'outcome-not-observed', cause: null },
+    omissions: ['incomplete-call-identity', 'call-start-not-observed'],
+    evidence: [evRef(33, 'evt-tool-3', 'session.tool.called')],
+  }),
+];
+
+const bodyMatches = (page, phrase) => page.evaluate(
+  value => (document.body.innerText.match(new RegExp(value, 'g')) ?? []).length, phrase);
+
+test('UI /next: Herramientas e intentos filtrables con llamadas abiertas, JSON desplegable y aviso único de consumo', { timeout: 120000 }, async t => {
+  const traced = 'aaaabbbb-1a1a-4a1a-81a1-1a1a1a1a1a1a';
+  let attempts = toolsAttempts();
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(traced, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    trace: traceId => jsonResponse({ ...fullTrace(traceId), tools: { attempts } }),
+  };
+  const { app, page } = await openTraceTab(t, overrides, traced);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+  const subTab = name => page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab', { name });
+  await subTab('Herramientas e intentos').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-tools')?.getAttribute('aria-selected') === 'true');
+  await page.locator('[data-tool-attempt]').first().waitFor();
+
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 4);
+  assert.equal(await page.locator('[data-tool-name="read"]').count(), 2);
+  assert.equal(await page.locator('[data-outcome="success"]').count(), 1);
+  assert.equal(await page.locator('[data-outcome="error"]').count(), 1);
+  assert.equal(await page.locator('[data-outcome="not-observed"]').count(), 2);
+  assert.equal(await bodyMatches(page, 'Consumo: desconocido, no cero'), 1);
+  assert.equal(await bodyMatches(page, 'No se agrupan reintentos por nombre, argumentos ni proximidad'), 1);
+  const openRows = await page.locator('[data-outcome="not-observed"]').allInnerTexts();
+  assert.equal(openRows.length, 2);
+  assert.ok(openRows.every(row => row.includes('sin desenlace observado')));
+  assert.ok(openRows.every(row => !row.includes('éxito observado')));
+
+  await page.getByLabel('Filtrar por nombre de herramienta').fill('write');
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 1);
+  assert.equal(await page.locator('[data-tool-name="write"]').count(), 1);
+  await page.getByLabel('Filtrar por nombre de herramienta').fill('read');
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 2);
+  await page.getByLabel('Filtrar por desenlace').selectOption('error');
+  await waitForText(page, 'Ningún intento coincide con los filtros actuales.');
+  await page.getByLabel('Filtrar por nombre de herramienta').fill('');
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 1);
+  assert.ok((await page.locator('[data-outcome="error"]').innerText()).includes('error observado (fallido)'));
+  await page.getByLabel('Filtrar por desenlace').selectOption('not-observed');
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 2);
+  await page.getByLabel('Filtrar por desenlace').selectOption('');
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 4);
+
+  await page.locator('details[data-disclosure="input"] summary').first().click();
+  const inputJson = await page.locator('details[data-disclosure="input"] pre').first().innerText();
+  assert.ok(inputJson.includes('"path": "entrada-0.txt"'));
+  assert.ok(inputJson.includes('"mode": "utf8"'));
+  assert.ok(inputJson.includes('\n'));
+  await page.locator('details[data-disclosure="input"]').first().getByRole('button', { name: 'Copiar JSON' }).click();
+  assert.equal((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n'), inputJson);
+  await page.locator('details[data-disclosure="output"] summary').first().click();
+  assert.ok((await page.locator('details[data-disclosure="output"] pre').first().innerText()).includes('"type": "text"'));
+  await page.locator('[data-outcome="error"] details[data-disclosure="error"] summary').click();
+  const errorJson = await page.locator('[data-outcome="error"] details[data-disclosure="error"] pre').innerText();
+  assert.ok(errorJson.includes('"status": 503'));
+  assert.ok((await page.locator('[data-outcome="error"]').innerText()).includes('Resultado: no observado o no autorizado.'));
+  assert.ok((await page.locator('[data-tool-name="bash"]').innerText()).includes('Entrada: no observada o no autorizada.'));
+
+  await page.locator('details[data-disclosure="forensics"] summary').first().click();
+  const forensics = await page.locator('details[data-disclosure="forensics"]').first().innerText();
+  assert.ok(forensics.includes('ses_root_t'));
+  assert.ok(forensics.includes('msg_0'));
+  assert.ok(forensics.includes('call_0'));
+  assert.ok(forensics.includes('evt-tool-0'));
+  assert.ok(forensics.includes('1970-01-01T00:00:01.000Z'));
+  await page.locator('details[data-disclosure="forensics"]').first().getByRole('button', { name: 'Copiar llamada' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'call_0');
+  await page.locator('details[data-disclosure="forensics"] summary').nth(2).click();
+  assert.ok((await page.locator('details[data-disclosure="forensics"]').nth(2).innerText()).includes('Omisiones: call-start-not-observed'));
+
+  await page.getByLabel('Filtrar por nombre de herramienta').fill('read');
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 2);
+  attempts = [...toolsAttempts(), toolAttempt(9, { toolName: 'read' })];
+  await page.waitForFunction(() => document.querySelectorAll('[data-tool-attempt]').length === 3);
+  assert.equal(await page.getByLabel('Filtrar por nombre de herramienta').inputValue(), 'read');
+  assert.equal(await page.locator('details[data-disclosure="input"]').first().getAttribute('open'), '');
+});
+
+const metric = (value, source, scope, status) => ({ value, status: status ?? (value === null ? 'unknown' : 'observed'),
+  source: value === null ? null : source, scope });
+
+const metricStep = (index, overrides = {}) => ({
+  diagnosticVersion: 1,
+  type: 'diagnostic.model-step',
+  projectID: 'prj-t',
+  sessionID: sessions.root,
+  executionID: null,
+  messageID: `msg_m${index}`,
+  callID: null,
+  model: metric({ providerID: 'synthetic', id: `model-${index}` }, 'opencode.event.session.step.started.model', 'model-step'),
+  tokens: { ...metric({ input: 120 + index, output: 34, reasoning: 5, cache: { read: 10, write: 2 } },
+    'opencode.event.session.step.ended.tokens', 'model-step'), basis: 'runtime-normalized-unverified', providerReported: null },
+  costUSD: { ...metric(0.042, 'opencode.event.session.step.ended.cost', 'model-step', 'estimated'), basis: 'runtime-estimate-not-invoice' },
+  startedAt: 1000,
+  streamedAt: 1100,
+  endedAt: 2500,
+  elapsedMs: 1500,
+  providerBodyMs: 100,
+  outcome: 'ended',
+  state: 'ended',
+  finish: 'stop',
+  error: null,
+  durationSource: 'opencode.event.session.step.started.started-to-terminal.sourceTime',
+  skillConsumption: null,
+  dispatches: [],
+  retries: [],
+  results: [],
+  evidence: [evRef(40 + index, `evt-metric-${index}`, 'session.step.ended')],
+  omissions: [],
+  ...overrides,
+});
+
+const metricsFixture = () => ({
+  steps: [
+    metricStep(0),
+    metricStep(1, {
+      model: metric(null, null, 'model-step'),
+      tokens: { ...metric(null, null, 'model-step'), basis: 'runtime-normalized-unverified', providerReported: null },
+      costUSD: { ...metric(null, null, 'model-step'), basis: 'runtime-estimate-not-invoice' },
+      startedAt: null,
+      streamedAt: null,
+      endedAt: null,
+      elapsedMs: null,
+      providerBodyMs: null,
+      outcome: 'not-observed',
+      finish: null,
+      dispatches: [
+        { startedAt: 5000, model: metric({ providerID: 'synthetic', id: 'model-1' }, 'opencode.event.session.step.started.model', 'model-step'), tokens: null, costUSD: null, evidence: evRef(41, 'evt-dispatch-a', 'session.step.started') },
+        { startedAt: 6200, model: metric({ providerID: 'synthetic', id: 'model-1' }, 'opencode.event.session.step.started.model', 'model-step'), tokens: null, costUSD: null, evidence: evRef(42, 'evt-dispatch-b', 'session.step.started') },
+      ],
+      retries: [{ kind: 'model', attempt: 2, at: 6100,
+        error: { type: 'http-error', message: 'demasiadas peticiones sintéticas', status: 429 },
+        tokens: null, costUSD: null, scheduledDelayMs: 250, actualWaitMs: null, evidence: evRef(43, 'evt-retry-1', 'session.step.ended') }],
+      results: [],
+      omissions: ['multiple-step-results-not-collapsed', 'multiple-dispatches-body-duration-not-attributable'],
+    }),
+  ],
+  measurements: [{
+    diagnosticVersion: 1,
+    type: 'diagnostic.measurement',
+    projectID: 'prj-t',
+    sessionID: sessions.childA,
+    executionID: null,
+    messageID: null,
+    callID: null,
+    kind: 'compaction',
+    model: metric(null, null, 'compaction'),
+    tokens: { ...metric({ input: 80, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      'opencode.event.session.compaction.ended.tokens', 'compaction'), basis: 'runtime-normalized-unverified', providerReported: null },
+    costUSD: { ...metric(0, 'opencode.event.session.compaction.ended.cost', 'compaction', 'estimated'), basis: 'runtime-estimate-not-invoice' },
+    outcome: 'ended',
+    error: null,
+    evidence: [evRef(45, 'evt-compaction-1', 'session.compaction.ended')],
+    omissions: [],
+  }],
+  pendingInbox: [
+    { diagnosticVersion: 1, type: 'diagnostic.pending-inbox', projectID: 'prj-t', sessionID: sessions.root,
+      executionID: null, messageID: 'msg_pending_root', callID: null, state: 'delivery-not-observed',
+      evidence: [evRef(50, 'evt-inbox-root', 'session.inbox.enqueued')],
+      omissions: ['execution-and-completion-not-implied'] },
+    { diagnosticVersion: 1, type: 'diagnostic.pending-inbox', projectID: 'prj-t', sessionID: sessions.childA,
+      executionID: null, messageID: 'msg_pending_sub', callID: null, state: 'unknown',
+      evidence: [evRef(51, 'evt-inbox-sub', 'session.inbox.enqueued')],
+      omissions: ['execution-and-completion-not-implied', 'inbox-resolution-order-not-established'] },
+  ],
+  coverage: { diagnosticVersion: 1, type: 'diagnostic.metric-coverage', flowElapsedMs: null,
+    omissions: ['no-concurrent-duration-sum', 'billed-cost-not-exposed'],
+    recorderDiagnostics: [{ captureID: 'cap-t', arrival: 5, eventID: null, type: 'recorder.gap',
+      reason: 'unrecognized-session-envelope' }] },
+});
+
+test('UI /next: Métricas en tabla con tokens desglosados, desconocidos sin cero, consumo normalizado, despachos e inbox', { timeout: 120000 }, async t => {
+  const traced = 'bbbbcccc-2b2b-4b2b-82b2-2b2b2b2b2b2b';
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(traced, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    trace: traceId => jsonResponse({ ...fullTrace(traceId), metrics: metricsFixture() }),
+  };
+  const page = (await openTraceTab(t, overrides, traced)).page;
+  await page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab', { name: 'Métricas' }).click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-metrics')?.getAttribute('aria-selected') === 'true');
+  await page.locator('table[data-metrics-steps]').waitFor();
+
+  const headers = await page.locator('table[data-metrics-steps] thead th').allInnerTexts();
+  for (const expected of ['Sesión', 'Mensaje', 'Modelo', 'Entrada', 'Salida', 'Razonamiento', 'Caché lectura', 'Caché escritura', 'Coste (USD, estimado)', 'Duración', 'Desenlace']) {
+    assert.ok(headers.some(header => header.includes(expected)), `missing metrics column header ${expected}`);
+  }
+  const stepsText = await page.locator('table[data-metrics-steps]').innerText();
+  assert.ok(stepsText.includes('synthetic/model-0'));
+  assert.ok(stepsText.includes('120'));
+  assert.ok(stepsText.includes('34'));
+  assert.ok(stepsText.includes('5'));
+  assert.ok(stepsText.includes('10'));
+  assert.ok(stepsText.includes('2'));
+  assert.ok(stepsText.includes('0.042 USD'));
+  assert.ok(stepsText.includes('1500 ms'));
+  assert.ok(!stepsText.includes('"input"'));
+  assert.ok(!stepsText.includes('{"input"'));
+  assert.ok(!stepsText.includes('JSON.'));
+  const unknownRow = page.locator('[data-metric-step-row]').nth(1);
+  await unknownRow.waitFor();
+  for (const column of ['input', 'output', 'reasoning', 'cache.read', 'cache.write']) {
+    assert.equal(await unknownRow.locator(`[data-token-column="${column}"]`).innerText(), 'desconocido');
+  }
+  assert.equal(await unknownRow.locator('[data-metric-cost]').innerText(), 'desconocido');
+  assert.equal(await unknownRow.locator('[data-metric-duration]').innerText(), 'desconocido');
+  assert.ok((await unknownRow.innerText()).includes('sin desenlace observado'));
+
+  const notices = await page.locator('#panel-trace').innerText();
+  assert.ok(notices.includes('valor normalizado que informa el runtime'));
+  assert.ok(notices.includes('no prueba el consumo original del proveedor'));
+  assert.ok(notices.includes('estimación del runtime, no una factura'));
+  assert.ok(notices.includes('permanece desconocido, nunca cero'));
+  assert.ok(notices.includes('Alcance activo: toda la ejecución'));
+
+  await page.locator('details[data-metric-details] summary').nth(1).click();
+  const detailsText = await page.locator('details[data-metric-details]').nth(1).innerText();
+  assert.ok(detailsText.includes('Despachos observados: 2'));
+  assert.ok(detailsText.includes('Reintentos de modelo observados: 1'));
+  assert.ok(detailsText.includes('429'));
+  assert.ok(detailsText.includes('consumo y espera real por intento desconocidos'));
+  assert.ok(detailsText.includes('Fuente de duración: opencode.event.session.step.started.started-to-terminal.sourceTime'));
+
+  await page.locator('details[data-metric-details] summary').nth(0).click();
+  const firstDetailsText = await page.locator('details[data-metric-details]').nth(0).innerText();
+  assert.ok(firstDetailsText.includes('opencode.event.session.step.ended.tokens'));
+  assert.ok(firstDetailsText.includes('alcance: model-step'));
+  assert.ok(firstDetailsText.includes('runtime-normalized-unverified'));
+  assert.ok(firstDetailsText.includes('runtime-estimate-not-invoice'));
+
+  const measurementsText = await page.locator('table[data-metrics-measurements]').innerText();
+  assert.ok(measurementsText.includes('compaction'));
+  assert.ok(measurementsText.includes('ses_child_a'));
+  assert.ok(measurementsText.includes('80'));
+
+  assert.equal(await page.locator('[data-pending-inbox]').count(), 2);
+  const inboxText = await page.locator('section[aria-label="Métricas del modelo con fuente y alcance"]').innerText();
+  assert.ok(inboxText.includes('Admisión sin entrega observada'));
+  assert.ok(inboxText.includes('msg_pending_root'));
+  assert.ok(inboxText.includes('msg_pending_sub'));
+  assert.ok(inboxText.includes('no se totalizan mensajes entre sesiones'));
+
+  assert.ok(notices.includes('La duración total del flujo no se expone'));
+  assert.ok(notices.includes('no se suman ramas concurrentes'));
+  assert.ok(notices.includes('billed-cost-not-exposed'));
+  assert.ok(notices.includes('unrecognized-session-envelope'));
+});
+
+const skillFixture = id => ({
+  ...fullTrace(id),
+  skills: {
+    observed: [{
+      sessionID: sessions.root,
+      messageID: 'msg_skill_1',
+      callID: 'call_skill_1',
+      type: 'session.skill',
+      skill: { id: 'guardian-parse', name: 'Guardián de sintaxis', text: 'Contenido filtrado sintético de la skill observada.',
+        sha256: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+        origin: 'runtime-activation-event', contextID: null, consumption: null },
+      evidence: { captureID: 'cap-t', arrival: 60, eventID: 'evt-skill-1' },
+    }],
+    admitted: [{
+      observationTime: 1770000010000, source: 'opencode.session.inbox.skills', identity: null,
+      sessionID: sessions.root, messageID: 'msg_skill_1', eventID: null, status: 'captured',
+      omissions: [], redactions: [], value: { id: 'admitida-sintetica', name: 'Admitida sintética',
+        text: 'texto sintético' },
+      sha256: '1111c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+      hashBasis: 'redacted-json-utf8', evidence: { captureID: 'cap-t', arrival: 61, eventID: null },
+    }],
+    available: [{
+      observationTime: 1770000011000, source: 'opencode.skill.list', identity: null,
+      sessionID: sessions.root, messageID: null, eventID: null, status: 'captured',
+      omissions: [], redactions: [],
+      value: [{ id: 'disponible-sintetica', name: 'Disponible sintética', description: 'Skill disponible sintética', autoinvoke: false }],
+      sha256: '2222c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+      hashBasis: 'redacted-json-utf8', evidence: { captureID: 'cap-t', arrival: 62, eventID: null },
+    }],
+    definitions: [
+      {
+        observationTime: 1770000020000, source: 'opencode.skill.list', identity: 'def-registro',
+        sessionID: sessions.root, messageID: null, eventID: null, status: 'captured',
+        omissions: [], redactions: [],
+        value: { id: 'definicion-registro', name: 'Definición del registro', description: 'Descripción sintética',
+          content: 'Contenido filtrado sintético de la definición del registro.', path: '.agents/skills/definicion.md', autoinvoke: false },
+        sha256: '3333c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+        hashBasis: 'redacted-json-utf8', evidence: { captureID: 'cap-t', arrival: 63, eventID: null },
+      },
+      {
+        observationTime: 1770000021000, source: 'node.fs.readFile', identity: 'def-desplegado',
+        sessionID: sessions.root, messageID: null, eventID: null, status: 'captured',
+        omissions: [], redactions: [],
+        value: { path: 'skills/desplegado/SKILL.md', content: 'Contenido desplegado sintético.' },
+        sha256: '4444c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+        hashBasis: 'redacted-json-utf8', evidence: { captureID: 'cap-t', arrival: 64, eventID: null },
+      },
+    ],
+    environment: [{
+      observationTime: 1770000022000, source: 'opencode.plugin.list', identity: null,
+      sessionID: sessions.root, messageID: null, eventID: null, status: 'captured',
+      omissions: [], redactions: [],
+      value: { plugins: [{ id: 'postman-mcp', source: 'package', version: '1.2.3', status: 'active' },
+        { id: 'plugin-local', source: 'local', version: null, status: 'failed' }],
+      configurationSources: null, transformations: null },
+      sha256: '5555c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+      hashBasis: 'redacted-json-utf8', evidence: { captureID: 'cap-t', arrival: 65, eventID: null },
+    }],
+  },
+  captureDiagnostics: {
+    diagnosticVersion: 1,
+    type: 'diagnostic.capture-coverage',
+    readiness: 'not-assessed',
+    scope: 'session-tree',
+    sessionID: sessions.root,
+    sessions: [sessions.root, sessions.childA],
+    declarations: [{ schemaVersion: 1, captureID: 'cap-t', arrival: 1, observedAt: 1770000000000,
+      type: 'recorder.ready', runtimeVersion: '2.1.2-synthetic', sdkVersion: '2.1.2',
+      coverage: { replay: false, content: ['texto'], excluded: [], executionID: 'not-exposed', ordering: 'arrival-is-not-causality' } }],
+    observed: [{ type: 'session.tool.success', source: 'opencode.event', stage: null, status: 'captured', count: 2 },
+      { type: 'session.step.ended', source: 'opencode.event', stage: null, status: null, count: 1 }],
+    omissions: ['flow-boundaries-not-exposed'],
+    diagnostics: [{ captureID: 'cap-t', arrival: 5, observedAt: 1770000000000, type: 'recorder.gap',
+      reason: 'unrecognized-session-envelope' }],
+    horizons: [{ captureID: 'cap-t', arrival: 20, observedAt: 1770000000000 },
+      { captureID: 'cap-u', arrival: 30, observedAt: 1770000099999 }],
+  },
+});
+
+test('UI /next: Skills y cobertura con separación estricta, lecturas posteriores al hecho y not-assessed', { timeout: 120000 }, async t => {
+  const traced = 'ccccdddd-3c3c-4c3c-83c3-3c3c3c3c3c3c';
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(traced, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    trace: traceId => jsonResponse(skillFixture(traceId)),
+  };
+  const { app, page } = await openTraceTab(t, overrides, traced);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+  await page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab', { name: 'Skills y cobertura' }).click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-skills-coverage')?.getAttribute('aria-selected') === 'true');
+
+  const observedSection = page.locator('section[data-skills-observed]');
+  await observedSection.waitFor();
+  const observedText = await observedSection.innerText();
+  assert.ok(observedText.includes('Guardián de sintaxis'));
+  assert.ok(observedText.includes('evento público de activación del runtime'));
+  assert.ok(observedText.includes('a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2'));
+  assert.ok(observedText.includes('activación o carga efectiva'));
+  assert.ok(!observedText.includes('Disponible sintética'));
+  await observedSection.locator('details[data-disclosure="skill-content"] summary').click();
+  assert.ok((await observedSection.innerText()).includes('Contenido filtrado sintético de la skill observada.'));
+
+  const admittedSection = page.locator('section[data-skills-admitted]');
+  const admittedText = await admittedSection.innerText();
+  assert.ok(admittedText.includes('admitida-sintetica'));
+  assert.ok(admittedText.includes('la admisión no prueba despacho por el modelo'));
+
+  const availableSection = page.locator('section[data-skills-available]');
+  const availableText = await availableSection.innerText();
+  assert.ok(availableText.includes('disponible-sintetica'));
+  assert.ok(availableText.includes('no prueba uso'));
+  assert.ok(!availableText.includes('Guardián de sintaxis'));
+
+  const definitionsSection = page.locator('section[data-skills-definitions]');
+  const definitionsText = await definitionsSection.innerText();
+  assert.ok(definitionsText.includes('Definición observada (opencode.skill.list)'));
+  assert.ok(definitionsText.includes('lecturas posteriores al hecho'));
+  assert.ok(definitionsText.includes('Ruta: .agents/skills/definicion.md'));
+  assert.ok(definitionsText.includes('Definición observada (node.fs.readFile)'));
+  await definitionsSection.getByRole('button', { name: 'Copiar SHA-256' }).first().click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()),
+    '3333c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2');
+  await definitionsSection.locator('details[data-disclosure="skill-content"] summary').first().click();
+  assert.ok((await definitionsSection.innerText()).includes('Contenido filtrado sintético de la definición del registro.'));
+
+  const environmentSection = page.locator('section[data-plugin-environment]');
+  const environmentText = await environmentSection.innerText();
+  assert.ok(environmentText.includes('postman-mcp'));
+  assert.ok(environmentText.includes('lectura posterior al hecho'));
+  assert.ok(environmentText.includes('activo'));
+
+  const coverageSection = page.locator('section[data-capture-coverage]');
+  const coverageText = await coverageSection.innerText();
+  assert.ok(coverageText.includes('Disposición: sin evaluar (readiness: not-assessed)'));
+  assert.ok(coverageText.includes('no son una evaluación'));
+  assert.ok(coverageText.includes('la ausencia de incidentes no equivale a una aceptación'));
+  assert.ok(coverageText.includes('runtime 2.1.2-synthetic'));
+  assert.ok(coverageText.includes('ses_child_a'));
+
+  await coverageSection.locator('details[data-coverage-observed] summary').click();
+  assert.ok((await coverageSection.locator('details[data-coverage-observed]').innerText()).includes('session.tool.success'));
+  await coverageSection.locator('details[data-coverage-omissions] summary').click();
+  assert.ok((await coverageSection.locator('details[data-coverage-omissions]').innerText()).includes('flow-boundaries-not-exposed'));
+  await coverageSection.locator('details[data-coverage-diagnostics] summary').click();
+  assert.ok((await coverageSection.locator('details[data-coverage-diagnostics]').innerText()).includes('recorder.gap'));
+  await coverageSection.locator('details[data-coverage-horizons] summary').click();
+  const horizonsText = await coverageSection.locator('details[data-coverage-horizons]').innerText();
+  assert.ok(horizonsText.includes('cap-u'));
+  assert.ok(horizonsText.includes('hasta la fila 30'));
+});
+
+test('UI /next: cambio de subejecución acota las tres subvistas sin mezclar sesiones', { timeout: 120000 }, async t => {
+  const traced = 'ddddeeee-4d4d-4d4d-84d4-4d4d4d4d4d4d';
+  const childScoped = {
+    ...fullTrace(traced),
+    selectedSessionID: sessions.childA,
+    tree: { nodes: [traceNode(sessions.childA, { isViewRoot: true, relation: 'view-root' })],
+      sessionIDs: [sessions.childA] },
+    timeline: { intervals: [], waits: [] },
+    tools: { attempts: [toolAttempt(20, { sessionID: sessions.childA, toolName: 'child-tool' })] },
+    metrics: { steps: [metricStep(20, { sessionID: sessions.childA })], measurements: [],
+      pendingInbox: metricsFixture().pendingInbox.filter(item => item.sessionID === sessions.childA),
+      coverage: metricsFixture().coverage },
+    skills: { observed: [{
+      sessionID: sessions.childA, messageID: 'msg_skill_child', callID: 'call_skill_child', type: 'session.skill',
+      skill: { id: 'skill-hija', name: 'Skill hija sintética', text: 'Contenido de la skill hija.',
+        sha256: '9999c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+        origin: 'successful-skill-tool-result', contextID: null, consumption: null },
+      evidence: { captureID: 'cap-t', arrival: 70, eventID: 'evt-skill-child' },
+    }], admitted: [], available: [], definitions: [], environment: [] },
+  };
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(traced, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    trace: (traceId, url) => jsonResponse(url.searchParams.get('session') === null
+      ? { ...fullTrace(traceId), tools: { attempts: toolsAttempts() }, metrics: metricsFixture() }
+      : { ...childScoped, executionID: traceId }),
+  };
+  const page = (await openTraceTab(t, overrides, traced)).page;
+  const subTab = name => page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab', { name });
+  await subTab('Herramientas e intentos').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-tools')?.getAttribute('aria-selected') === 'true');
+  await page.locator('[data-tool-attempt]').first().waitFor();
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 4);
+
+  await subTab('Árbol y línea temporal').click();
+  await page.locator('[data-select-session="ses_child_a"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_a'));
+  await subTab('Herramientas e intentos').click();
+  await page.locator('[data-tool-attempt]').first().waitFor();
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 1);
+  assert.equal(await page.locator('[data-tool-name="child-tool"]').count(), 1);
+  assert.ok((await page.locator('#panel-trace').innerText()).includes('Alcance activo: subejecución ses_child_a'));
+  await page.locator('details[data-disclosure="forensics"] summary').click();
+  assert.ok((await page.locator('details[data-disclosure="forensics"]').innerText()).includes('ses_child_a'));
+
+  await subTab('Métricas').click();
+  await page.locator('table[data-metrics-steps]').waitFor();
+  assert.equal(await page.locator('[data-metric-step-row]').count(), 1);
+  const scopedMetrics = await page.locator('section[aria-label="Métricas del modelo con fuente y alcance"]').innerText();
+  assert.ok(scopedMetrics.includes('ses_child_a'));
+  assert.equal(await page.locator('[data-pending-inbox]').count(), 1);
+
+  await subTab('Skills y cobertura').click();
+  await page.locator('section[data-skills-observed]').waitFor();
+  const scopedSkills = await page.locator('section[data-skills-observed]').innerText();
+  assert.ok(scopedSkills.includes('Skill hija sintética'));
+  assert.ok(!scopedSkills.includes('Guardián de sintaxis'));
+});
+
+test('UI /next: traza ilegible gestionada con honestidad en las tres subvistas', { timeout: 120000 }, async t => {
+  const traced = 'eeeeffff-5e5e-4e5e-85e5-5e5e5e5e5e5e';
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(traced, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    trace: traceId => jsonResponse({ executionID: traceId, rootSessionID: sessions.root,
+      readable: false, reason: 'reader-timeout' }),
+  };
+  const page = (await openTraceTab(t, overrides, traced)).page;
+  const subTab = name => page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab', { name });
+  for (const name of ['Herramientas e intentos', 'Métricas', 'Skills y cobertura']) {
+    await subTab(name).click();
+    await page.waitForFunction(value => document.querySelector('[role="tabpanel"]')?.textContent?.includes(value),
+      `La traza no está consultable (reader-timeout); no se reconstruye contenido no capturado.`);
+    assert.ok((await page.locator('#panel-trace').innerText()).includes('Alcance activo: toda la ejecución'));
+    assert.equal(await page.locator('[data-tool-attempt], [data-metric-step-row], [data-skills-observed]').count(), 0);
+  }
+});

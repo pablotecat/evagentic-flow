@@ -350,9 +350,11 @@ export type TraceMetrics = {
 export type ToolOutputPart = { type: 'text'; text: string };
 
 export type ToolAttempt = {
+  diagnosticVersion: number;
   type: 'diagnostic.tool-attempt';
   projectID: string;
   sessionID: string;
+  executionID: null;
   messageID: string | null;
   callID: string | null;
   toolName: string | null;
@@ -360,18 +362,17 @@ export type ToolAttempt = {
   inputText: string | null;
   output: ToolOutputPart[] | null;
   error: DiagnosticError;
-  outcome: string | null;
+  outcome: string;
   startedAt: number | null;
   calledAt: number | null;
   endedAt: number | null;
-  elapsedMs: number | null;
-  durationSource: string | null;
   retryOf: null;
   operationID: null;
   consumption: null;
   incident: { kind: string; cause: string | null } | null;
   evidence: EvidenceRef[];
   omissions: string[];
+  horizons: CaptureHorizon[];
 };
 
 export type CaptureHorizon = { captureID: string; arrival: number; observedAt: number };
