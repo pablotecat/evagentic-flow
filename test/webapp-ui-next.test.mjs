@@ -1541,7 +1541,17 @@ test('UI /next: subnavegación de la traza entre sus cuatro dimensiones diagnós
 
 test('UI /next: alcance sincronizado con Entregables y reinicio desde su barra', { timeout: 120000 }, async t => {
   const traced = 'ffff6666-0606-4606-8606-060606060606';
-  const page = (await openTraceTab(t, traceExecutionOverrides(traced), traced)).page;
+  const overrides = {
+    ...traceExecutionOverrides(traced),
+    deliverables: (id, url) => {
+      const session = url.searchParams.get('session');
+      if (session === sessions.childA) {
+        return jsonResponse(singleSessionDeliverables(id, sessions.childA, deliverablesGroups()[1]));
+      }
+      return jsonResponse(fullDeliverables(id));
+    },
+  };
+  const page = (await openTraceTab(t, overrides, traced)).page;
   await page.locator('[data-select-session="ses_child_a"]').click();
   await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_a'));
 
@@ -1550,6 +1560,7 @@ test('UI /next: alcance sincronizado con Entregables y reinicio desde su barra',
     `#/executions/${traced}/deliverables?session=ses_child_a`);
   const scope = page.getByRole('region', { name: 'Alcance de los entregables' });
   await scope.waitFor();
+  await waitForText(page, 'Consulta de una sola sesión (ses_child_a)');
   const scopeText = await scope.innerText();
   assert.ok(scopeText.includes('Alcance: subejecución'));
   assert.ok(scopeText.includes('ses_child_a'));
@@ -2584,7 +2595,7 @@ const deliverableValue = (overrides = {}) => ({
 });
 
 const deliverableSnapshot = (sessionID, overrides = {}) => ({
-  source: 'opencode.session.tool.content',
+  source: 'opencode.session.file.boundary',
   identity: null,
   status: 'captured',
   value: deliverableValue(),
@@ -2645,6 +2656,7 @@ const deliverablesGroups = () => [
     responses: [],
     deliverables: [
       deliverableSnapshot(sessions.childA, {
+        source: 'opencode.session.tool.content',
         value: deliverableValue({
           path: 'salida-hija.txt',
           content: 'Contenido leído después del acontecimiento.',
@@ -2869,7 +2881,13 @@ test('UI /next: error de lectura parcial de una subejecución sin invalidar las 
 
 test('UI /next: respuestas autorizadas plegadas como detalle secundario debajo de los snapshots', { timeout: 120000 }, async t => {
   const tucked = 'dddd5555-4a4a-44a4-84a4-4a4a4a4a4a4a';
-  const page = (await openDeliverablesTab(t, deliverablesExecutionOverrides(tucked), tucked)).page;
+  const groups = deliverablesGroups();
+  groups[2] = { ...groups[2], entries: [{ text: 'Encargo de usuario sin respuesta autorizada.' }], responses: [] };
+  const overrides = {
+    ...deliverablesExecutionOverrides(tucked),
+    deliverables: () => jsonResponse(fullDeliverables(tucked, { sessions: groups })),
+  };
+  const page = (await openDeliverablesTab(t, overrides, tucked)).page;
   await waitForText(page, 'Alcance: toda la ejecución');
   const responses = page.locator('details[data-responses="ses_root_t"]');
   await responses.waitFor();
@@ -2878,7 +2896,8 @@ test('UI /next: respuestas autorizadas plegadas como detalle secundario debajo d
   let groupText = await group.innerText();
   assert.ok(!groupText.includes('Respuesta autorizada de la sesión raíz.'));
   assert.ok(!groupText.includes('Encargo autorizado conservado en la captura.'));
-  assert.ok(groupText.includes('Respuestas autorizadas de esta sesión (2)'));
+  assert.ok(groupText.includes('Respuestas autorizadas de esta sesión (1)'));
+  assert.ok(!groupText.includes('Respuestas autorizadas de esta sesión (2)'));
   const order = await page.evaluate(() => {
     const groupEl = document.querySelector('[data-session-group="ses_root_t"]');
     const cards = groupEl?.querySelector('[data-deliverable-cards]') ?? null;
@@ -2889,8 +2908,13 @@ test('UI /next: respuestas autorizadas plegadas como detalle secundario debajo d
   assert.equal(order, 'after');
   await responses.locator('summary').click();
   groupText = await group.innerText();
-  assert.ok(groupText.includes('Encargo autorizado: Encargo autorizado conservado en la captura.'));
+  assert.ok(!groupText.includes('Encargo autorizado:'));
   assert.ok(groupText.includes('Respuesta autorizada: Respuesta autorizada de la sesión raíz.'));
+
+  assert.equal(await page.locator('details[data-responses="ses_grandchild"]').count(), 0);
+  const grandchildText = await page.locator('[data-session-group="ses_grandchild"]').innerText();
+  assert.ok(!grandchildText.includes('Respuestas autorizadas de esta sesión (1)'));
+  assert.ok(!grandchildText.includes('Encargo de usuario sin respuesta autorizada.'));
 });
 
 test('UI /next: alcance de entregables reversible por sesión con raíz explícita y sin respuestas obsoletas', { timeout: 180000 }, async t => {
@@ -2942,7 +2966,8 @@ test('UI /next: alcance de entregables reversible por sesión con raíz explíci
 
   await page.evaluate(value => { location.hash = value; },
     `#/executions/${scoped}/deliverables?session=${encodeURIComponent(sessions.childA)}`);
-  await waitForText(page, 'Consulta de una sola sesión (ses_child_a)');
+  await page.locator('[data-deliverables-loading]').waitFor();
+  assert.equal(await page.locator('[data-query-mode]').count(), 0);
   await page.getByRole('button', { name: 'Ver toda la ejecución' }).click();
   await page.waitForFunction(value => location.hash === value, `#/executions/${scoped}/deliverables`);
   await waitForText(page, 'Alcance: toda la ejecución · 3 sesiones conocidas');
@@ -2981,9 +3006,136 @@ test('UI /next: entregables no consultables con estado honesto y sin datos obsol
   assert.ok((await unreadable.innerText()).includes('Los entregables no están consultables (reader-timeout)'));
   assert.ok((await unreadable.innerText()).includes('no se reconstruye contenido no capturado'));
   assert.equal(await page.locator('[data-deliverable-card]').count(), 0);
+  assert.equal(await page.locator('[data-query-mode]').count(), 0);
   assert.ok(!(await page.getByRole('tabpanel').innerText()).includes('entrada-encargo.txt'));
 
   mode = 'abort';
   await waitForText(page, 'no están consultables (deliverables-unavailable)');
   assert.equal(await page.locator('[data-deliverable-card]').count(), 0);
+  assert.equal(await page.locator('[data-query-mode]').count(), 0);
+});
+
+test('UI /next: regresiones #49 en value-null, identificadores copiables, query.mode y 400 invalid-session', { timeout: 120000 }, async t => {
+  const execId = 'aaaa8888-7d7d-47d7-87d7-7d7d7d7d7d7d';
+  const forensicHash = 'e'.repeat(64);
+  const regressionGroups = [
+    {
+      sessionID: sessions.root,
+      isRoot: true,
+      readable: true,
+      entries: [{ text: 'Encargo del usuario raíz.' }],
+      responses: [{ text: 'Respuesta autorizada raíz 1.' }, { text: 'Respuesta autorizada raíz 2.' }],
+      deliverables: [
+        deliverableSnapshot(sessions.root, {
+          source: 'opencode.session.file.boundary',
+          identity: 'ident-forense-49',
+          status: 'captured',
+          value: deliverableValue({
+            path: 'docs/informe-forense-49.md',
+            content: 'Contenido forense verificable.',
+            acquisition: 'runtime-content',
+            role: 'output',
+            callID: 'call_forense_49',
+          }),
+          sha256: forensicHash,
+          messageID: 'msg_forense_49',
+          eventID: 'evt_forense_49',
+          evidence: dEvRef(11, 1700000011000),
+        }),
+        deliverableSnapshot(sessions.root, {
+          source: null,
+          identity: null,
+          status: 'captured',
+          value: null,
+          sha256: null,
+          messageID: 'msg_null_val_49',
+          eventID: 'evt_null_val_49',
+          omissions: ['deliverable-value-omitted'],
+          evidence: dEvRef(12, 1700000012000),
+        }),
+      ],
+    },
+  ];
+  let responseMode = 'readable';
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(execId, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    deliverables: (id, url) => {
+      const session = url.searchParams.get('session');
+      if (responseMode === 'invalid-session') return jsonResponse({ error: 'invalid-session' }, 400);
+      if (responseMode === 'not-in-execution') return jsonResponse({ error: 'session-not-in-execution' }, 404);
+      if (session === sessions.root) {
+        return jsonResponse(singleSessionDeliverables(id, sessions.root, regressionGroups[0]));
+      }
+      return jsonResponse(fullDeliverables(id, {
+        sessions: regressionGroups,
+        query: { mode: 'known-sessions-explicit', sessions: [sessions.root] },
+        scope: { kind: 'observed-session-tree', rootSessionID: sessions.root, sessionIDs: [sessions.root] },
+      }));
+    },
+  };
+  const { app, page } = await openDeliverablesTab(t, overrides, execId);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+
+  await waitForText(page, 'docs/informe-forense-49.md');
+  assert.equal(await page.locator('[data-session-group="ses_root_t"] h3').count(), 1);
+  assert.equal(await page.locator('[data-session-group="ses_root_t"] h4').count(), 0);
+  assert.equal(await page.locator('[data-query-mode]').getAttribute('data-query-mode'), 'known-sessions-explicit');
+  assert.ok((await page.locator('details[data-responses="ses_root_t"] summary').innerText())
+    .includes('Respuestas autorizadas de esta sesión (2)'));
+
+  const cards = page.locator('[data-deliverable-card]');
+  assert.equal(await cards.count(), 2);
+
+  const forensicCard = cards.nth(0);
+  await forensicCard.locator('details[data-provenance] summary').click();
+  const forensicCodes = await forensicCard.locator('code.font-mono').allInnerTexts();
+  for (const token of [
+    'docs/informe-forense-49.md',
+    forensicHash,
+    'ident-forense-49',
+    'msg_forense_49',
+    'call_forense_49',
+    'evt_forense_49',
+    'cap-d#11',
+  ]) {
+    assert.ok(forensicCodes.includes(token), `expected monospace code token ${token}`);
+  }
+  const copyChecks = [
+    ['Copiar ruta', 'docs/informe-forense-49.md'],
+    ['Copiar SHA-256', forensicHash],
+    ['Copiar identidad', 'ident-forense-49'],
+    ['Copiar mensaje', 'msg_forense_49'],
+    ['Copiar llamada', 'call_forense_49'],
+    ['Copiar evento', 'evt_forense_49'],
+    ['Copiar evidencia', 'cap-d#11'],
+  ];
+  for (const [label, expected] of copyChecks) {
+    await forensicCard.getByRole('button', { name: label }).click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), expected);
+  }
+
+  const nullValueCard = cards.nth(1);
+  assert.equal(await nullValueCard.locator('[data-absence="value-null"]').count(), 1);
+  assert.equal(await nullValueCard.locator('[data-absence="not-acquired"]').count(), 0);
+  assert.equal(await nullValueCard.locator('[data-absence="unrecognized"]').count(), 0);
+  const nullAbsenceText = await nullValueCard.locator('[data-absence="value-null"]').innerText();
+  assert.ok(nullAbsenceText.includes('deliverable-value-omitted'));
+  assert.ok(!nullAbsenceText.includes('Contenido no adquirido'));
+  await nullValueCard.locator('details[data-provenance] summary').click();
+  assert.ok((await nullValueCard.locator('details[data-provenance]').innerText()).includes('Origen: desconocido'));
+
+  responseMode = 'not-in-execution';
+  await page.evaluate(value => { location.hash = value; },
+    `#/executions/${execId}/deliverables?session=ses_ajena`);
+  await page.locator('[data-deliverables-unreadable]').waitFor();
+  assert.ok((await page.locator('[data-deliverables-unreadable]').innerText()).includes('session-not-in-execution'));
+  assert.equal(await page.locator('[data-query-mode]').count(), 0);
+
+  responseMode = 'invalid-session';
+  await page.evaluate(value => { location.hash = value; },
+    `#/executions/${execId}/deliverables?session=ses_invalida`);
+  await waitForText(page, 'invalid-session');
+  assert.ok((await page.locator('[data-deliverables-unreadable]').innerText()).includes('invalid-session'));
+  assert.equal(await page.locator('[data-query-mode]').count(), 0);
 });

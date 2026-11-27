@@ -3,9 +3,12 @@ import { api, isApiFailure } from '../api/client';
 import type { DeliverablesBody } from '../api/types';
 import { usePolling } from './usePolling';
 
-const reasonFor = (error: unknown): string => (isApiFailure(error) && error.status === 404
-  && error.body?.error === 'session-not-in-execution'
-  ? 'session-not-in-execution' : 'deliverables-unavailable');
+const reasonFor = (error: unknown): string => {
+  if (!isApiFailure(error)) return 'deliverables-unavailable';
+  if (error.status === 400 && error.body?.error === 'invalid-session') return 'invalid-session';
+  if (error.status === 404 && error.body?.error === 'session-not-in-execution') return 'session-not-in-execution';
+  return 'deliverables-unavailable';
+};
 
 export type DeliverablesState = {
   body: DeliverablesBody | null;

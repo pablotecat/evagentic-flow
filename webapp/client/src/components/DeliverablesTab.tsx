@@ -22,7 +22,12 @@ export function DeliverablesTab({ execution, knownSessions = null, selectedSessi
   const { body } = useDeliverables(execution.id, selectedSession);
   const scopeSessions = body !== null && body.readable ? body.scope?.sessionIDs ?? null : null;
   const shownKnownSessions = scopeSessions ?? knownSessions;
-  const queryMode = selectedSession !== null ? 'selected-session' : 'known-sessions-explicit';
+  const queryMode = body !== null && body.readable ? body.query?.mode ?? null : null;
+  const failedGroups = body !== null && body.readable
+    ? body.sessions.filter(group => group.readable === false)
+    : [];
+  const showPartialRead = body !== null && body.readable
+    && failedGroups.length > 0 && failedGroups.length < body.sessions.length;
   const partialResults = partialStatuses.includes(execution.status);
   return (
     <div className="space-y-4">
@@ -35,11 +40,13 @@ export function DeliverablesTab({ execution, knownSessions = null, selectedSessi
         className={scopeBarClass}
         onSelectSession={onSelectSession}
       >
-        <p data-query-mode={queryMode} className={noticeClass}>
-          {selectedSession !== null
-            ? `Consulta de una sola sesión (${selectedSession}): no incluye los entregables de sus descendientes.`
-            : 'Vista de conjunto: reúne explícitamente las sesiones conocidas del árbol acreditado, consultadas una a una; una consulta de raíz no incluye descendientes.'}
-        </p>
+        {body !== null && body.readable && queryMode !== null ? (
+          <p data-query-mode={queryMode} className={noticeClass}>
+            {queryMode === 'selected-session'
+              ? `Consulta de una sola sesión (${body.selectedSessionID}): no incluye los entregables de sus descendientes.`
+              : 'Vista de conjunto: reúne explícitamente las sesiones conocidas del árbol acreditado, consultadas una a una; una consulta de raíz no incluye descendientes.'}
+          </p>
+        ) : null}
       </TraceScopeBar>
       {partialResults ? (
         <p
@@ -76,16 +83,12 @@ export function DeliverablesTab({ execution, knownSessions = null, selectedSessi
               en una herramienta no acredita que este contenido sea el resultado final del flujo.
             </p>
           </section>
-          {(() => {
-            const failedGroups = body.sessions.filter(group => group.readable === false);
-            if (failedGroups.length === 0 || failedGroups.length >= body.sessions.length) return null;
-            return (
-              <p data-partial-read className={noticeClass}>
-                Lectura parcial de la evidencia: {failedGroups.length} sesión(es) del alcance no pudieron leerse; las
-                demás se muestran con su evidencia real y las fallidas no invalidan a las demás.
-              </p>
-            );
-          })()}
+          {showPartialRead ? (
+            <p data-partial-read className={noticeClass}>
+              Lectura parcial de la evidencia: {failedGroups.length} sesión(es) del alcance no pudieron leerse; las
+              demás se muestran con su evidencia real y las fallidas no invalidan a las demás.
+            </p>
+          ) : null}
           <DeliverableGroups sessions={body.sessions} />
         </>
       )}
@@ -106,7 +109,6 @@ function DeliverableGroups({ sessions }: { sessions: DeliverableSessionGroup[] }
 
 function SessionSection({ group }: { group: DeliverableSessionGroup }) {
   const cardKeys = uniqueKeys(group.deliverables, snapshotKeyParts);
-  const entryKeys = uniqueKeys(group.entries, entry => entry.text);
   const responseKeys = uniqueKeys(group.responses, response => response.text);
   return (
     <section
@@ -115,9 +117,9 @@ function SessionSection({ group }: { group: DeliverableSessionGroup }) {
       className="space-y-3 rounded-xl border border-slate-200 bg-white/60 p-3 dark:border-slate-800 dark:bg-slate-900/50"
     >
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+        <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
           {group.isRoot ? 'Sesión raíz' : 'Subejecución'}
-        </h4>
+        </h3>
         {!group.isRoot ? (
           <>
             <span className="min-w-0 font-mono text-xs break-all text-slate-600 dark:text-slate-300">{group.sessionID}</span>
@@ -147,27 +149,20 @@ function SessionSection({ group }: { group: DeliverableSessionGroup }) {
           ))}
         </ul>
       )}
-      <details data-responses={group.sessionID} className="rounded-lg border border-slate-200 dark:border-slate-800">
-        <summary className="cursor-pointer select-none px-2 py-1 text-[11px] font-medium text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100">
-          Respuestas autorizadas de esta sesión ({group.entries.length + group.responses.length})
-        </summary>
-        <div className="space-y-1 p-2">
-          {group.entries.length === 0 && group.responses.length === 0 ? (
-            <p className={noticeClass}>Ninguna observada en la captura.</p>
-          ) : (
-            <>
-              {group.entries.map((entry, entryIndex) => (
-                <p key={entryKeys[entryIndex]} className={noticeClass}>Encargo autorizado: {entry.text}</p>
-              ))}
-              {group.responses.map((response, responseIndex) => (
-                <p key={responseKeys[responseIndex]} className={noticeClass}>
-                  Respuesta autorizada: {response.text}
-                </p>
-              ))}
-            </>
-          )}
-        </div>
-      </details>
+      {group.responses.length > 0 ? (
+        <details data-responses={group.sessionID} className="rounded-lg border border-slate-200 dark:border-slate-800">
+          <summary className="cursor-pointer select-none px-2 py-1 text-[11px] font-medium text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100">
+            Respuestas autorizadas de esta sesión ({group.responses.length})
+          </summary>
+          <div className="space-y-1 p-2">
+            {group.responses.map((response, responseIndex) => (
+              <p key={responseKeys[responseIndex]} className={noticeClass}>
+                Respuesta autorizada: {response.text}
+              </p>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </section>
   );
 }
