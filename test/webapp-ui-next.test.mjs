@@ -137,6 +137,13 @@ async function openUi(t, overrides = {}) {
         ? respond(negotiate.trace(traceId, url))
         : route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not-mocked"}' });
     }
+    const deliverables = url.pathname.match(/^\/api\/executions\/([^/]+)\/deliverables$/);
+    if (deliverables && request.method() === 'GET') {
+      const deliverablesId = decodeURIComponent(deliverables[1]);
+      return negotiate.deliverables
+        ? respond(negotiate.deliverables(deliverablesId, url))
+        : route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not-mocked"}' });
+    }
     const match = url.pathname.match(/^\/api\/executions\/([^/]+)$/);
     if (match && request.method() === 'GET') return respond(negotiate.detail(decodeURIComponent(match[1])));
     if (url.pathname === '/api/executions' && request.method() === 'POST') {
@@ -1546,7 +1553,8 @@ test('UI /next: alcance sincronizado con Entregables y reinicio desde su barra',
   const scopeText = await scope.innerText();
   assert.ok(scopeText.includes('Alcance: subejecución'));
   assert.ok(scopeText.includes('ses_child_a'));
-  assert.ok(scopeText.includes('Los entregables conservados en la captura se mostrarán en una vista dedicada'));
+  assert.ok(scopeText.includes('Consulta de una sola sesión (ses_child_a)'));
+  assert.ok(scopeText.includes('no incluye los entregables de sus descendientes'));
 
   await page.getByRole('button', { name: 'Ver toda la ejecución' }).click();
   await page.waitForFunction(value => location.hash === value, `#/executions/${traced}/deliverables`);
@@ -2558,4 +2566,424 @@ test('UI /next: regresiones #48 en definiciones, plugins, disponibilidad no reco
   assert.equal(await page.locator('[data-tool-attempt]').count(), 1);
   assert.equal(await betaRow.locator('details[data-disclosure="forensics"]').getAttribute('open'), '');
   assert.ok((await betaRow.locator('details[data-disclosure="forensics"]').innerText()).includes('msg_null_b'));
+});
+
+const dEvRef = (arrival, observedAt) => ({ captureID: 'cap-d', arrival, observedAt });
+
+const deliverableValue = (overrides = {}) => ({
+  path: 'salida-informe.txt',
+  content: 'Contenido autorizado sintético del entregable.',
+  acquisition: 'runtime-content',
+  role: 'output',
+  roleSource: 'public-file-boundary',
+  sourceTimeBasis: 'runtime-event-created',
+  finality: null,
+  callID: 'call_deliv_1',
+  sourceTime: 1700000004000,
+  ...overrides,
+});
+
+const deliverableSnapshot = (sessionID, overrides = {}) => ({
+  source: 'opencode.session.tool.content',
+  identity: null,
+  status: 'captured',
+  value: deliverableValue(),
+  sha256: 'b'.repeat(64),
+  hashBasis: 'redacted-json-utf8',
+  observationTime: 1700000005000,
+  sessionID,
+  messageID: 'msg_deliv_1',
+  eventID: 'evt_deliv_1',
+  omissions: [],
+  redactions: ['public-secrets-redacted'],
+  evidence: dEvRef(3, 1700000006000),
+  ...overrides,
+});
+
+const deliverablesGroups = () => [
+  {
+    sessionID: sessions.root,
+    isRoot: true,
+    readable: true,
+    entries: [{ text: 'Encargo autorizado conservado en la captura.' }],
+    responses: [{ text: 'Respuesta autorizada de la sesión raíz.' }],
+    deliverables: [
+      deliverableSnapshot(sessions.root, {
+        source: 'opencode.session.inbox.files',
+        value: deliverableValue({
+          path: 'entrada-encargo.txt',
+          content: 'Contenido capturado del propio evento del runtime.',
+          acquisition: 'runtime-content',
+          role: 'input',
+          callID: null,
+        }),
+        sha256: 'c'.repeat(64),
+        messageID: 'msg_in_deliv',
+        eventID: 'evt_in_deliv',
+        evidence: dEvRef(1, 1700000002000),
+      }),
+      deliverableSnapshot(sessions.root, {
+        value: deliverableValue({
+          path: 'salida-sin-contenido.txt',
+          content: null,
+          acquisition: 'not-acquired',
+          role: 'output',
+          callID: 'call_out_1',
+        }),
+        messageID: 'msg_out_deliv',
+        eventID: 'evt_out_deliv',
+        omissions: ['deliverable-format-not-supported'],
+        evidence: dEvRef(2, 1700000003000),
+      }),
+    ],
+  },
+  {
+    sessionID: sessions.childA,
+    isRoot: false,
+    readable: true,
+    entries: [],
+    responses: [],
+    deliverables: [
+      deliverableSnapshot(sessions.childA, {
+        value: deliverableValue({
+          path: 'salida-hija.txt',
+          content: 'Contenido leído después del acontecimiento.',
+          acquisition: 'post-event-file-read',
+          role: 'output',
+          finality: 'final',
+          callID: 'call_hija_1',
+          sourceTime: 1700000008000,
+        }),
+        sha256: 'd'.repeat(64),
+        messageID: 'msg_hija_deliv',
+        eventID: 'evt_hija_deliv',
+        omissions: ['file-read-is-not-runtime-version'],
+        evidence: dEvRef(5, 1700000009000),
+      }),
+      deliverableSnapshot(sessions.childA, {
+        status: 'unrecognized',
+        value: null,
+        sha256: null,
+        messageID: 'msg_unrecognized',
+        eventID: 'evt_unrecognized',
+        omissions: ['redacted-observation-shape'],
+        evidence: dEvRef(6, 1700000010000),
+      }),
+    ],
+  },
+  {
+    sessionID: sessions.grandchild,
+    isRoot: false,
+    readable: true,
+    entries: [],
+    responses: [],
+    deliverables: [],
+  },
+];
+
+const fullDeliverables = (executionID, overrides = {}) => ({
+  executionID,
+  rootSessionID: sessions.root,
+  ok: true,
+  readable: true,
+  selectedSessionID: sessions.root,
+  query: { mode: 'known-sessions-explicit', sessions: [sessions.root, sessions.childA, sessions.grandchild] },
+  sessions: deliverablesGroups(),
+  scope: { kind: 'observed-session-tree', rootSessionID: sessions.root,
+    sessionIDs: [sessions.root, sessions.childA, sessions.grandchild] },
+  horizon: '2026-11-27T12:00:00.000Z',
+  ...overrides,
+});
+
+const singleSessionDeliverables = (executionID, sessionID, group) => ({
+  ...fullDeliverables(executionID),
+  selectedSessionID: sessionID,
+  query: { mode: 'selected-session', sessions: [sessionID] },
+  sessions: [group],
+});
+
+const deliverablesExecutionOverrides = executionID => ({
+  list: () => jsonResponse({ executions: [execution(executionID, { status: 'succeeded', sessionID: sessions.root })] }),
+  detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+  deliverables: () => jsonResponse(fullDeliverables(executionID)),
+});
+
+const openDeliverablesTab = async (t, overrides, executionID) => {
+  const opened = await openUi(t, overrides);
+  await opened.page.locator(`[data-id="${executionID}"]`).click();
+  await opened.page.getByRole('heading', { name: `Ejecución ${executionID.slice(0, 8)}` }).waitFor();
+  await opened.page.getByRole('tab', { name: 'Entregables' }).click();
+  await opened.page.waitForFunction(() =>
+    document.querySelector('[aria-selected="true"]')?.textContent === 'Entregables');
+  return opened;
+};
+
+const waitUntil = async (predicate, timeout = 10000) => {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.fail('waitUntil: condition not met');
+};
+
+test('UI /next: entregables con snapshots por sesión, ausencias honestas y procedencia plegada', { timeout: 120000 }, async t => {
+  const shown = 'aaaa2222-1d1d-41d1-81d1-1d1d1d1d1d1d';
+  const { app, page } = await openDeliverablesTab(t, deliverablesExecutionOverrides(shown), shown);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+
+  await waitForText(page, 'Alcance: toda la ejecución · 3 sesiones conocidas');
+  assert.equal(await page.locator('[data-partial-results]').count(), 0);
+  assert.equal(await page.locator('[data-deliverable-card]').count(), 4);
+  assert.equal(await page.locator('[data-session-group="ses_root_t"] [data-deliverable-card]').count(), 2);
+  assert.equal(await page.locator('[data-session-group="ses_child_a"] [data-deliverable-card]').count(), 2);
+
+  assert.ok((await page.locator('[data-role="input"]').innerText()).includes('entrada'));
+  assert.ok((await page.locator('[data-role="output"]').first().innerText()).includes('salida'));
+  assert.notEqual(
+    await page.locator('[data-role="input"]').getAttribute('class'),
+    await page.locator('[data-role="output"]').first().getAttribute('class'));
+
+  assert.equal(await page.locator('[data-acquisition="runtime-content"]').count(), 1);
+  assert.ok((await page.locator('[data-acquisition="runtime-content"]').innerText()).includes('contenido del evento'));
+  assert.equal(await page.locator('[data-acquisition="post-event-file-read"]').count(), 1);
+  assert.ok((await page.locator('[data-acquisition="post-event-file-read"]').innerText()).includes('lectura posterior'));
+  assert.equal(await page.locator('[data-acquisition="not-acquired"]').count(), 1);
+  assert.ok((await page.locator('[data-acquisition="not-acquired"]').innerText()).includes('no adquirido'));
+  assert.equal(await page.locator('[data-acquisition="unrecognized"]').count(), 1);
+  assert.ok((await page.locator('[data-acquisition="unrecognized"]').innerText()).includes('no reconocido'));
+
+  const finalities = await page.locator('[data-finality]').allInnerTexts();
+  assert.equal(finalities.filter(text => text.includes('Finalidad declarada: final')).length, 1);
+  assert.equal(finalities.filter(text => text.includes('Finalidad desconocida (sin acreditar finalidad global)')).length, 3);
+
+  assert.equal(await page.locator('pre[data-deliverable-content]').count(), 2);
+  await page.locator('[data-deliverable-card]').first().getByRole('button', { name: 'Copiar contenido' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()),
+    'Contenido capturado del propio evento del runtime.');
+
+  assert.equal(await bodyMatches(page, 'Contenido no adquirido'), 1);
+  assert.equal(await bodyMatches(page, 'Proyección no reconocida'), 1);
+  assert.equal(await bodyMatches(page, 'ruta no expuesta o no admitida'), 1);
+  assert.ok((await page.locator('[data-session-group="ses_root_t"]').innerText()).includes('entrada-encargo.txt'));
+  assert.ok((await page.locator('[data-session-group="ses_child_a"]').innerText()).includes('salida-hija.txt'));
+  assert.ok((await page.locator('[data-session-group="ses_grandchild"]').innerText())
+    .includes('Sin entregables capturados para esta sesión'));
+
+  assert.equal(await bodyMatches(page, 'no relee archivos del proyecto observado'), 1);
+  assert.equal(await bodyMatches(page, 'no acredita qué bytes produjo o utilizó la acción original'), 1);
+  assert.equal(await bodyMatches(page, 'la finalidad global no está acreditada'), 1);
+  assert.ok((await page.locator('[data-epistemic-notice]').innerText()).includes('resultado final del flujo'));
+
+  const provenance = page.locator('details[data-provenance]');
+  assert.equal(await provenance.count(), 4);
+  const beforeExpand = await page.evaluate(() => document.body.innerText);
+  assert.ok(!beforeExpand.includes('c'.repeat(64)));
+  assert.ok(!beforeExpand.includes('redacted-json-utf8'));
+  assert.ok(!beforeExpand.includes('Omisiones:'));
+  await provenance.nth(0).locator('summary').click();
+  const forensicsRoot = await provenance.nth(0).innerText();
+  assert.ok(forensicsRoot.includes('c'.repeat(64)));
+  assert.ok(forensicsRoot.includes('redacted-json-utf8'));
+  assert.ok(forensicsRoot.includes('Origen: opencode.session.inbox.files'));
+  assert.ok(forensicsRoot.includes('entrada en la frontera pública'));
+  assert.ok(forensicsRoot.includes('procedencia del papel: public-file-boundary'));
+  assert.ok(forensicsRoot.includes('msg_in_deliv'));
+  assert.ok(forensicsRoot.includes('Llamada: no expuesta'));
+  assert.ok(forensicsRoot.includes(`Momento de frontera: ${new Date(1700000004000).toISOString()} (base runtime-event-created)`));
+  assert.ok(forensicsRoot.includes(`Observación: ${new Date(1700000005000).toISOString()}`));
+  assert.ok(forensicsRoot.includes('Evidencia: cap-d · fila 1'));
+  assert.ok(forensicsRoot.includes('Omisiones: ninguna'));
+  assert.ok(forensicsRoot.includes('Redacciones: public-secrets-redacted'));
+  await provenance.nth(0).getByRole('button', { name: 'Copiar SHA-256' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'c'.repeat(64));
+  await provenance.nth(1).locator('summary').click();
+  assert.ok((await provenance.nth(1).innerText()).includes('Omisiones: deliverable-format-not-supported'));
+  await provenance.nth(3).locator('summary').click();
+  const forensicsUnrecognized = await provenance.nth(3).innerText();
+  assert.ok(forensicsUnrecognized.includes('SHA-256 (base redacted-json-utf8): no disponible'));
+  assert.ok(forensicsUnrecognized.includes('Omisiones: redacted-observation-shape'));
+  assert.ok(forensicsUnrecognized.includes('Identidad: desconocida'));
+});
+
+test('UI /next: banner de resultados parciales sólo en ejecuciones fallidas o interrumpidas', { timeout: 120000 }, async t => {
+  const flagged = 'bbbb3333-2e2e-42e2-82e2-2e2e2e2e2e2e';
+  let executionStatus = 'running';
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(flagged, { status: 'running', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id),
+      execution: execution(id, { status: executionStatus, sessionID: sessions.root }) }),
+    deliverables: () => jsonResponse(fullDeliverables(flagged)),
+  };
+  const page = (await openDeliverablesTab(t, overrides, flagged)).page;
+  await waitForText(page, 'Alcance: toda la ejecución');
+  assert.equal(await page.locator('[data-partial-results]').count(), 0);
+  assert.ok((await page.getByRole('tabpanel').innerText()).includes('entrada-encargo.txt'));
+
+  executionStatus = 'failed';
+  await page.locator('[data-partial-results]').waitFor();
+  const failedText = await page.locator('[data-partial-results]').innerText();
+  assert.ok(failedText.includes('Resultados parciales de una ejecución fallida o interrumpida'));
+  assert.ok(failedText.includes('no equivale a éxito ni a aceptación'));
+
+  executionStatus = 'interrupted';
+  await page.waitForFunction(() => document.querySelectorAll('[data-partial-results]').length === 1);
+  assert.equal(await page.locator('[data-partial-results]').count(), 1);
+
+  executionStatus = 'succeeded';
+  await page.locator('[data-partial-results]').waitFor({ state: 'detached' });
+  executionStatus = 'pending';
+  await page.waitForTimeout(2000);
+  assert.equal(await page.locator('[data-partial-results]').count(), 0);
+});
+
+test('UI /next: error de lectura parcial de una subejecución sin invalidar las demás', { timeout: 120000 }, async t => {
+  const partial = 'cccc4444-3f3f-43f3-83f3-3f3f3f3f3f3f';
+  const groups = deliverablesGroups();
+  const partialBody = fullDeliverables(partial, { sessions: [
+    groups[0],
+    { ...groups[1], readable: false, reason: 'reader-timeout', deliverables: [] },
+    groups[2],
+  ] });
+  const overrides = {
+    ...deliverablesExecutionOverrides(partial),
+    deliverables: () => jsonResponse(partialBody),
+  };
+  const page = (await openDeliverablesTab(t, overrides, partial)).page;
+  await waitForText(page, 'Alcance: toda la ejecución');
+  const failedAlert = page.locator('[data-session-read-error="ses_child_a"]');
+  await failedAlert.waitFor();
+  assert.equal(await failedAlert.getAttribute('role'), 'alert');
+  const alertText = await failedAlert.innerText();
+  assert.ok(alertText.includes('reader-timeout'));
+  assert.ok(alertText.includes('no se reconstruye contenido no capturado'));
+  assert.equal(await page.locator('[data-session-read-error]').count(), 1);
+  assert.equal(await page.locator('[data-partial-read]').count(), 1);
+  assert.ok((await page.locator('[data-partial-read]').innerText()).includes('no pudieron leerse'));
+  assert.equal(await page.locator('[data-deliverable-card]').count(), 2);
+  assert.equal(await page.locator('[data-session-group="ses_root_t"] [data-deliverable-card]').count(), 2);
+  assert.equal(await page.locator('[data-session-group="ses_child_a"] [data-deliverable-card]').count(), 0);
+  assert.ok((await page.locator('[data-session-group="ses_root_t"]').innerText()).includes('entrada-encargo.txt'));
+  assert.ok(!(await page.locator('[data-session-group="ses_grandchild"]').innerText()).includes('entrada-encargo.txt'));
+});
+
+test('UI /next: respuestas autorizadas plegadas como detalle secundario debajo de los snapshots', { timeout: 120000 }, async t => {
+  const tucked = 'dddd5555-4a4a-44a4-84a4-4a4a4a4a4a4a';
+  const page = (await openDeliverablesTab(t, deliverablesExecutionOverrides(tucked), tucked)).page;
+  await waitForText(page, 'Alcance: toda la ejecución');
+  const responses = page.locator('details[data-responses="ses_root_t"]');
+  await responses.waitFor();
+  assert.equal(await responses.getAttribute('open'), null);
+  const group = page.locator('[data-session-group="ses_root_t"]');
+  let groupText = await group.innerText();
+  assert.ok(!groupText.includes('Respuesta autorizada de la sesión raíz.'));
+  assert.ok(!groupText.includes('Encargo autorizado conservado en la captura.'));
+  assert.ok(groupText.includes('Respuestas autorizadas de esta sesión (2)'));
+  const order = await page.evaluate(() => {
+    const groupEl = document.querySelector('[data-session-group="ses_root_t"]');
+    const cards = groupEl?.querySelector('[data-deliverable-cards]') ?? null;
+    const responsesEl = groupEl?.querySelector('details[data-responses]') ?? null;
+    if (groupEl === null || cards === null || responsesEl === null) return 'missing';
+    return cards.compareDocumentPosition(responsesEl) & Node.DOCUMENT_POSITION_FOLLOWING ? 'after' : 'before';
+  });
+  assert.equal(order, 'after');
+  await responses.locator('summary').click();
+  groupText = await group.innerText();
+  assert.ok(groupText.includes('Encargo autorizado: Encargo autorizado conservado en la captura.'));
+  assert.ok(groupText.includes('Respuesta autorizada: Respuesta autorizada de la sesión raíz.'));
+});
+
+test('UI /next: alcance de entregables reversible por sesión con raíz explícita y sin respuestas obsoletas', { timeout: 180000 }, async t => {
+  const scoped = 'eeee6666-5b5b-45b5-85b5-5b5b5b5b5b5b';
+  const requests = [];
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(scoped, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    deliverables: async (id, url) => {
+      const session = url.searchParams.get('session');
+      requests.push(session);
+      if (session === sessions.childA) {
+        await new Promise(resolve => setTimeout(resolve, 900));
+        return jsonResponse(singleSessionDeliverables(scoped, sessions.childA, deliverablesGroups()[1]));
+      }
+      if (session === sessions.root) {
+        return jsonResponse(singleSessionDeliverables(scoped, sessions.root, deliverablesGroups()[0]));
+      }
+      if (session === null) return jsonResponse(fullDeliverables(scoped));
+      return jsonResponse({ error: 'session-not-in-execution' }, 404);
+    },
+  };
+  const page = (await openDeliverablesTab(t, overrides, scoped)).page;
+  await waitForText(page, 'Alcance: toda la ejecución · 3 sesiones conocidas');
+  assert.equal(await page.locator('[data-deliverable-card]').count(), 4);
+  await waitUntil(() => requests.includes(null));
+
+  await page.evaluate(value => { location.hash = value; },
+    `#/executions/${scoped}/deliverables?session=${encodeURIComponent(sessions.root)}`);
+  await waitForText(page, 'Consulta de una sola sesión (ses_root_t)');
+  assert.equal(await page.locator('[data-query-mode]').getAttribute('data-query-mode'), 'selected-session');
+  await waitUntil(() => requests[requests.length - 1] === sessions.root);
+  await page.waitForFunction(() => document.querySelectorAll('[data-session-group]').length === 1);
+  assert.equal(await page.locator('[data-deliverable-card]').count(), 2);
+  assert.ok((await page.locator('[data-session-group]').innerText()).includes('entrada-encargo.txt'));
+  assert.equal(await page.getByRole('button', { name: 'Ver toda la ejecución' }).count(), 1);
+
+  await page.evaluate(value => { location.hash = value; },
+    `#/executions/${scoped}/deliverables?session=${encodeURIComponent(sessions.childA)}`);
+  await waitForText(page, 'Consulta de una sola sesión (ses_child_a)');
+  await waitForText(page, 'salida-hija.txt');
+  assert.equal(await page.locator('[data-session-group]').count(), 1);
+
+  await page.getByRole('button', { name: 'Ver toda la ejecución' }).click();
+  await page.waitForFunction(value => location.hash === value, `#/executions/${scoped}/deliverables`);
+  await waitForText(page, 'Alcance: toda la ejecución · 3 sesiones conocidas');
+  await page.waitForFunction(() => document.querySelectorAll('[data-deliverable-card]').length === 4);
+  assert.equal(await page.getByRole('button', { name: 'Ver toda la ejecución' }).count(), 0);
+
+  await page.evaluate(value => { location.hash = value; },
+    `#/executions/${scoped}/deliverables?session=${encodeURIComponent(sessions.childA)}`);
+  await waitForText(page, 'Consulta de una sola sesión (ses_child_a)');
+  await page.getByRole('button', { name: 'Ver toda la ejecución' }).click();
+  await page.waitForFunction(value => location.hash === value, `#/executions/${scoped}/deliverables`);
+  await waitForText(page, 'Alcance: toda la ejecución · 3 sesiones conocidas');
+  await waitForText(page, 'entrada-encargo.txt');
+  await page.waitForTimeout(1400);
+  assert.equal(await page.locator('[data-session-group]').count(), 3);
+  assert.equal(await page.locator('[data-deliverable-card]').count(), 4);
+  const panelText = await page.getByRole('tabpanel').innerText();
+  assert.ok(panelText.includes('entrada-encargo.txt'));
+  assert.ok(!panelText.includes('Consulta de una sola sesión (ses_child_a)'));
+});
+
+test('UI /next: entregables no consultables con estado honesto y sin datos obsoletos', { timeout: 120000 }, async t => {
+  const failing = 'ffff7777-6c6c-46c6-86c6-6c6c6c6c6c6c';
+  let mode = 'ok';
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(failing, { status: 'failed', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id),
+      execution: execution(id, { status: 'failed', sessionID: sessions.root }) }),
+    deliverables: () => {
+      if (mode === 'ok') return jsonResponse(fullDeliverables(failing));
+      if (mode === 'unreadable') return jsonResponse({ executionID: failing, rootSessionID: sessions.root,
+        readable: false, reason: 'reader-timeout' });
+      return null;
+    },
+  };
+  const page = (await openDeliverablesTab(t, overrides, failing)).page;
+  await waitForText(page, 'Alcance: toda la ejecución');
+  await waitForText(page, 'entrada-encargo.txt');
+  await page.locator('[data-partial-results]').waitFor();
+
+  mode = 'unreadable';
+  const unreadable = page.locator('[data-deliverables-unreadable]');
+  await unreadable.waitFor();
+  assert.equal(await unreadable.getAttribute('role'), 'alert');
+  assert.ok((await unreadable.innerText()).includes('Los entregables no están consultables (reader-timeout)'));
+  assert.ok((await unreadable.innerText()).includes('no se reconstruye contenido no capturado'));
+  assert.equal(await page.locator('[data-deliverable-card]').count(), 0);
+  assert.ok(!(await page.getByRole('tabpanel').innerText()).includes('entrada-encargo.txt'));
+
+  mode = 'abort';
+  await waitForText(page, 'no están consultables (deliverables-unavailable)');
+  assert.equal(await page.locator('[data-deliverable-card]').count(), 0);
 });

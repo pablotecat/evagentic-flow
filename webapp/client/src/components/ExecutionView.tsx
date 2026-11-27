@@ -143,8 +143,9 @@ export function ExecutionView({ id, tab, session, engineReachable }: Props) {
             ? <ConversationTab detail={detail} focusRequest={focusRequest} />
             : tab === 'deliverables'
               ? <DeliverablesTab
-                session={session}
-                rootSessionID={execution.sessionID}
+                execution={execution}
+                knownSessions={trace.rootTree?.sessionIDs ?? null}
+                selectedSession={session}
                 onSelectSession={selectSession}
               />
               : tab === 'trace'

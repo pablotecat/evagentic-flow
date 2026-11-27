@@ -515,3 +515,68 @@ export type TraceUnreadable = {
 };
 
 export type TraceBody = TraceResponse | TraceUnreadable;
+
+export type DeliverableEvidenceRef = { captureID: string; arrival: number; observedAt: number };
+
+export type DeliverableValue = {
+  path: string | null;
+  content: string | null;
+  acquisition: string | null;
+  role: string | null;
+  roleSource: string | null;
+  sourceTimeBasis: string | null;
+  finality: string | null;
+  callID: string | null;
+  sourceTime: number | null;
+};
+
+export type DeliverableSnapshot = {
+  source: string | null;
+  identity: string | null;
+  status: string;
+  value: DeliverableValue | null;
+  sha256: string | null;
+  hashBasis: string | null;
+  observationTime: number;
+  sessionID: string;
+  messageID: string | null;
+  eventID: string | null;
+  omissions: string[];
+  redactions: string[];
+  evidence: DeliverableEvidenceRef;
+};
+
+export type DeliverableSessionGroup = {
+  sessionID: string;
+  isRoot: boolean;
+  readable: boolean;
+  reason?: string;
+  entries: ConversationEntry[];
+  responses: ConversationEntry[];
+  deliverables: DeliverableSnapshot[];
+};
+
+export type DeliverablesQuery = {
+  mode: 'known-sessions-explicit' | 'selected-session';
+  sessions: string[];
+};
+
+export type DeliverablesResponse = {
+  executionID: string;
+  rootSessionID?: string;
+  readable: true;
+  selectedSessionID: string;
+  query: DeliverablesQuery;
+  sessions: DeliverableSessionGroup[];
+  scope?: EvidenceScope;
+  horizon: string | null;
+};
+
+export type DeliverablesUnreadable = {
+  executionID: string;
+  rootSessionID?: string;
+  readable: false;
+  reason: string;
+};
+
+export type DeliverablesBody = DeliverablesResponse | DeliverablesUnreadable;
