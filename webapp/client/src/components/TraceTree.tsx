@@ -1,6 +1,6 @@
-import type { TraceNode, TraceTree as TraceTreeData } from '../api/types';
+import type { TraceNode, TraceRelation, TraceTree as TraceTreeData } from '../api/types';
 import { evidenceText } from '../lib/trace';
-import { chipClass, noticeClass } from '../lib/ui';
+import { noticeClass } from '../lib/ui';
 
 type Props = {
   tree: TraceTreeData;
@@ -13,6 +13,25 @@ const RELATION_LABELS: Record<string, string> = {
   'delegation-call-observed': 'delegación observada',
   'parent-observed-call-unknown': 'padre observado, llamada desconocida',
   unknown: 'relación desconocida',
+};
+
+const badgeBase = 'inline-block rounded-full px-2 py-0.5 text-[11px] font-medium';
+
+const RELATION_BADGE_CLASSES: Record<TraceRelation, string> = {
+  'view-root': `${badgeBase} bg-indigo-100 text-indigo-800 ring-1 ring-indigo-300 dark:bg-indigo-950/70 dark:text-indigo-200 dark:ring-indigo-700`,
+  'delegation-call-observed': `${badgeBase} bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300 dark:bg-emerald-950/70 dark:text-emerald-200 dark:ring-emerald-700`,
+  'parent-observed-call-unknown': `${badgeBase} bg-amber-100 text-amber-800 ring-1 ring-amber-300 dark:bg-amber-950/70 dark:text-amber-200 dark:ring-amber-700`,
+  unknown: `${badgeBase} border border-dashed border-rose-400 bg-rose-50 text-rose-800 dark:border-rose-500/70 dark:bg-rose-950/50 dark:text-rose-200`,
+};
+
+const nodeButtonClass = (isRoot: boolean, selected: boolean): string => {
+  if (selected) {
+    return 'rounded-lg bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-900 ring-2 ring-sky-500 transition-colors dark:bg-sky-950/70 dark:text-sky-100 dark:ring-sky-400';
+  }
+  if (isRoot) {
+    return 'rounded-lg border border-indigo-200 bg-indigo-50/70 px-2 py-1 text-xs font-semibold text-indigo-900 transition-colors hover:bg-indigo-100 dark:border-indigo-800/70 dark:bg-indigo-950/40 dark:text-indigo-100 dark:hover:bg-indigo-950/70';
+  }
+  return 'rounded-lg px-2 py-1 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800';
 };
 
 const relationLines = (node: TraceNode): string[] => {
@@ -47,6 +66,7 @@ export function TraceTree({ tree, rootSessionID, selectedSession, onSelectSessio
     const isRoot = rootSessionID !== null && node.sessionID === rootSessionID;
     const selected = selectedSession !== null && selectedSession === node.sessionID;
     const lines = relationLines(node);
+    const relationClass = RELATION_BADGE_CLASSES[node.relation] ?? RELATION_BADGE_CLASSES.unknown;
     return (
       <li
         key={node.sessionID}
@@ -61,15 +81,13 @@ export function TraceTree({ tree, rootSessionID, selectedSession, onSelectSessio
             data-select-session={node.sessionID}
             aria-current={selected ? 'true' : undefined}
             onClick={() => onSelectSession(node.sessionID)}
-            className={`rounded-lg px-2 py-1 text-xs font-medium transition-colors ${selected
-              ? 'bg-sky-100 text-sky-800 ring-1 ring-sky-500 dark:bg-sky-950/60 dark:text-sky-200 dark:ring-sky-400'
-              : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'}`}
+            className={nodeButtonClass(isRoot, selected)}
           >
             {isRoot ? 'Sesión raíz' : 'Subejecución'} <span className="font-mono break-all">{node.sessionID}</span>
           </button>
-          {isRoot && <span className={chipClass} data-relation="view-root">sesión raíz</span>}
+          {isRoot && <span className={RELATION_BADGE_CLASSES['view-root']} data-relation="view-root">sesión raíz</span>}
           {node.relation !== 'view-root' && (
-            <span className={chipClass} data-relation={node.relation}>
+            <span className={relationClass} data-relation={node.relation}>
               {RELATION_LABELS[node.relation] ?? node.relation}
             </span>
           )}

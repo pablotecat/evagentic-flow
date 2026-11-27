@@ -1608,3 +1608,177 @@ test('UI /next: traza ilegible manejada con honestidad en alcance, árbol y lín
   await page.waitForFunction(() => document.querySelector('#traza-tab-metrics')?.getAttribute('aria-selected') === 'true');
   await waitForText(page, 'Alcance activo: toda la ejecución');
 });
+
+test('UI /next: cambio a subejecución lenta limpia de inmediato la anterior y raíz no duplica sondeo', { timeout: 120000 }, async t => {
+  const traced = '33339999-0909-4909-8909-090909090909';
+  let releaseChildB;
+  const childBGate = new Promise(resolve => { releaseChildB = resolve; });
+  const traceRequests = [];
+  const overrides = {
+    ...traceExecutionOverrides(traced),
+    trace: async (traceId, url) => {
+      const session = url.searchParams.get('session');
+      traceRequests.push(session);
+      if (session === sessions.childB) {
+        await childBGate;
+        return jsonResponse({ ...scopedFor(url), executionID: traceId });
+      }
+      return traceNegotiator(traceId)(traceId, url);
+    },
+  };
+  const page = (await openTraceTab(t, overrides, traced)).page;
+  await page.getByRole('tree').waitFor();
+
+  await page.locator('[data-select-session="ses_child_a"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_a'));
+  await waitForText(page, 'Subejecución ses_child_a');
+  assert.equal(await page.locator('[data-timeline-session="ses_child_a"]').count(), 1);
+
+  await page.locator('[data-select-session="ses_child_b"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_b'));
+  await waitForText(page, 'Consultando la traza de este alcance…');
+  assert.equal(await page.locator('[data-scope-session="ses_child_b"]').count(), 1);
+  assert.equal(await page.locator('[data-timeline-session="ses_child_a"]').count(), 0);
+
+  releaseChildB();
+  await page.locator('[data-timeline-session="ses_child_b"]').waitFor();
+  assert.equal(await page.locator('[data-timeline-session="ses_child_a"]').count(), 0);
+
+  const rootScopedBefore = traceRequests.filter(entry => entry === sessions.root).length;
+  await page.locator('[data-select-session="ses_root_t"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_root_t'));
+  await waitForText(page, 'Alcance: sesión raíz');
+  await page.waitForTimeout(400);
+  const rootScopedAfter = traceRequests.filter(entry => entry === sessions.root).length;
+  assert.equal(rootScopedAfter, rootScopedBefore);
+});
+
+test('UI /next: línea temporal honesta con esperas sin inicio, escala cero/vacía, límites, accesibilidad y desenlaces', { timeout: 120000 }, async t => {
+  const richId = '4444aaaa-1010-4010-8010-101010101010';
+  const zeroId = '5555bbbb-1111-4111-8111-111111111111';
+  const unplottedOnlyId = '6666cccc-1212-4212-8212-121212121212';
+  const richTrace = {
+    ...fullTrace(richId),
+    timeline: {
+      intervals: [
+        traceInterval(sessions.root, 1000, 1400, 'concluded',
+          [evRef(1, 'evt-r1', 'session.execution.started'), evRef(2, 'evt-r2', 'session.execution.ended')]),
+        { ...traceInterval(sessions.childA, 1200, 1700, 'failed',
+          [evRef(3, 'evt-f1', 'session.execution.started'), evRef(4, 'evt-f2', 'session.execution.failed')]),
+        outcome: 'failed' },
+        { ...traceInterval(sessions.childB, 1400, 1900, 'interrupted',
+          [evRef(5, 'evt-i1', 'session.execution.started'), evRef(6, 'evt-i2', 'session.execution.interrupted')]),
+        outcome: 'interrupted' },
+        traceInterval(sessions.grandchild, 2000, null, 'unknown',
+          [evRef(7, 'evt-o1', 'session.execution.started')]),
+      ],
+      waits: [
+        traceWait(sessions.root, 'permission', 'perm-unstarted', null, 5000, 'not-waiting-or-unknown',
+          [evRef(8, 'evt-w1', 'permission.replied')]),
+      ],
+    },
+  };
+  const zeroSpanTrace = {
+    ...fullTrace(zeroId),
+    timeline: {
+      intervals: [
+        traceInterval(sessions.root, 2000, 2000, 'concluded',
+          [evRef(1, 'evt-z1', 'session.execution.started'), evRef(2, 'evt-z2', 'session.execution.ended')]),
+      ],
+      waits: [],
+    },
+  };
+  const unplottedOnlyTrace = {
+    ...fullTrace(unplottedOnlyId),
+    timeline: {
+      intervals: [],
+      waits: [
+        traceWait(sessions.root, 'form', 'form-unstarted', null, 5000, 'not-waiting-or-unknown',
+          [evRef(1, 'evt-u1', 'form.replied')]),
+      ],
+    },
+  };
+  const tracesById = new Map([
+    [richId, richTrace],
+    [zeroId, zeroSpanTrace],
+    [unplottedOnlyId, unplottedOnlyTrace],
+  ]);
+  const overrides = {
+    list: () => jsonResponse({ executions: [
+      execution(richId, { status: 'succeeded', sessionID: sessions.root }),
+      execution(zeroId, { status: 'succeeded', sessionID: sessions.root }),
+      execution(unplottedOnlyId, { status: 'succeeded', sessionID: sessions.root }),
+    ] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    trace: traceId => jsonResponse(tracesById.get(traceId)),
+  };
+  const { page } = await openTraceTab(t, overrides, richId);
+
+  const scaleText = await page.locator('[data-timeline-scale]').innerText();
+  assert.ok(scaleText.includes('0 ms'));
+  assert.ok(scaleText.includes('1000 ms'));
+  assert.ok(!scaleText.includes('4000 ms'));
+
+  const unplotted = page.locator(`[data-timeline-unplotted="${sessions.root}"]`);
+  await unplotted.waitFor();
+  const unplottedText = await unplotted.innerText();
+  assert.ok(unplottedText.includes('1 espera(s) externa(s) de esta sesión sin inicio observado'));
+  assert.ok(unplottedText.includes('permiso'));
+  assert.ok(unplottedText.includes('perm-unstarted'));
+  assert.ok(unplottedText.includes('1970-01-01T00:00:05.000Z'));
+
+  assert.equal(await page.locator('[data-kind="interval-failed"]').count(), 1);
+  assert.equal(await page.locator('[data-kind="interval-interrupted"]').count(), 1);
+  assert.equal(await page.locator('[data-kind="interval"]').count(), 1);
+
+  const barChecks = await page.evaluate(() => {
+    const bars = Array.from(document.querySelectorAll('section[aria-label="Línea temporal"] [data-kind]'));
+    return bars.map(bar => {
+      const el = bar;
+      const tipId = el.getAttribute('aria-describedby');
+      const tip = tipId ? document.getElementById(tipId) : null;
+      const left = parseFloat(el.style.left);
+      const width = parseFloat(el.style.width);
+      return {
+        kind: el.getAttribute('data-kind'),
+        role: el.getAttribute('role'),
+        tipId,
+        tipRole: tip?.getAttribute('role') ?? null,
+        left,
+        width,
+        right: left + width,
+      };
+    });
+  });
+  assert.equal(barChecks.length, 4);
+  const tipIds = new Set(barChecks.map(entry => entry.tipId));
+  assert.equal(tipIds.size, barChecks.length);
+  for (const entry of barChecks) {
+    assert.equal(entry.role, 'img');
+    assert.equal(entry.tipRole, 'tooltip');
+    assert.ok(entry.left >= 0 && entry.right <= 100.001, `bar ${entry.kind} overflows track: left=${entry.left} width=${entry.width}`);
+  }
+
+  const relationClasses = await page.evaluate(() => {
+    const badges = Array.from(document.querySelectorAll('[data-relation]'));
+    const byRelation = {};
+    for (const badge of badges) byRelation[badge.getAttribute('data-relation')] = badge.className;
+    return byRelation;
+  });
+  assert.equal(new Set(Object.values(relationClasses)).size, 4);
+
+  await page.locator(`[data-id="${zeroId}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución 5555bbbb' }).waitFor();
+  await page.getByRole('tab', { name: 'Traza' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Traza');
+  const zeroScale = await page.locator('[data-timeline-scale]').innerText();
+  assert.ok(zeroScale.includes('0 ms'));
+  assert.ok(!zeroScale.includes('1 ms'));
+
+  await page.locator(`[data-id="${unplottedOnlyId}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución 6666cccc' }).waitFor();
+  await page.getByRole('tab', { name: 'Traza' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Traza');
+  await waitForText(page, '1 espera(s) externa(s) de esta sesión sin inicio observado');
+  assert.equal(await page.locator('[data-timeline-scale]').count(), 0);
+});

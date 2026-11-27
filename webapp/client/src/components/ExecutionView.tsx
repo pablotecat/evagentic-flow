@@ -32,7 +32,10 @@ type Props = {
 
 export function ExecutionView({ id, tab, session, engineReachable }: Props) {
   const { detail, missing, reload } = useExecutionDetail(id);
-  const trace = useTrace(id, session, { enabled: tab === 'trace' });
+  const trace = useTrace(id, session, {
+    enabled: tab === 'trace',
+    rootSessionID: detail?.execution.sessionID ?? null,
+  });
   const [stopping, setStopping] = useState(false);
   const [stopRequest, setStopRequest] = useState<StopResponseBody | null>(null);
   const [stopError, setStopError] = useState<string | null>(null);

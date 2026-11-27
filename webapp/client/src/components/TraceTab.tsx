@@ -1,5 +1,6 @@
 import type { TraceBody, TraceTree } from '../api/types';
 import { noticeClass } from '../lib/ui';
+import { scopeSummary } from './TraceScopeBar';
 import { TraceTree as TraceTreeView } from './TraceTree';
 import { TraceTimeline } from './TraceTimeline';
 
@@ -40,9 +41,7 @@ export function TraceTab({
   onSelectSession,
 }: Props) {
   const knownCount = rootTree?.sessionIDs.length ?? null;
-  const scopeText = session === null
-    ? `toda la ejecución${knownCount !== null ? ` · ${knownCount} sesiones conocidas` : ''}`
-    : session === rootSessionID ? `sesión raíz ${session}` : `subejecución ${session}`;
+  const scopeText = scopeSummary(session, rootSessionID, knownCount);
   return (
     <div>
       <div
