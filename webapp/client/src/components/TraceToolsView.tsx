@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ToolAttempt, TraceResponse } from '../api/types';
-import { evidenceText, isoOrUnobserved } from '../lib/trace';
+import { evidenceText, isoOrUnobserved, uniqueKeys } from '../lib/trace';
 import { chipClass, noticeClass } from '../lib/ui';
 import { CopyButton } from './CopyButton';
 import { JsonDisclosure, formatJson } from './JsonDisclosure';
@@ -25,8 +25,11 @@ const OUTCOME_BADGE_CLASSES: Record<string, string> = {
 
 const outcomeLabel = (outcome: string): string => OUTCOME_LABELS[outcome] ?? outcome;
 
-const attemptKey = (attempt: ToolAttempt, index: number): string =>
-  `${attempt.sessionID}:${attempt.callID ?? `sin-llamada-${index}`}`;
+const attemptBaseKey = (attempt: ToolAttempt): string => {
+  const firstEvidence = attempt.evidence?.[0];
+  const ref = firstEvidence ? `${firstEvidence.captureID}:${firstEvidence.arrival}` : 'sin-evidencia';
+  return `${attempt.sessionID}:${attempt.messageID ?? 'sin-mensaje'}:${attempt.callID ?? 'sin-llamada'}:${ref}`;
+};
 
 type OutcomeFilter = '' | 'success' | 'error' | 'not-observed';
 
@@ -34,16 +37,24 @@ export function TraceToolsView({ trace }: Props) {
   const [nameFilter, setNameFilter] = useState('');
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>('');
   const attempts = trace.tools.attempts ?? [];
+  const attemptKeys = uniqueKeys(attempts, attemptBaseKey);
   const needle = nameFilter.trim().toLowerCase();
-  const filtered = attempts.filter(attempt => {
-    const matchesName = needle === ''
-      || (attempt.toolName ?? '').toLowerCase().includes(needle);
-    const matchesOutcome = outcomeFilter === '' || attempt.outcome === outcomeFilter;
-    return matchesName && matchesOutcome;
-  });
+  const filtered = attempts
+    .map((attempt, index) => ({ key: attemptKeys[index], attempt }))
+    .filter(({ attempt }) => {
+      const matchesName = needle === ''
+        || (attempt.toolName ?? '').toLowerCase().includes(needle);
+      const matchesOutcome = outcomeFilter === '' || attempt.outcome === outcomeFilter;
+      return matchesName && matchesOutcome;
+    });
   return (
     <section aria-label="Herramientas e intentos" className="space-y-2">
       <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Herramientas e intentos</h4>
+      <p className={noticeClass} data-tools-scope-notice>
+        Esta vista lista solo los intentos de herramienta de la sesión seleccionada ({trace.selectedSessionID}
+        {trace.rootSessionID === trace.selectedSessionID ? ', sesión raíz' : ''}), sin incluir descendientes; para
+        inspeccionar las herramientas de una subejecución, selecciónala en el árbol.
+      </p>
       <p className={noticeClass} data-consumption-notice>
         Consumo: desconocido, no cero. No se agrupan reintentos por nombre, argumentos ni proximidad: este runtime no
         expone el enlace entre intentos (retryOf y operationID desconocidos) y cada intento conserva su propio
@@ -85,9 +96,9 @@ export function TraceToolsView({ trace }: Props) {
         <p className={noticeClass}>Ningún intento coincide con los filtros actuales.</p>
       ) : (
         <ul aria-label="Intentos de herramienta en orden de evidencia" className="space-y-2">
-          {filtered.map((attempt, index) => (
+          {filtered.map(({ key, attempt }) => (
             <li
-              key={attemptKey(attempt, index)}
+              key={key}
               data-tool-attempt
               data-tool-name={attempt.toolName ?? 'desconocido'}
               data-outcome={attempt.outcome}
@@ -106,6 +117,7 @@ export function TraceToolsView({ trace }: Props) {
                   summary="Entrada autorizada"
                   marker="input"
                   text={attempt.input !== null ? formatJson(attempt.input) : (attempt.inputText as string)}
+                  copyLabel={attempt.input !== null ? 'Copiar JSON' : 'Copiar texto'}
                 />
               ) : (
                 <p className={noticeClass}>Entrada: no observada o no autorizada.</p>
@@ -147,7 +159,7 @@ export function TraceToolsView({ trace }: Props) {
                     Incidente:{' '}
                     {attempt.incident === null
                       ? 'sin incidente registrado'
-                      : `${attempt.incident.kind} (causa desconocida)`}
+                      : `${attempt.incident.kind} (${attempt.incident.cause ?? 'causa desconocida'})`}
                   </p>
                   <p>Evidencia: {evidenceText(attempt.evidence ?? [])}</p>
                   <p>

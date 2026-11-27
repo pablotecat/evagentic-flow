@@ -396,7 +396,50 @@ export type ObservedSkill = {
   evidence: EvidenceRef;
 };
 
-export type SkillObservation = {
+export type AdmittedSkillValue = { id: string; name: string; text: string };
+
+export type AvailableSkillSummary = {
+  id: string;
+  name: string;
+  description: string | null;
+  autoinvoke: boolean | null;
+};
+
+export type SkillDefinitionValue = {
+  id: string;
+  name: string;
+  description: string | null;
+  content: string;
+  path: string;
+  autoinvoke: boolean | null;
+};
+
+export type AgentDefinitionValue = {
+  id: string;
+  name: string;
+  mode: 'primary' | 'subagent' | 'all' | string;
+  description: string | null;
+  system: string | null;
+};
+
+export type DeployedFileValue = { path: string | null; content: string | null };
+
+export type RegistryDefinitionValue = SkillDefinitionValue | AgentDefinitionValue | DeployedFileValue;
+
+export type EnvironmentPlugin = {
+  id: string | null;
+  source: 'builtin' | 'local' | 'package' | 'sdk' | string | null;
+  version: string | null;
+  status: 'active' | 'failed' | string | null;
+};
+
+export type EnvironmentValue = {
+  plugins: EnvironmentPlugin[];
+  configurationSources: null;
+  transformations: null;
+};
+
+export type SkillObservation<T = unknown> = {
   observationTime: number;
   source: string;
   identity: string | null;
@@ -406,7 +449,7 @@ export type SkillObservation = {
   status: string;
   omissions: string[];
   redactions: string[];
-  value: unknown;
+  value: T | null;
   sha256: string | null;
   hashBasis: string;
   evidence: EvidenceRef;
@@ -414,10 +457,27 @@ export type SkillObservation = {
 
 export type TraceSkills = {
   observed: ObservedSkill[];
-  admitted: SkillObservation[];
-  available: SkillObservation[];
-  definitions: SkillObservation[];
-  environment: SkillObservation[];
+  admitted: SkillObservation<AdmittedSkillValue>[];
+  available: SkillObservation<AvailableSkillSummary[]>[];
+  definitions: SkillObservation<RegistryDefinitionValue>[];
+  environment: SkillObservation<EnvironmentValue>[];
+};
+
+export type RecorderDeclaration = {
+  captureID?: string;
+  arrival?: number;
+  runtimeVersion?: string;
+  sdkVersion?: string | null;
+  recorderVersion?: string | null;
+  coverage?: { ordering?: string } | null;
+};
+
+export type RecorderDiagnostic = {
+  type?: string;
+  reason?: string | null;
+  captureID?: string;
+  arrival?: number;
+  sessionID?: string | null;
 };
 
 export type CaptureCoverage = {
@@ -426,10 +486,10 @@ export type CaptureCoverage = {
   scope: string;
   sessionID: string | null;
   sessions: string[];
-  declarations: Record<string, unknown>[];
+  declarations: RecorderDeclaration[];
   observed: Array<{ type: string | null; source: string | null; stage: string | null; status: string | null; count: number }>;
   omissions: string[];
-  diagnostics: Record<string, unknown>[];
+  diagnostics: RecorderDiagnostic[];
   horizons: CaptureHorizon[];
 };
 

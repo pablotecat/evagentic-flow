@@ -35,3 +35,13 @@ export const durationOrOpen = (elapsedMs: number | null | undefined, open: boole
   if (open) return 'abierto / sin cierre observado';
   return elapsedMs === null || elapsedMs === undefined ? 'desconocido' : `${elapsedMs} ms`;
 };
+
+export const uniqueKeys = <T,>(items: T[], baseKey: (item: T) => string): string[] => {
+  const counts = new Map<string, number>();
+  return items.map(item => {
+    const base = baseKey(item);
+    const seen = counts.get(base) ?? 0;
+    counts.set(base, seen + 1);
+    return seen === 0 ? base : `${base}#${seen}`;
+  });
+};

@@ -2330,3 +2330,232 @@ test('UI /next: traza ilegible gestionada con honestidad en las tres subvistas',
     assert.equal(await page.locator('[data-tool-attempt], [data-metric-step-row], [data-skills-observed]').count(), 0);
   }
 });
+
+test('UI /next: regresiones #48 en definiciones, plugins, disponibilidad no reconocida, métricas y herramientas', { timeout: 120000 }, async t => {
+  const traced = 'ffff1111-6f6f-4f6f-86f6-6f6f6f6f6f6f';
+  const regressionTrace = {
+    ...skillFixture(traced),
+    tools: {
+      attempts: [
+        toolAttempt(10, {
+          callID: null,
+          messageID: 'msg_null_a',
+          toolName: 'alpha',
+          input: null,
+          inputText: 'entrada plana alpha',
+          output: null,
+          outcome: 'error',
+          incident: { kind: 'tool-error', cause: 'permiso-denegado-sintetico' },
+          evidence: [evRef(80, 'evt-null-a', 'session.tool.failed')],
+        }),
+        toolAttempt(11, {
+          callID: null,
+          messageID: 'msg_null_b',
+          toolName: 'beta',
+          input: null,
+          inputText: 'entrada plana beta',
+          output: null,
+          outcome: 'not-observed',
+          incident: { kind: 'outcome-not-observed', cause: null },
+          evidence: [evRef(81, 'evt-null-b', 'session.tool.called')],
+        }),
+      ],
+    },
+    metrics: {
+      ...metricsFixture(),
+      steps: [
+        metricStep(0, {
+          dispatches: [
+            { startedAt: 1000, model: metric({ providerID: 'synthetic', id: 'model-0' }, 'opencode.event.session.step.started.model', 'model-step'), tokens: null, costUSD: null, evidence: evRef(90, 'evt-d0', 'session.step.started') },
+          ],
+          retries: [
+            { kind: 'model', attempt: 1, at: 1500,
+              error: { type: 'timeout', message: 'tiempo agotado sintético' },
+              tokens: null, costUSD: null, scheduledDelayMs: null, actualWaitMs: null,
+              evidence: evRef(91, 'evt-r0', 'session.step.failed') },
+          ],
+        }),
+      ],
+      measurements: [
+        {
+          diagnosticVersion: 1,
+          type: 'diagnostic.measurement',
+          projectID: 'prj-t',
+          sessionID: sessions.childA,
+          executionID: null,
+          messageID: null,
+          callID: null,
+          kind: 'compaction',
+          model: metric({ providerID: 'synthetic', id: 'compact-1' }, 'opencode.event.session.compaction.failed.model', 'compaction'),
+          tokens: { ...metric({ input: 80, output: 12, reasoning: 0, cache: { read: 0, write: 0 } },
+            'opencode.event.session.compaction.failed.tokens', 'compaction'), basis: 'runtime-normalized-unverified', providerReported: null },
+          costUSD: { ...metric(0.01, 'opencode.event.session.compaction.failed.cost', 'compaction', 'estimated'), basis: 'runtime-estimate-not-invoice' },
+          outcome: 'failed',
+          error: { type: 'compaction-error', message: 'fallo de compactación sintético', status: 500 },
+          evidence: [evRef(92, 'evt-compaction-fail', 'session.compaction.failed')],
+          omissions: ['compaction-summary-not-exposed'],
+        },
+      ],
+    },
+    skills: {
+      ...skillFixture(traced).skills,
+      available: [
+        {
+          observationTime: 1770000012000,
+          source: 'opencode.skill.list',
+          identity: null,
+          sessionID: sessions.root,
+          messageID: null,
+          eventID: null,
+          status: 'unrecognized',
+          omissions: ['unrecognized-skill-list'],
+          redactions: [],
+          value: null,
+          sha256: null,
+          hashBasis: 'redacted-json-utf8',
+          evidence: { captureID: 'cap-t', arrival: 93, eventID: null },
+        },
+      ],
+      definitions: [
+        ...skillFixture(traced).skills.definitions,
+        {
+          observationTime: 1770000025000,
+          source: 'opencode.agent.get',
+          identity: 'agent-ident',
+          sessionID: sessions.root,
+          messageID: null,
+          eventID: null,
+          status: 'captured',
+          omissions: [],
+          redactions: [],
+          value: {
+            id: 'agente-revisor',
+            name: 'Agente Revisor',
+            mode: 'subagent',
+            description: 'Revisa hallazgos sintéticos',
+            system: 'Instrucciones del sistema del agente revisor.',
+          },
+          sha256: '6666c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+          hashBasis: 'redacted-json-utf8',
+          evidence: { captureID: 'cap-t', arrival: 94, eventID: null },
+        },
+      ],
+      environment: [
+        {
+          observationTime: 1770000026000,
+          source: 'opencode.plugin.list',
+          identity: null,
+          sessionID: sessions.root,
+          messageID: null,
+          eventID: null,
+          status: 'captured',
+          omissions: [],
+          redactions: [],
+          value: {
+            plugins: [{ id: null, source: 'local', version: null, status: 'active' }],
+            configurationSources: null,
+            transformations: null,
+          },
+          sha256: '7777c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+          hashBasis: 'redacted-json-utf8',
+          evidence: { captureID: 'cap-t', arrival: 95, eventID: null },
+        },
+      ],
+    },
+  };
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(traced, { status: 'succeeded', sessionID: sessions.root })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+    trace: () => jsonResponse(regressionTrace),
+  };
+  const { page } = await openTraceTab(t, overrides, traced);
+  const subTab = name => page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab', { name });
+
+  await subTab('Skills y cobertura').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-skills-coverage')?.getAttribute('aria-selected') === 'true');
+
+  const deployedCard = page.locator('[data-skill-definition="def-desplegado"]');
+  await deployedCard.waitFor();
+  const deployedText = await deployedCard.innerText();
+  assert.ok(deployedText.includes('def-desplegado'));
+  assert.ok(!deployedText.includes('identidad desconocida'));
+
+  const agentCard = page.locator('[data-skill-definition="agent-ident"]');
+  await agentCard.waitFor();
+  const agentTextBefore = await agentCard.innerText();
+  assert.ok(agentTextBefore.includes('agente-revisor (Agente Revisor)'));
+  assert.ok(agentTextBefore.includes('Modo: subagent'));
+  assert.ok(agentTextBefore.includes('Descripción: Revisa hallazgos sintéticos'));
+  assert.ok(!agentTextBefore.includes('no observado o no autorizado'));
+  await agentCard.locator('details[data-disclosure="skill-content"] summary').click();
+  assert.ok((await agentCard.innerText()).includes('Instrucciones del sistema del agente revisor.'));
+  assert.equal(await agentCard.getByRole('button', { name: 'Copiar JSON' }).count(), 0);
+  assert.equal(await agentCard.getByRole('button', { name: 'Copiar contenido' }).count(), 1);
+
+  const observedCard = page.locator('section[data-skills-observed]');
+  await observedCard.locator('details[data-disclosure="skill-content"] summary').click();
+  assert.equal(await observedCard.getByRole('button', { name: 'Copiar JSON' }).count(), 0);
+  assert.equal(await observedCard.getByRole('button', { name: 'Copiar contenido' }).count(), 1);
+
+  const unknownPlugin = page.locator('section[data-plugin-environment] [data-plugin="desconocido"]');
+  await unknownPlugin.waitFor();
+  assert.ok((await unknownPlugin.innerText()).startsWith('desconocido · fuente local'));
+
+  const unrecognizedAvailable = page.locator('section[data-skills-available] [data-skill-available-status="unrecognized"]');
+  await unrecognizedAvailable.waitFor();
+  const unrecognizedText = await unrecognizedAvailable.innerText();
+  assert.ok(unrecognizedText.includes('estado: unrecognized'));
+  assert.ok(unrecognizedText.includes('opencode.skill.list'));
+  assert.ok(unrecognizedText.includes('fila 93'));
+
+  await subTab('Métricas').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-metrics')?.getAttribute('aria-selected') === 'true');
+  await page.locator('table[data-metrics-steps]').waitFor();
+
+  const stepHeaders = await page.locator('table[data-metrics-steps] thead th').allInnerTexts();
+  assert.ok(stepHeaders.some(header => header.includes('Despachos / reintentos')));
+  assert.equal(await page.locator('[data-metric-step-row] [data-metric-dispatches]').first().innerText(), '1 / 1');
+
+  await page.locator('details[data-metric-details] summary').first().click();
+  const retryDetailsText = await page.locator('details[data-metric-details]').first().innerText();
+  assert.ok(retryDetailsText.includes('espera programada: desconocida'));
+  assert.ok(!retryDetailsText.includes('desconocida ms'));
+
+  const measurementTableText = await page.locator('table[data-metrics-measurements]').innerText();
+  assert.ok(measurementTableText.includes('opencode.event.session.compaction.failed.tokens'));
+  assert.ok(measurementTableText.includes('alcance: compaction'));
+  assert.ok(measurementTableText.includes('runtime-normalized-unverified'));
+  assert.ok(measurementTableText.includes('runtime-estimate-not-invoice'));
+  assert.ok(measurementTableText.includes('fallo de compactación sintético'));
+  assert.ok(measurementTableText.includes('compaction-summary-not-exposed'));
+  assert.ok(measurementTableText.includes('evt-compaction-fail'));
+
+  const unknownInbox = page.locator('[data-pending-inbox][data-pending-state="unknown"]');
+  await unknownInbox.waitFor();
+  const unknownInboxText = await unknownInbox.innerText();
+  assert.ok(unknownInboxText.includes('Admisión con resolución observada sin orden acreditado (estado desconocido)'));
+  assert.ok(!unknownInboxText.includes('sin entrega observada'));
+
+  await subTab('Herramientas e intentos').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-tools')?.getAttribute('aria-selected') === 'true');
+
+  const toolsScopeNotice = await page.locator('[data-tools-scope-notice]').innerText();
+  assert.ok(toolsScopeNotice.includes(sessions.root));
+  assert.ok(toolsScopeNotice.includes('sin incluir descendientes'));
+
+  const alphaRow = page.locator('[data-tool-attempt][data-tool-name="alpha"]');
+  await alphaRow.locator('details[data-disclosure="input"] summary').click();
+  assert.equal(await alphaRow.locator('details[data-disclosure="input"]').getByRole('button', { name: 'Copiar JSON' }).count(), 0);
+  assert.equal(await alphaRow.locator('details[data-disclosure="input"]').getByRole('button', { name: 'Copiar texto' }).count(), 1);
+  await alphaRow.locator('details[data-disclosure="forensics"] summary').click();
+  assert.ok((await alphaRow.locator('details[data-disclosure="forensics"]').innerText()).includes('tool-error (permiso-denegado-sintetico)'));
+
+  const betaRow = page.locator('[data-tool-attempt][data-tool-name="beta"]');
+  await betaRow.locator('details[data-disclosure="forensics"] summary').click();
+  assert.equal(await betaRow.locator('details[data-disclosure="forensics"]').getAttribute('open'), '');
+  await page.getByLabel('Filtrar por nombre de herramienta').fill('beta');
+  assert.equal(await page.locator('[data-tool-attempt]').count(), 1);
+  assert.equal(await betaRow.locator('details[data-disclosure="forensics"]').getAttribute('open'), '');
+  assert.ok((await betaRow.locator('details[data-disclosure="forensics"]').innerText()).includes('msg_null_b'));
+});

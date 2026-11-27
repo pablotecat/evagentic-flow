@@ -5,7 +5,7 @@ import type {
   TraceMeasurement,
   TraceResponse,
 } from '../api/types';
-import { evidenceText, isoOrUnobserved } from '../lib/trace';
+import { evidenceText, isoOrUnobserved, uniqueKeys } from '../lib/trace';
 import { noticeClass } from '../lib/ui';
 
 type Props = {
@@ -91,6 +91,25 @@ const stepOutcomeLabel = (outcome: string): string =>
 const measurementOutcomeLabel = (outcome: string): string =>
   MEASUREMENT_OUTCOME_LABELS[outcome] ?? outcome ?? 'desconocido';
 
+const dispatchesRetriesCell = (step: ModelStep): string => {
+  const dispatches = Array.isArray(step.dispatches) ? String(step.dispatches.length) : 'desconocido';
+  const retries = Array.isArray(step.retries) ? String(step.retries.length) : 'desconocido';
+  return `${dispatches} / ${retries}`;
+};
+
+const scheduledDelayText = (value: number | null | undefined): string =>
+  value === null || value === undefined ? 'desconocida' : `${value} ms`;
+
+const pendingInboxLabel = (state: string): string => {
+  if (state === 'unknown') {
+    return 'Admisión con resolución observada sin orden acreditado (estado desconocido)';
+  }
+  if (state === 'delivery-not-observed' || state === 'pending') {
+    return 'Admisión sin entrega observada';
+  }
+  return `Admisión pendiente (${state})`;
+};
+
 const tokenCells = (
   columns: TokenColumn[],
   value: TokenCounts | null,
@@ -112,8 +131,21 @@ export function TraceMetricsView({ trace }: Props) {
   const pendingInbox = metrics.pendingInbox ?? [];
   const coverage = metrics.coverage ?? null;
   const tokenColumns = [...BASE_TOKEN_COLUMNS, ...extraTokenColumns(steps)];
-  const stepKey = (step: ModelStep, index: number): string =>
-    `${step.sessionID}:${step.messageID ?? `sin-mensaje-${index}`}`;
+  const stepKeys = uniqueKeys(steps, step => {
+    const firstEvidence = step.evidence?.[0];
+    const ref = firstEvidence ? `${firstEvidence.captureID}:${firstEvidence.arrival}` : 'sin-evidencia';
+    return `${step.sessionID}:${step.messageID ?? 'sin-mensaje'}:${ref}`;
+  });
+  const measurementKeys = uniqueKeys(measurements, item => {
+    const firstEvidence = item.evidence?.[0];
+    const ref = firstEvidence ? `${firstEvidence.captureID}:${firstEvidence.arrival}` : 'sin-evidencia';
+    return `${item.sessionID ?? 'sin-sesion'}:${item.kind}:${item.outcome}:${ref}`;
+  });
+  const pendingInboxKeys = uniqueKeys(pendingInbox, item => {
+    const firstEvidence = item.evidence?.[0];
+    const ref = firstEvidence ? `${firstEvidence.captureID}:${firstEvidence.arrival}` : item.state;
+    return `${item.sessionID}:${item.messageID ?? 'sin-mensaje'}:${ref}`;
+  });
   return (
     <section aria-label="Métricas del modelo con fuente y alcance" className="space-y-3">
       <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
@@ -140,12 +172,13 @@ export function TraceMetricsView({ trace }: Props) {
                   ))}
                   <th className={cellClass}>Coste (USD, estimado)</th>
                   <th className={cellClass}>Duración</th>
+                  <th className={cellClass}>Despachos / reintentos</th>
                   <th className={cellClass}>Desenlace</th>
                 </tr>
               </thead>
               <tbody>
                 {steps.map((step, index) => (
-                  <tr key={stepKey(step, index)} data-metric-step-row className="font-mono">
+                  <tr key={stepKeys[index]} data-metric-step-row className="font-mono">
                     <td className={`${cellClass} break-all`}>{step.sessionID}</td>
                     <td className={`${cellClass} break-all`}>{step.messageID ?? 'desconocido'}</td>
                     <td className={cellClass}>{modelLabel(step.model)}</td>
@@ -155,6 +188,7 @@ export function TraceMetricsView({ trace }: Props) {
                       {step.elapsedMs === null || step.elapsedMs === undefined
                         ? 'desconocido' : `${step.elapsedMs} ms`}
                     </td>
+                    <td className={cellClass} data-metric-dispatches>{dispatchesRetriesCell(step)}</td>
                     <td className={cellClass}>{stepOutcomeLabel(step.outcome)}</td>
                   </tr>
                 ))}
@@ -163,7 +197,7 @@ export function TraceMetricsView({ trace }: Props) {
           </div>
           <ul aria-label="Fuente, alcance y despachos por paso de modelo" className="space-y-1">
             {steps.map((step, index) => (
-              <li key={stepKey(step, index)}>
+              <li key={stepKeys[index]}>
                 <details data-metric-details className="rounded-lg border border-slate-200 dark:border-slate-800">
                   <summary className="cursor-pointer select-none px-2 py-1 text-[11px] font-medium text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100">
                     Paso de modelo · sesión {step.sessionID} · mensaje {step.messageID ?? 'desconocido'}
@@ -200,7 +234,7 @@ export function TraceMetricsView({ trace }: Props) {
                         {step.retries.map(retry => ` · intento ${retry.attempt} en ${isoOrUnobserved(retry.at)}: `
                           + `${retry.error.type}: ${retry.error.message}`
                           + `${typeof retry.error.status === 'number' ? ` (HTTP ${retry.error.status})` : ''}`
-                          + ` · espera programada: ${retry.scheduledDelayMs ?? 'desconocida'} ms`).join('')}
+                          + ` · espera programada: ${scheduledDelayText(retry.scheduledDelayMs)}`).join('')}
                         ; consumo y espera real por intento desconocidos.
                       </p>
                     ) : null}
@@ -235,17 +269,38 @@ export function TraceMetricsView({ trace }: Props) {
                     <th key={column.key} className={cellClass}>{column.label}</th>
                   ))}
                   <th className={cellClass}>Coste (USD, estimado)</th>
+                  <th className={cellClass}>Fuente y alcance</th>
+                  <th className={cellClass}>Error, omisiones y evidencia</th>
                 </tr>
               </thead>
               <tbody>
                 {measurements.map((item: TraceMeasurement, index) => (
-                  <tr key={`${item.sessionID}:${item.kind}:${item.type}:${index}`} className="font-mono">
+                  <tr key={measurementKeys[index]} className="font-mono">
                     <td className={cellClass}>{item.kind ?? 'medición'}</td>
                     <td className={cellClass}>{measurementOutcomeLabel(item.outcome)}</td>
                     <td className={`${cellClass} break-all`}>{item.sessionID ?? 'desconocida'}</td>
                     <td className={cellClass}>{modelLabel(item.model)}</td>
                     {tokenCells(tokenColumns, tokensPresent(item.tokens), false)}
                     <td className={cellClass}>{costCell(item.costUSD)}</td>
+                    <td className={`${cellClass} font-sans text-[11px] leading-relaxed`} data-measurement-provenance>
+                      <p>Tokens ({metricProvenance(item.tokens)})</p>
+                      <p>Coste ({metricProvenance(item.costUSD)})</p>
+                      <p>
+                        Modelo (estado: {item.model?.status ?? 'unknown'} · fuente: {item.model?.source ?? 'ninguna'}
+                        {' · alcance: '}
+                        {item.model?.scope ?? 'desconocido'})
+                      </p>
+                    </td>
+                    <td className={`${cellClass} font-sans text-[11px] leading-relaxed`} data-measurement-details>
+                      {item.error !== null && item.error !== undefined && (
+                        <p>
+                          Error: {item.error.type}: {item.error.message}
+                          {typeof item.error.status === 'number' ? ` (HTTP ${item.error.status})` : ''}
+                        </p>
+                      )}
+                      <p>Omisiones: {item.omissions?.length ? item.omissions.join(', ') : 'ninguna'}</p>
+                      <p>Evidencia: {item.evidence?.length ? evidenceText(item.evidence) : 'no observada'}</p>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -258,8 +313,13 @@ export function TraceMetricsView({ trace }: Props) {
           <h5 className="text-xs font-semibold text-slate-700 dark:text-slate-200">Inbox pendiente por sesión</h5>
           <ul aria-label="Inbox pendiente por sesión" className="space-y-0.5">
             {pendingInbox.map((item, index) => (
-              <li key={`${item.sessionID}:${item.messageID ?? index}`} data-pending-inbox={item.sessionID} className={noticeClass}>
-                Admisión sin entrega observada · sesión {item.sessionID} · mensaje{' '}
+              <li
+                key={pendingInboxKeys[index]}
+                data-pending-inbox={item.sessionID}
+                data-pending-state={item.state}
+                className={noticeClass}
+              >
+                {pendingInboxLabel(item.state)} · sesión {item.sessionID} · mensaje{' '}
                 {item.messageID ?? 'desconocido'} · estado: {item.state}
               </li>
             ))}
