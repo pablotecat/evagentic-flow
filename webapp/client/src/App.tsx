@@ -48,7 +48,8 @@ export default function App() {
           {route.view === 'new' && <Composer indexStatus={health.health?.index?.status ?? null} />}
           {route.view === 'rubrics' && <RubricsView />}
           {route.view === 'execution'
-            && <ExecutionView key={route.id} id={route.id} tab={route.tab} session={route.session} />}
+            && <ExecutionView key={route.id} id={route.id} tab={route.tab} session={route.session}
+              engineReachable={health.health?.engine?.reachable ?? null} />}
         </main>
       </div>
     </div>

@@ -65,23 +65,108 @@ export type Execution = {
 
 export type ConversationEntry = { text: string };
 
+export type FormFieldOption = { value?: string; label?: string };
+
+export type FormFieldWhen = { field: string; equals?: string | number | boolean } | Record<string, unknown> | null;
+
+export type FormField = {
+  key: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'multiselect';
+  title?: string;
+  description?: string;
+  required?: boolean;
+  options?: FormFieldOption[];
+  custom?: boolean;
+  when?: FormFieldWhen;
+};
+
+export type InteractionRequest = {
+  title?: string;
+  fields?: FormField[];
+  action?: string;
+  resources?: string[];
+  message?: string;
+} | null;
+
+export type PendingInteraction = {
+  kind: 'form' | 'permission';
+  sessionID: string;
+  requestID: string;
+  request: InteractionRequest;
+  observedAt: number;
+};
+
+export type ResolvedInteraction = {
+  kind: 'form' | 'permission';
+  sessionID: string;
+  requestID: string;
+  phase: string;
+  response: Record<string, unknown> | null;
+};
+
+export type InteractionReadError = { sessionID?: string | null; error: string };
+
+export type Interactions = {
+  pending: PendingInteraction[];
+  resolved: ResolvedInteraction[];
+  readErrors: InteractionReadError[];
+};
+
+export type StopSessionState = { sessionID: string; outcome: string | null; stop?: string };
+
+export type StopSessionRequest = { sessionID: string; result: string; stop: string };
+
+export type StopState = {
+  requested: boolean;
+  requestedAt?: number | null;
+  sessions?: StopSessionState[];
+  readError?: string | null;
+  treeVerified?: boolean;
+};
+
+export type StopResponseBody = {
+  requested: boolean;
+  requestedAt: number | null;
+  sessions: StopSessionRequest[];
+};
+
+export type RecorderInterruption = { requested?: boolean; stop?: string } | null;
+
+export type RecorderState = {
+  readable: boolean;
+  reason?: string | null;
+  status?: string | null;
+  reviewRequired?: boolean;
+  pilotReady?: boolean;
+  notice?: string | null;
+  interruption?: RecorderInterruption;
+  source?: string | null;
+};
+
+export type CaptureGap = { captureID: string; arrival: number; observedAt: number; scope?: string; reason?: string };
+
+export type CaptureOmission = { sessionID: string; captureID?: string; arrival?: number; type?: string; omissions?: string[] };
+
+export type EvidenceScope = { kind?: string; rootSessionID?: string; sessionIDs?: string[] };
+
+export type CaptureDetail = {
+  readable: boolean;
+  reason?: string;
+  captureIDs: string[];
+  recorderFailed: boolean;
+  horizon: string | null;
+  scope?: EvidenceScope;
+  gaps?: CaptureGap[];
+  omissions?: CaptureOmission[];
+};
+
 export type ExecutionDetail = {
   execution: Execution;
-  recorder: {
-    readable: boolean;
-    reason?: string;
-    status?: string | null;
-    reviewRequired?: boolean;
-    source?: string;
-  };
+  stop?: StopState;
+  recorder: RecorderState;
   conversation: { entries: ConversationEntry[]; responses: ConversationEntry[] };
-  capture: {
-    readable: boolean;
-    reason?: string;
-    captureIDs: string[];
-    recorderFailed: boolean;
-    horizon: string | null;
-  };
+  capture: CaptureDetail;
+  interactions?: Interactions;
 };
 
 export type ApiFailure = { status: number; body: Record<string, unknown> | null };

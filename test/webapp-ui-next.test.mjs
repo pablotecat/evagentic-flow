@@ -94,6 +94,8 @@ async function openUi(t, overrides = {}) {
   t.after(() => browser.close());
   const page = await browser.newPage();
   const posts = [];
+  const stopCalls = [];
+  const replyCalls = [];
   const calls = { options: 0 };
   const negotiate = {
     health: () => jsonResponse(healthy),
@@ -101,6 +103,8 @@ async function openUi(t, overrides = {}) {
     list: () => jsonResponse({ executions: [] }),
     detail: id => jsonResponse(detail(id)),
     post: () => jsonResponse({ execution: execution('created-synthetic-1') }, 201),
+    stop: () => jsonResponse({ stop: { requested: true, requestedAt: Date.now(), sessions: [] } }),
+    interaction: () => jsonResponse({ interaction: { kind: 'form', sessionID: 'ses_root_exec', requestID: 'form-synthetic', phase: 'replied' } }),
     ...overrides,
   };
   await page.route('**/api/**', async route => {
@@ -116,6 +120,16 @@ async function openUi(t, overrides = {}) {
       return respond(negotiate.options());
     }
     if (url.pathname === '/api/executions' && request.method() === 'GET') return respond(negotiate.list());
+    const stop = url.pathname.match(/^\/api\/executions\/([^/]+)\/stop$/);
+    if (stop && request.method() === 'POST') {
+      stopCalls.push({ id: decodeURIComponent(stop[1]), body: JSON.parse(request.postData() ?? '{}') });
+      return respond(negotiate.stop(decodeURIComponent(stop[1])));
+    }
+    const interaction = url.pathname.match(/^\/api\/executions\/([^/]+)\/interactions$/);
+    if (interaction && request.method() === 'POST') {
+      replyCalls.push({ id: decodeURIComponent(interaction[1]), body: JSON.parse(request.postData() ?? '{}') });
+      return respond(negotiate.interaction(decodeURIComponent(interaction[1])));
+    }
     const match = url.pathname.match(/^\/api\/executions\/([^/]+)$/);
     if (match && request.method() === 'GET') return respond(negotiate.detail(decodeURIComponent(match[1])));
     if (url.pathname === '/api/executions' && request.method() === 'POST') {
@@ -125,7 +139,7 @@ async function openUi(t, overrides = {}) {
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not-mocked"}' });
   });
   await page.goto(`${app.url}/next/#/`);
-  return { app, page, negotiate, posts, calls };
+  return { app, page, negotiate, posts, calls, stopCalls, replyCalls };
 }
 
 test('UI /next: barra lateral, navegación e histórico, y cajón adaptable en pantallas estrechas', { timeout: 120000 }, async t => {
@@ -476,4 +490,526 @@ test('UI /next: aviso proactivo de índice, project-busy sin ejecución, epistem
   await page.evaluate(() => { location.hash = '#/executions/%E0%A4%A/conversation'; });
   await page.getByRole('heading', { name: 'Nuevo encargo' }).waitFor();
   assert.equal(pageErrors.length, 0);
+});
+
+test('UI /next: cabecera de ejecución con Detener, chips y cajón de metadatos forenses copiable', { timeout: 120000 }, async t => {
+  const running = 'aaaaaaaa-2222-2222-2222-222222222222';
+  const terminal = 'bbbbbbbb-3333-3333-3333-333333333333';
+  const runningDetail = {
+    ...detail(running),
+    execution: execution(running, {
+      status: 'running',
+      sessionID: 'ses_root_exec',
+      requestedAgent: 'generalist',
+      requestedModel: 'synthetic/model-req',
+      knownAgent: 'build',
+      knownAgentSource: 'public-session',
+      knownModel: { value: 'synthetic/model-real', providerID: 'synthetic', modelID: 'model-real', variant: null },
+    }),
+    capture: {
+      readable: true,
+      captureIDs: ['cap-001', 'cap-002'],
+      recorderFailed: false,
+      horizon: '2026-11-27T10:00:00.000Z',
+      scope: { kind: 'observed-session-tree', rootSessionID: 'ses_root_exec', sessionIDs: ['ses_root_exec', 'ses_sub_exec'] },
+      gaps: [{ captureID: 'cap-glob', arrival: 12, observedAt: 1700000000000, scope: 'capture', reason: 'laguna del destino sintética' }],
+      omissions: [{ sessionID: 'ses_sub_exec', captureID: 'cap-002', arrival: 7, type: 'recorder.observation', omissions: ['non-text-fields-not-captured'] }],
+    },
+  };
+  let stopped = false;
+  const stopResponse = { requested: true, requestedAt: 1700000000000,
+    sessions: [{ sessionID: 'ses_root_exec', result: 'accepted', stop: 'confirmed' }] };
+  const { app, page, stopCalls } = await openUi(t, {
+    list: () => jsonResponse({ executions: [
+      execution(running, runningDetail.execution),
+      execution(terminal, { status: 'succeeded' }),
+    ] }),
+    detail: id => {
+      if (id !== running) return jsonResponse(detail(id));
+      if (!stopped) return jsonResponse(runningDetail);
+      return jsonResponse({ ...runningDetail, execution: { ...runningDetail.execution, stop: { requested: true, requestedAt: 1700000000000 } },
+        stop: stopResponse });
+    },
+    stop: () => {
+      stopped = true;
+      return jsonResponse({ stop: stopResponse });
+    },
+  });
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+
+  await page.locator(`[data-id="${running}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución aaaaaaaa' }).waitFor();
+  await waitForText(page, 'Agente: build (solicitado: generalist)');
+  await waitForText(page, 'Modelo: synthetic/model-real (solicitado: synthetic/model-req)');
+  await waitForText(page, 'En ejecución');
+  const detener = page.getByRole('button', { name: 'Detener' });
+  await detener.waitFor();
+
+  await page.getByText('Metadatos y evidencia').click();
+  await waitForText(page, running);
+  await waitForText(page, 'cap-001, cap-002');
+  await waitForText(page, 'ses_root_exec');
+  await waitForText(page, 'ses_sub_exec');
+  await waitForText(page, 'Evidencia hasta');
+  await waitForText(page, '2026-11-27T10:00:00.000Z');
+  await waitForText(page, 'máximo observado en el árbol');
+  await waitForText(page, 'Elegido: generalist');
+  await waitForText(page, 'Conocido: build (procedencia: API pública de la sesión)');
+  await waitForText(page, 'Conocido: synthetic/model-real (procedencia: API pública de la sesión)');
+  await waitForText(page, 'Lagunas del destino de captura');
+  await waitForText(page, 'Sin atribución a esta ejecución: la captura no identifica la sesión afectada. No hay replay ni relleno de texto.');
+  await waitForText(page, 'cap-glob · fila 12');
+  await waitForText(page, 'laguna del destino sintética');
+  await waitForText(page, 'Omisiones observadas');
+  await waitForText(page, 'ses_sub_exec · cap-002 · fila 7 · recorder.observation: non-text-fields-not-captured');
+  await page.getByRole('button', { name: 'Copiar identificador completo' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), running);
+  await page.getByRole('button', { name: 'Copiar capturas' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'cap-001, cap-002');
+
+  await detener.click();
+  await waitForText(page, 'Detención solicitada');
+  await waitForText(page, 'Solicitud: aceptada');
+  await waitForText(page, 'Detención: confirmada');
+  assert.equal(stopCalls.length, 1);
+  assert.equal(stopCalls[0].id, running);
+  assert.deepEqual(stopCalls[0].body, {});
+  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 0);
+
+  await page.locator(`[data-id="${terminal}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución bbbbbbbb' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 0);
+});
+
+test('UI /next: banda prioritaria con fallo del registrador visible en todas las pestañas', { timeout: 120000 }, async t => {
+  const failing = 'cccccccc-4444-4444-4444-444444444444';
+  let declared = true;
+  const failingDetail = () => ({
+    ...detail(failing),
+    execution: execution(failing, { status: 'running', sessionID: 'ses_root_f' }),
+    recorder: declared
+      ? { readable: true, status: 'failed', reason: 'Razón pública sintética', notice: 'Aviso público sintético',
+        reviewRequired: true, pilotReady: false, interruption: { requested: true, stop: 'unconfirmed' },
+        source: 'public-session-metadata' }
+      : { readable: false, reason: 'engine-unreachable' },
+    capture: declared
+      ? { readable: true, captureIDs: ['cap-f'], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root_f'] }, gaps: [], omissions: [] }
+      : { readable: false, reason: 'destino de captura roto', recorderFailed: true, captureIDs: [], horizon: null },
+  });
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(failing, { status: 'running', sessionID: 'ses_root_f' })] }),
+    detail: () => jsonResponse(failingDetail()),
+  });
+  await page.locator(`[data-id="${failing}"]`).click();
+  const banner = page.getByRole('region', { name: 'Atención prioritaria' });
+  await banner.waitFor();
+  const text = await banner.innerText();
+  assert.ok(text.includes('Fallo del registrador'));
+  assert.ok(text.includes('Estado de captura: consultable.'));
+  assert.ok(text.includes('Revisión requerida según la evidencia pública del motor.'));
+  assert.ok(text.includes('Se conserva el bloqueo durable de la captura: no hay desbloqueo automático, ni por recargar ni por reparar la ruta.'));
+  assert.ok(text.includes('Interrupción: solicitada, detención no confirmada.'));
+  assert.ok(text.includes('Motivo público declarado: Razón pública sintética.'));
+  assert.ok(text.includes('Aviso público sintético'));
+
+  for (const tab of ['Entregables', 'Traza', 'Evaluación']) {
+    await page.getByRole('tab', { name: tab }).click();
+    await page.waitForFunction(value =>
+      document.querySelector('[aria-selected="true"]')?.textContent === value, tab);
+    assert.ok((await banner.innerText()).includes('Fallo del registrador'));
+  }
+
+  declared = false;
+  await waitForText(page, 'Estado de captura: no consultable (destino de captura roto)');
+});
+
+test('UI /next: banda prioritaria con motor inaccesible en ejecución no terminal', { timeout: 120000 }, async t => {
+  const active = 'dddddddd-5555-5555-5555-555555555555';
+  const done = 'eeeeeeee-6666-6666-6666-666666666666';
+  const { page } = await openUi(t, {
+    health: () => jsonResponse({ ...healthy, engine: { reachable: false, version: null } }),
+    list: () => jsonResponse({ executions: [
+      execution(active, { status: 'running', sessionID: 'ses_root_act' }),
+      execution(done, { status: 'succeeded', sessionID: 'ses_root_done' }),
+    ] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: id === active ? 'running' : 'succeeded' }) }),
+  });
+  await page.locator(`[data-id="${active}"]`).click();
+  const banner = page.getByRole('region', { name: 'Atención prioritaria' });
+  await banner.waitFor();
+  await waitForText(page, 'Motor no disponible: desenlace pendiente de comprobar; el encargo no se reenviará.');
+  await page.getByRole('tab', { name: 'Traza' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('[aria-selected="true"]')?.textContent === 'Traza');
+  assert.ok((await banner.innerText()).includes('desenlace pendiente de comprobar'));
+
+  await page.locator(`[data-id="${done}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución eeeeeeee' }).waitFor();
+  await banner.waitFor({ state: 'detached' });
+  await page.waitForTimeout(2000);
+  assert.equal(await page.getByRole('region', { name: 'Atención prioritaria' }).count(), 0);
+
+  await page.locator(`[data-id="${active}"]`).click();
+  await banner.waitFor();
+  assert.ok((await banner.innerText()).includes('desenlace pendiente de comprobar'));
+});
+
+test('UI /next: banda prioritaria con detención solicitada por sesión y árbol no verificado', { timeout: 120000 }, async t => {
+  const stopping = 'ffffffff-7777-7777-7777-777777777777';
+  const stopDetail = {
+    ...detail(stopping),
+    execution: execution(stopping, { status: 'running', sessionID: 'ses_root_s',
+      stop: { requested: true, requestedAt: 1700000000000 } }),
+    stop: {
+      requested: true,
+      requestedAt: 1700000000000,
+      sessions: [
+        { sessionID: 'ses_root_s', outcome: 'interrupted', stop: 'confirmed' },
+        { sessionID: 'ses_sub_s', outcome: null, stop: 'unconfirmed' },
+      ],
+      readError: 'engine-unreachable',
+      treeVerified: false,
+    },
+  };
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(stopping, { status: 'running', sessionID: 'ses_root_s' })] }),
+    detail: () => jsonResponse(stopDetail),
+  });
+  await page.locator(`[data-id="${stopping}"]`).click();
+  const banner = page.getByRole('region', { name: 'Atención prioritaria' });
+  await banner.waitFor();
+  const text = await banner.innerText();
+  assert.ok(text.includes('Detención solicitada'));
+  assert.ok(text.includes('La detención actúa sólo sobre el alcance verificado de esta ejecución.'));
+  assert.ok(text.includes('no hay interrupción instantánea, pausa, reanudación ni reversión de efectos externos'));
+  assert.ok(text.includes('Sesión raíz · Solicitud: sin comprobar · Detención: confirmada · desenlace público: interrupted'));
+  assert.ok(text.includes('Subejecución ses_sub_s · Solicitud: sin comprobar · Detención: no confirmada · desenlace público: desconocido'));
+  assert.ok(text.includes('No se pudo verificar el árbol de sesiones; los descendientes nuevos no pudieron comprobarse.'));
+  assert.ok(text.includes('No se pudo comprobar el desenlace público de la detención; se mantiene no confirmada y el trabajo no se relanza.'));
+  assert.equal(await page.getByRole('button', { name: 'Detener' }).count(), 0);
+});
+
+test('UI /next: banda prioritaria con intervenciones pendientes, salto directo y errores de lectura', { timeout: 120000 }, async t => {
+  const waiting = '11111111-8888-8888-8888-888888888888';
+  const waitingDetail = {
+    ...detail(waiting),
+    execution: execution(waiting, { status: 'running', sessionID: 'ses_root_i' }),
+    capture: { readable: true, captureIDs: ['cap-i'], recorderFailed: false, horizon: null,
+      scope: { sessionIDs: ['ses_root_i', 'ses_sub_i'] }, gaps: [], omissions: [] },
+    interactions: {
+      pending: [
+        { kind: 'form', sessionID: 'ses_root_i', requestID: 'form-root',
+          request: { title: 'Pregunta raíz sintética', fields: [{ key: 'answer', type: 'string', title: 'Respuesta' }] },
+          observedAt: 1700000000000 },
+        { kind: 'permission', sessionID: 'ses_sub_i', requestID: 'perm-sub',
+          request: { action: 'Escribir archivo', resources: ['salida.txt'], message: '¿Autorizar la escritura?' },
+          observedAt: 1700000000000 },
+      ],
+      resolved: [],
+      readErrors: [{ sessionID: 'ses_sub_i', error: 'engine-unreachable' }],
+    },
+  };
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(waiting, { status: 'running', sessionID: 'ses_root_i' })] }),
+    detail: () => jsonResponse(waitingDetail),
+  });
+  await page.locator(`[data-id="${waiting}"]`).click();
+  const banner = page.getByRole('region', { name: 'Atención prioritaria' });
+  await banner.waitFor();
+  const text = await banner.innerText();
+  assert.ok(text.includes('Esperando intervención'));
+  assert.ok(text.includes('Pregunta nativa · Sesión raíz'));
+  assert.ok(text.includes('Permiso nativo · Subejecución ses_sub_i'));
+  assert.ok(text.includes('La ejecución espera intervención: conserva su identidad, no se cierra ni falla por esperar, y responder no lanza otro encargo.'));
+  assert.ok(text.includes('No se pudieron leer las solicitudes pendientes de ses_sub_i.'));
+  assert.ok(text.includes('su vigencia no está comprobada'));
+
+  await page.getByRole('tab', { name: 'Evaluación' }).click();
+  await page.waitForFunction(() =>
+    document.querySelector('[aria-selected="true"]')?.textContent === 'Evaluación');
+  assert.ok((await banner.innerText()).includes('Permiso nativo'));
+
+  await page.getByRole('button', { name: 'Ir a la solicitud' }).first().click();
+  await page.waitForFunction(() => location.hash.endsWith('/conversation'));
+  await page.locator('[data-request="form-root"]').waitFor();
+  await page.getByRole('button', { name: 'Responder pregunta' }).waitFor();
+  assert.ok((await page.getByRole('tabpanel').innerText()).includes('Pregunta raíz sintética'));
+  assert.ok((await page.getByRole('tabpanel').innerText()).includes('¿Autorizar la escritura?'));
+});
+
+test('UI /next: Conversación en Markdown seguro con bloques copiables y conmutador a texto plano', { timeout: 120000 }, async t => {
+  const shown = 'aaaaaaaa-9999-9999-9999-999999999999';
+  const fenced = '```js\nconst sintetico = 1;\n```';
+  const markdownText = [
+    '# Encabezado sintético',
+    '',
+    '- punto uno',
+    '- punto dos',
+    '',
+    '| Columna A | Columna B |',
+    '| --- | --- |',
+    '| celda 1 | celda 2 |',
+    '',
+    fenced,
+    '',
+    '[enlace seguro](https://example.com) y [enlace peligroso](javascript:alert(1)).',
+    '',
+    '<script>window.__pwned = true;</script>',
+    '',
+    '<img src=x onerror="window.__pwned2 = true">',
+  ].join('\n');
+  let dispatchState = 'admitted';
+  const { app, page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(shown)] }),
+    detail: () => jsonResponse({ ...detail(shown),
+      execution: execution(shown, { dispatch: dispatchState }),
+      conversation: { entries: [], responses: [{ text: markdownText }] } }),
+  });
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+  await page.locator(`[data-id="${shown}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución aaaaaaaa' }).waitFor();
+
+  await waitForText(page, 'Despacho: encargo admitido.');
+  await page.getByRole('heading', { name: 'Encabezado sintético' }).waitFor();
+  await page.getByText('punto uno', { exact: true }).waitFor();
+  await page.getByText('punto dos', { exact: true }).waitFor();
+  await page.getByRole('table').waitFor();
+  await page.getByRole('cell', { name: 'celda 1' }).waitFor();
+  await page.getByRole('cell', { name: 'celda 2' }).waitFor();
+  await page.locator('pre').waitFor();
+  assert.ok((await page.locator('pre').innerText()).includes('const sintetico = 1;'));
+  await page.getByRole('button', { name: 'Copiar código' }).click();
+  assert.ok((await page.evaluate(() => navigator.clipboard.readText())).includes('const sintetico = 1;'));
+
+  assert.equal(await page.evaluate(() => window.__pwned), undefined);
+  assert.equal(await page.evaluate(() => window.__pwned2), undefined);
+  assert.equal(await page.evaluate(() => document.querySelectorAll('main img, main script').length), 0);
+  const safeLink = page.getByRole('link', { name: 'enlace seguro' });
+  const unsafeLink = page.getByRole('link', { name: 'enlace peligroso' });
+  await safeLink.waitFor();
+  await unsafeLink.waitFor();
+  assert.equal(await safeLink.getAttribute('href'), 'https://example.com');
+  const unsafeHref = await unsafeLink.getAttribute('href');
+  assert.ok(unsafeHref === null || unsafeHref === '' || !unsafeHref.startsWith('javascript'));
+
+  dispatchState = 'possibly-sent';
+  await waitForText(page, 'Despacho: envío posible; admisión sin confirmar. El encargo no se reenviará automáticamente.');
+  dispatchState = 'admitted';
+  await waitForText(page, 'Despacho: encargo admitido.');
+
+  await page.getByRole('button', { name: 'Texto sin formato' }).click();
+  await waitForText(page, '# Encabezado sintético');
+  await waitForText(page, '<script>window.__pwned = true;</script>');
+  assert.equal(await page.locator('pre').count(), 0);
+  assert.equal(await page.getByRole('heading', { name: 'Encabezado sintético' }).count(), 0);
+  assert.ok((await page.getByRole('tabpanel').innerText()).includes('javascript:alert(1)'));
+
+  await page.getByRole('button', { name: 'Markdown' }).click();
+  await page.getByRole('heading', { name: 'Encabezado sintético' }).waitFor();
+  await page.locator('pre').waitFor();
+});
+
+const formFields = [
+  { key: 'answer', type: 'string', title: 'Respuesta', required: true },
+  { key: 'choice', type: 'string', title: 'Elección', options: [{ value: 'a', label: 'Opción A' }, { value: 'b', label: 'Opción B' }], custom: true },
+  { key: 'extra', type: 'string', title: 'Extra condicional', when: { field: 'choice', equals: 'a' } },
+  { key: 'flag', type: 'boolean', title: 'Confirmación', required: true },
+  { key: 'count', type: 'integer', title: 'Cantidad' },
+];
+
+const formPending = [
+  { kind: 'form', sessionID: 'ses_root_c', requestID: 'form-root',
+    request: { title: 'Pregunta raíz sintética', fields: formFields }, observedAt: 1700000000000 },
+  { kind: 'form', sessionID: 'ses_sub_c', requestID: 'form-shared',
+    request: { title: 'Pregunta de subejecución', fields: [{ key: 'answer', type: 'string' }] }, observedAt: 1700000000000 },
+];
+
+test('UI /next: preguntas nativas con borradores aislados, valor propio, booleano false explícito y condicional', { timeout: 120000 }, async t => {
+  const drafting = 'bbbbbbbb-aaaa-4bbb-8bbb-bbbbbbbbbbbb';
+  const { page, replyCalls } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(drafting, { status: 'running', sessionID: 'ses_root_c' })] }),
+    detail: () => jsonResponse({ ...detail(drafting),
+      execution: execution(drafting, { status: 'running', sessionID: 'ses_root_c' }),
+      capture: { readable: true, captureIDs: ['cap-c'], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root_c', 'ses_sub_c'] }, gaps: [], omissions: [] },
+      interactions: { pending: formPending, resolved: [], readErrors: [] } }),
+  });
+  await page.locator(`[data-id="${drafting}"]`).click();
+  const panel = page.getByRole('tabpanel');
+  await panel.waitFor();
+  const rootForm = page.locator('[data-request="form-root"]');
+  const subForm = page.locator('[data-request="form-shared"]');
+  await rootForm.waitFor();
+  await subForm.waitFor();
+
+  assert.equal(await page.locator('[data-request="form-root"] [data-field="extra"]').count(), 0);
+  await page.locator('[data-request="form-root"] select[data-field="choice"]').selectOption('a');
+  await page.locator('[data-request="form-root"] [data-field="extra"]').waitFor();
+  assert.equal(await page.locator('[data-request="form-root"] input[data-field="choice"]').inputValue(), 'a');
+  await page.locator('[data-request="form-root"] input[data-field="choice"]').fill('propio');
+  assert.equal(await page.locator('[data-request="form-root"] [data-field="extra"]').count(), 0);
+
+  await page.locator('[data-request="form-root"] input[data-field="answer"]').fill('respuesta raíz');
+  await page.locator('[data-request="form-shared"] input[data-field="answer"]').fill('respuesta sub');
+  assert.equal(await page.locator('[data-request="form-root"] input[data-field="answer"]').inputValue(), 'respuesta raíz');
+  assert.equal(await page.locator('[data-request="form-shared"] input[data-field="answer"]').inputValue(), 'respuesta sub');
+  assert.equal(await page.locator('[data-request="form-root"] input[data-field="flag"]').isChecked(), false);
+  await page.locator('[data-request="form-root"] input[data-field="count"]').fill('7');
+
+  await rootForm.getByRole('button', { name: 'Responder pregunta' }).click();
+  await page.waitForTimeout(500);
+  assert.equal(replyCalls.length, 1);
+  assert.deepEqual(replyCalls[0].body, {
+    kind: 'form',
+    sessionID: 'ses_root_c',
+    requestID: 'form-root',
+    answer: { answer: 'respuesta raíz', choice: 'propio', flag: false, count: 7 },
+  });
+  assert.equal(typeof replyCalls[0].body.answer.count, 'number');
+  assert.ok('flag' in replyCalls[0].body.answer);
+});
+
+test('UI /next: permisos con decisión explícita, errores honestos, pérdida de transporte y respuestas registradas legibles', { timeout: 120000 }, async t => {
+  const granting = 'cccccccc-bbbb-4ccc-8ccc-cccccccccccc';
+  const interactionDetail = {
+    ...detail(granting),
+    execution: execution(granting, { status: 'running', sessionID: 'ses_root_g' }),
+    capture: { readable: true, captureIDs: ['cap-g'], recorderFailed: false, horizon: null,
+      scope: { sessionIDs: ['ses_root_g', 'ses_sub_g'] }, gaps: [], omissions: [] },
+    interactions: {
+      pending: [
+        { kind: 'permission', sessionID: 'ses_root_g', requestID: 'perm-root',
+          request: { action: 'Escribir archivo', resources: ['salida.txt'], message: '¿Autorizar la escritura?' },
+          observedAt: 1700000000000 },
+      ],
+      resolved: [
+        { kind: 'permission', sessionID: 'ses_root_g', requestID: 'perm-old', phase: 'replied',
+          response: { decision: 'once' } },
+        { kind: 'form', sessionID: 'ses_sub_g', requestID: 'form-old', phase: 'cancelled',
+          response: { picked: ['a', 'b'], flag: true } },
+      ],
+      readErrors: [{ error: 'engine-unreachable' }],
+    },
+  };
+  const { page, replyCalls, negotiate } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(granting, { status: 'running', sessionID: 'ses_root_g' })] }),
+    detail: () => jsonResponse(interactionDetail),
+  });
+  await page.locator(`[data-id="${granting}"]`).click();
+  const panel = page.getByRole('tabpanel');
+  await panel.waitFor();
+  await page.getByText('Acción: Escribir archivo').waitFor();
+  await page.getByText('Alcance: salida.txt').waitFor();
+  await page.getByText('Mensaje: ¿Autorizar la escritura?').waitFor();
+  await page.getByText('su vigencia no está comprobada').first().waitFor();
+  assert.equal(replyCalls.length, 0);
+
+  await page.getByRole('button', { name: 'Permitir siempre' }).click();
+  await page.waitForTimeout(500);
+  assert.deepEqual(replyCalls[0]?.body, { kind: 'permission', sessionID: 'ses_root_g', requestID: 'perm-root', decision: 'always' });
+
+  negotiate.interaction = () => jsonResponse({ error: 'interaction-resolved' }, 409);
+  await page.getByRole('button', { name: 'Permitir una vez' }).click();
+  await waitForText(page, 'La solicitud ya estaba resuelta o desaparecida; no se ha vuelto a responder.');
+
+  negotiate.interaction = () => jsonResponse({ error: 'engine-unreachable' }, 503);
+  await page.getByRole('button', { name: 'Permitir siempre' }).click();
+  await waitForText(page, 'No se pudo consultar la solicitud en el motor; esta petición no llegó a intentar la respuesta.');
+
+  negotiate.interaction = () => null;
+  await page.getByRole('button', { name: 'Rechazar' }).click();
+  await waitForText(page, 'Respuesta posiblemente enviada: no se pudo confirmar el resultado. El permiso pudo aplicarse; pendiente de reconciliar con la evidencia y el motor. No se repetirá automáticamente.');
+  await page.waitForTimeout(3500);
+  assert.equal(replyCalls.length, 4);
+
+  const resolved = page.locator('details[aria-label="Respuestas registradas"]');
+  await resolved.waitFor();
+  assert.equal(await resolved.getAttribute('open'), null);
+  await resolved.getByText('Respuestas registradas en la captura').click();
+  await resolved.getByText('Permitir una vez').waitFor();
+  const resolvedText = await resolved.innerText();
+  assert.ok(resolvedText.includes('Permiso · Sesión raíz · respondida'));
+  assert.ok(resolvedText.includes('Pregunta · Subejecución ses_sub_g · cancelada'));
+  assert.ok(resolvedText.includes('a · b'));
+  assert.ok(resolvedText.includes('sí'));
+  assert.ok(resolvedText.includes('La captura no atribuye las respuestas a una persona autenticada: su procedencia es cliente externo no identificado.'));
+  assert.ok(!resolvedText.includes('{"decision"'));
+  assert.ok(!resolvedText.includes('["a","b"]'));
+});
+
+test('UI /next: sondeo en segundo plano no destructivo con foco, borrador y desplegable intactos', { timeout: 180000 }, async t => {
+  const polled = 'dddddddd-cccc-4ddd-8ddd-dddddddddddd';
+  let tick = 0;
+  const polledDetail = () => {
+    tick++;
+    return {
+      ...detail(polled),
+      execution: execution(polled, { status: 'running', sessionID: 'ses_root_p' }),
+      conversation: { entries: [{ text: 'Encargo sintético de la interfaz.' }], responses: [{ text: `Respuesta número ${tick}.` }] },
+      capture: { readable: true, captureIDs: ['cap-p'], recorderFailed: false, horizon: null,
+        scope: { sessionIDs: ['ses_root_p'] }, gaps: [], omissions: [] },
+      interactions: { pending: [formPending[0]], resolved: [], readErrors: [] },
+    };
+  };
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(polled, { status: 'running', sessionID: 'ses_root_p' })] }),
+    detail: () => jsonResponse(polledDetail()),
+  });
+  await page.locator(`[data-id="${polled}"]`).click();
+  await waitForText(page, 'Respuesta número 1.');
+  const reach = target => page.waitForFunction(value =>
+    parseInt(document.body.innerText.match(/Respuesta número (\d+)/)?.[1] ?? '0', 10) >= value, target, { timeout: 20000 });
+  const draft = page.locator('[data-request="form-root"] input[data-field="answer"]');
+  await draft.waitFor();
+  await page.getByText('Metadatos y evidencia').click();
+  await draft.fill('borrador estable');
+  await draft.evaluate(el => {
+    el.focus();
+    el.setSelectionRange(0, 8);
+  });
+  await reach(4);
+  const stable = await page.evaluate(() => {
+    const active = document.activeElement;
+    return {
+      focused: active instanceof HTMLInputElement && active.matches('[data-field="answer"]'),
+      value: active instanceof HTMLInputElement ? active.value : null,
+      selectionStart: active instanceof HTMLInputElement ? active.selectionStart : null,
+      selectionEnd: active instanceof HTMLInputElement ? active.selectionEnd : null,
+      drawerOpen: document.querySelector('details')?.hasAttribute('open') ?? false,
+    };
+  });
+  assert.equal(stable.focused, true);
+  assert.equal(stable.value, 'borrador estable');
+  assert.equal(stable.selectionStart, 0);
+  assert.equal(stable.selectionEnd, 8);
+  assert.equal(stable.drawerOpen, true);
+  await reach(6);
+  assert.ok(tick >= 5);
+});
+
+test('UI /next: protección contra respuestas obsoletas al cambiar de ejecución', { timeout: 120000 }, async t => {
+  const execA = 'eeeeeeee-dddd-4eee-8eee-eeeeeeeeeeee';
+  const execB = 'ffffffff-eeee-4fff-8fff-ffffffffffff';
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [
+      execution(execA, { status: 'running', sessionID: 'ses_root_a' }),
+      execution(execB, { status: 'succeeded', sessionID: 'ses_root_b' }),
+    ] }),
+    detail: async id => {
+      if (id === execA) await new Promise(resolve => setTimeout(resolve, 1500));
+      return jsonResponse({ ...detail(id),
+        execution: execution(id, { status: id === execA ? 'running' : 'succeeded' }),
+        conversation: { entries: [{ text: `Entrada exclusiva de la ejecución ${id}` }], responses: [] } });
+    },
+  });
+  await page.locator(`[data-id="${execA}"]`).click();
+  await page.locator(`[data-id="${execB}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución ffffffff' }).waitFor();
+  await waitForText(page, `Entrada exclusiva de la ejecución ${execB}`);
+  await page.waitForTimeout(2500);
+  const panelText = await page.getByRole('tabpanel').innerText();
+  assert.ok(panelText.includes(`Entrada exclusiva de la ejecución ${execB}`));
+  assert.ok(!panelText.includes(`Entrada exclusiva de la ejecución ${execA}`));
+  assert.ok((await page.getByRole('heading', { name: 'Ejecución ffffffff' }).innerText()).includes('ffffffff'));
 });

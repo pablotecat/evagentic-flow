@@ -1,7 +1,14 @@
+import { useState } from 'react';
+import type { PendingInteraction, StopResponseBody } from '../api/types';
+import { api, isApiFailure } from '../api/client';
 import { useExecutionDetail } from '../hooks/useExecutionDetail';
+import { InteractionStateProvider } from '../hooks/useInteractionState';
 import { EXECUTION_TABS, navigate, type ExecutionTab } from '../router/hash';
-import { StatusBadge } from './StatusBadge';
-import { chipClass, noticeClass } from '../lib/ui';
+import { noticeClass } from '../lib/ui';
+import { STOP_ERRORS } from '../lib/labels';
+import { ExecutionHeader } from './ExecutionHeader';
+import { PriorityBanner } from './PriorityBanner';
+import { ConversationTab } from './ConversationTab';
 
 const TAB_LABELS: Record<ExecutionTab, string> = {
   conversation: 'Conversación',
@@ -21,10 +28,15 @@ type Props = {
   id: string;
   tab: ExecutionTab;
   session: string | null;
+  engineReachable: boolean | null;
 };
 
-export function ExecutionView({ id, tab, session }: Props) {
-  const { detail, missing } = useExecutionDetail(id);
+export function ExecutionView({ id, tab, session, engineReachable }: Props) {
+  const { detail, missing, reload } = useExecutionDetail(id);
+  const [stopping, setStopping] = useState(false);
+  const [stopRequest, setStopRequest] = useState<StopResponseBody | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState<string | null>(null);
   if (missing && detail === null) {
     return (
       <section aria-label={`Ejecución ${id}`} className="pt-10 lg:pt-20">
@@ -42,99 +54,75 @@ export function ExecutionView({ id, tab, session }: Props) {
     );
   }
   const execution = detail.execution;
-  const knownModel = execution.knownModel?.value ?? null;
   const selectTab = (next: ExecutionTab) =>
     navigate({ view: 'execution', id, tab: next, session });
+  const requestStop = async () => {
+    if (stopping) return;
+    setStopping(true);
+    setStopError(null);
+    try {
+      const body = await api<{ stop: StopResponseBody }>(`/api/executions/${encodeURIComponent(id)}/stop`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      setStopRequest(body.stop);
+    } catch (error) {
+      const code = isApiFailure(error) ? error.body?.error : null;
+      setStopError(STOP_ERRORS[typeof code === 'string' ? code : ''] ?? STOP_ERRORS.unknown);
+    } finally {
+      setStopping(false);
+    }
+    await reload();
+  };
+  const jumpToRequest = (item: PendingInteraction) => {
+    navigate({ view: 'execution', id, tab: 'conversation', session });
+    setFocusRequest(`${item.kind}:${item.sessionID}:${item.requestID}`);
+  };
   return (
-    <section aria-label={`Ejecución ${execution.id}`} className="pt-6 lg:pt-10">
-      <header className="space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-2xl font-semibold tracking-tight">Ejecución {execution.id.slice(0, 8)}</h2>
-          <StatusBadge status={execution.status} />
+    <section aria-label={`Ejecución ${execution.id}`}>
+      <InteractionStateProvider id={id} reload={reload}>
+        <div className="z-20 -mx-4 border-b border-slate-200 bg-slate-50/95 px-4 pb-2 pt-6 backdrop-blur sm:-mx-6 sm:px-6 lg:sticky lg:top-0 lg:pt-8 dark:border-slate-800 dark:bg-slate-950/95">
+          <ExecutionHeader detail={detail} session={session} stopping={stopping} onStop={() => { void requestStop(); }} />
+          <PriorityBanner
+            detail={detail}
+            engineReachable={engineReachable}
+            stopRequest={stopRequest}
+            stopError={stopError}
+            onJump={jumpToRequest}
+          />
         </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {execution.requestedCommand && <span className={chipClass}>Comando: {execution.requestedCommand.name}</span>}
-          {execution.knownAgent ? (
-            <span className={chipClass}>
-              Agente: {execution.knownAgent}
-              {execution.requestedAgent && execution.requestedAgent !== execution.knownAgent
-                ? ` (solicitado: ${execution.requestedAgent})` : ''}
-            </span>
-          ) : execution.requestedAgent ? (
-            <span className={chipClass}>Agente: {execution.requestedAgent} (solicitado, sin confirmar)</span>
-          ) : null}
-          {knownModel ? (
-            <span className={chipClass}>
-              Modelo: <span className="font-mono">{knownModel}</span>
-              {execution.requestedModel && execution.requestedModel !== knownModel
-                ? <> (solicitado: <span className="font-mono">{execution.requestedModel}</span>)</> : null}
-            </span>
-          ) : execution.requestedModel ? (
-            <span className={chipClass}>
-              Modelo: <span className="font-mono">{execution.requestedModel}</span> (solicitado, sin confirmar)
-            </span>
-          ) : null}
-          {execution.sessionID && (
-            <span className={chipClass}>Sesión raíz: <span className="font-mono">{execution.sessionID}</span></span>
-          )}
-          {session && (
-            <span className={chipClass} data-subexecution={session}>
-              Subejecución: <span className="font-mono">{session}</span>
-            </span>
-          )}
+        <div role="tablist" aria-label="Secciones de la ejecución" className="mt-4 flex gap-1 border-b border-slate-200 dark:border-slate-700">
+          {EXECUTION_TABS.map(candidate => {
+            const selected = candidate === tab;
+            return (
+              <button
+                key={candidate}
+                type="button"
+                role="tab"
+                id={`tab-${candidate}`}
+                aria-selected={selected}
+                aria-controls={`panel-${candidate}`}
+                onClick={() => selectTab(candidate)}
+                className={`-mb-px rounded-t-lg border-b-2 px-3 py-2 text-sm font-medium transition-colors ${selected
+                  ? 'border-sky-500 text-sky-600 dark:border-sky-400 dark:text-sky-300'
+                  : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
+              >
+                {TAB_LABELS[candidate]}
+              </button>
+            );
+          })}
         </div>
-      </header>
-      <div role="tablist" aria-label="Secciones de la ejecución" className="mt-6 flex gap-1 border-b border-slate-200 dark:border-slate-700">
-        {EXECUTION_TABS.map(candidate => {
-          const selected = candidate === tab;
-          return (
-            <button
-              key={candidate}
-              type="button"
-              role="tab"
-              id={`tab-${candidate}`}
-              aria-selected={selected}
-              aria-controls={`panel-${candidate}`}
-              onClick={() => selectTab(candidate)}
-              className={`-mb-px rounded-t-lg border-b-2 px-3 py-2 text-sm font-medium transition-colors ${selected
-                ? 'border-sky-500 text-sky-600 dark:border-sky-400 dark:text-sky-300'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
-            >
-              {TAB_LABELS[candidate]}
-            </button>
-          );
-        })}
-      </div>
-      <div
-        role="tabpanel"
-        id={`panel-${tab}`}
-        aria-labelledby={`tab-${tab}`}
-        className="py-6 text-sm leading-relaxed"
-      >
-        {tab === 'conversation' ? <Conversation detail={detail} /> : <p className={noticeClass}>{TAB_PLACEHOLDERS[tab]}</p>}
-      </div>
+        <div
+          role="tabpanel"
+          id={`panel-${tab}`}
+          aria-labelledby={`tab-${tab}`}
+          className="py-6 text-sm leading-relaxed"
+        >
+          {tab === 'conversation'
+            ? <ConversationTab detail={detail} focusRequest={focusRequest} />
+            : <p className={noticeClass}>{TAB_PLACEHOLDERS[tab]}</p>}
+        </div>
+      </InteractionStateProvider>
     </section>
-  );
-}
-
-function Conversation({ detail }: { detail: NonNullable<ReturnType<typeof useExecutionDetail>['detail']> }) {
-  const entries = detail.conversation?.entries ?? [];
-  const responses = detail.conversation?.responses ?? [];
-  return (
-    <div className="space-y-4">
-      {entries.map((entry, index) => (
-        <article key={`entry-${index}`} className="rounded-xl bg-slate-100 p-4 dark:bg-slate-800/60">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Encargo</h3>
-          <p className="whitespace-pre-wrap break-words">{entry.text}</p>
-        </article>
-      ))}
-      {responses.map((response, index) => (
-        <article key={`response-${index}`} className="rounded-xl bg-white p-4 ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Respuesta</h3>
-          <p className="whitespace-pre-wrap break-words">{response.text}</p>
-        </article>
-      ))}
-      {!entries.length && !responses.length && <p className={noticeClass}>{TAB_PLACEHOLDERS.conversation}</p>}
-    </div>
   );
 }
