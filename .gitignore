@@ -6,3 +6,4 @@ captures/
 *.tgz
 sim.ndjson
 sim.err
+webapp/dist/

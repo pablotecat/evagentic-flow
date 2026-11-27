@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createEngine } from './engine.mjs';
@@ -16,7 +16,21 @@ const STATIC = new Map([
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
+const NEXT_MIME = new Map([
+  ['.html', 'text/html; charset=utf-8'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.svg', 'image/svg+xml'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.png', 'image/png'],
+  ['.ico', 'image/x-icon'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2'],
+  ['.map', 'application/json; charset=utf-8'],
+]);
 const root = dirname(fileURLToPath(import.meta.url));
+const distRoot = join(root, 'dist');
 
 export async function loadAppConfig(filename) {
   let config;
@@ -399,9 +413,45 @@ export async function startApp({ configPath, port: requestedPort, evaluationFixt
     return origin === undefined || origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
   };
 
+  const servesNext = rawPath => rawPath === '/next' || rawPath.startsWith('/next/');
+
+  const serveNext = async (response, rawPath) => {
+    const notFound = () => json(response, 404, { error: 'not-found' });
+    let decoded;
+    try { decoded = decodeURIComponent(rawPath); }
+    catch { return notFound(); }
+    if (decoded.includes('\0')) return notFound();
+    const relative = decoded.slice('/next/'.length);
+    const segments = relative.split('/');
+    if (relative !== '' && segments.some(segment => segment === '' || segment === '.' || segment === '..')) {
+      return notFound();
+    }
+    const resolved = relative === '' ? join(distRoot, 'index.html') : resolve(distRoot, relative);
+    if (resolved !== distRoot && !resolved.startsWith(distRoot + sep)) return notFound();
+    const type = NEXT_MIME.get(extname(resolved));
+    if (!type) return notFound();
+    try {
+      const content = await readFile(resolved);
+      response.writeHead(200, { 'content-type': type, 'x-content-type-options': 'nosniff' });
+      response.end(content);
+    } catch {
+      return notFound();
+    }
+  };
+
   async function handle(request, response) {
     const url = new URL(request.url, `http://127.0.0.1:${port}`);
     if (!allowed(request)) return json(response, 403, { error: 'origin-not-allowed' });
+    const rawPath = request.url.split('?')[0];
+    if (servesNext(rawPath)) {
+      if (request.method !== 'GET') return json(response, 405, { error: 'method-not-allowed' });
+      if (rawPath === '/next') {
+        response.writeHead(301, { location: '/next/' });
+        response.end();
+        return;
+      }
+      return serveNext(response, rawPath);
+    }
     if (request.method === 'GET' && STATIC.has(url.pathname)) {
       const [file, type] = STATIC.get(url.pathname);
       response.writeHead(200, { 'content-type': type, 'x-content-type-options': 'nosniff' });
