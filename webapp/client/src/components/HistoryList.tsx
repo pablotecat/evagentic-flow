@@ -6,13 +6,15 @@ import { StatusBadge } from './StatusBadge';
 
 export function executionTitle(execution: Execution): string {
   if (execution.requestedCommand?.name) return execution.requestedCommand.name;
-  const agent = execution.knownAgent ?? execution.requestedAgent;
-  if (agent) return agent;
+  if (execution.knownAgent) return execution.knownAgent;
+  if (execution.requestedAgent) return `${execution.requestedAgent} (solicitado)`;
   return `Ejecución ${execution.id.slice(0, 8)}`;
 }
 
 export function executionModel(execution: Execution): string | null {
-  return execution.knownModel?.value ?? execution.requestedModel ?? null;
+  if (execution.knownModel?.value) return execution.knownModel.value;
+  if (execution.requestedModel) return `${execution.requestedModel} (solicitado)`;
+  return null;
 }
 
 const matchesFilter = (execution: Execution, text: string, status: 'all' | ExecutionStatus): boolean => {

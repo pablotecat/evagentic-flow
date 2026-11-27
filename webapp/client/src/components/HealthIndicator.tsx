@@ -62,7 +62,9 @@ export function healthSignals({ health, connected }: HealthState): HealthSignal[
 export function HealthIndicator({ state }: { state: HealthState }) {
   const [expanded, setExpanded] = useState(false);
   const signals = healthSignals(state);
-  const disconnected = signals.some(signal => signal.ok === false);
+  const localDisconnected = !state.connected;
+  const failedSignals = signals.filter(signal => signal.ok === false);
+  const hasProblem = localDisconnected || failedSignals.length > 0;
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/60">
       <button
@@ -73,22 +75,28 @@ export function HealthIndicator({ state }: { state: HealthState }) {
         onClick={() => setExpanded(current => !current)}
         className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
       >
-        {disconnected
+        {hasProblem
           ? <CircleAlert className="size-4 shrink-0 text-red-500" aria-hidden="true" />
           : <HeartPulse className="size-4 shrink-0 text-emerald-500" aria-hidden="true" />}
         <span className="flex flex-1 flex-wrap items-center gap-x-2 gap-y-0.5">
-          {disconnected
+          {localDisconnected
             ? <span role="alert" className="font-medium text-red-600 dark:text-red-400">Sin conexión con la app local</span>
-            : signals.map(signal => (
-              <span key={signal.key} className="flex items-center gap-1">
-                <span
-                  aria-hidden="true"
-                  className={`size-1.5 rounded-full ${signal.ok === true ? 'bg-emerald-500'
-                    : signal.ok === false ? 'bg-red-500' : 'bg-amber-500'}`}
-                />
-                {signal.label}
-              </span>
-            ))}
+            : hasProblem
+              ? (
+                <span role="alert" className="font-medium text-red-600 dark:text-red-400">
+                  Atención requerida: {failedSignals.map(signal => signal.label).join(' · ')}
+                </span>
+              )
+              : signals.map(signal => (
+                <span key={signal.key} className="flex items-center gap-1">
+                  <span
+                    aria-hidden="true"
+                    className={`size-1.5 rounded-full ${signal.ok === true ? 'bg-emerald-500'
+                      : signal.ok === false ? 'bg-red-500' : 'bg-amber-500'}`}
+                  />
+                  {signal.label}
+                </span>
+              ))}
         </span>
         <ChevronDown
           className={`size-3.5 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import http from 'node:http';
 import { dirname, join } from 'node:path';
@@ -91,7 +91,8 @@ test('la app rechaza recorridos fuera del directorio compilado y rutas o método
   const app = await startStaticApp(t);
   const traversals = ['/next/../server.mjs', '/next/../../package.json',
     '/next/%2e%2e/public/app.js', '/next/..%2fserver.mjs', '/next/%2e%2e%2f%2e%2e%2fpackage.json',
-    '/next/%2e%2e%5cserver.mjs', '/next/..%5cserver.mjs', '/next/%00server.mjs', '/next/%ff%fe'];
+    '/next/%2e%2e%5cserver.mjs', '/next/..%5cserver.mjs', '/next/assets%5c..%5cindex.html',
+    '/next/index.html%5c..', '/next/%00server.mjs', '/next/%ff%fe'];
   for (const path of traversals) {
     const response = await request(app.port, 'GET', path);
     assert.equal(response.status, 404, path);
@@ -125,4 +126,22 @@ test('el guard de Host y Origin también protege /next y el cliente legado sigue
   assert.equal(legacyScript.headers['content-type'], 'text/javascript; charset=utf-8');
   const foreignLegacy = await request(app.port, 'GET', '/', { origin: 'http://evil.example' });
   assert.equal(foreignLegacy.status, 403);
+});
+
+test('el servido estático /next rechaza enlaces simbólicos que escapen de webapp/dist', async t => {
+  await assertBuilt();
+  const app = await startStaticApp(t);
+  const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
+    ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : tmpdir());
+  const outside = await mkdtemp(join(temporary, 'webapp-static-escape-'));
+  await writeFile(join(outside, 'secret.js'), 'synthetic-escaped-secret');
+  const linkDir = join(dist, '__test-escape-link');
+  await symlink(outside, linkDir, process.platform === 'win32' ? 'junction' : 'dir');
+  t.after(async () => {
+    await rm(linkDir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+  const escaped = await request(app.port, 'GET', '/next/__test-escape-link/secret.js');
+  assert.equal(escaped.status, 404);
+  assert.ok(!escaped.body.includes('synthetic-escaped-secret'));
 });

@@ -399,3 +399,81 @@ test('UI /next: enrutado por hash con recarga, subejecución y atrás/adelante d
     && document.querySelector('[aria-selected="true"]')?.textContent === 'Traza');
   assert.equal(await page.locator('[data-subexecution]').count(), 0);
 });
+
+test('UI /next: salud colapsada distingue fallo de subsistema de desconexión local', { timeout: 120000 }, async t => {
+  let healthBody = { ...healthy, engine: { reachable: false, version: null } };
+  const { page, negotiate } = await openUi(t, { health: () => jsonResponse(healthBody) });
+  const button = page.getByRole('button', { name: 'Salud del sistema' });
+  await waitForText(page, 'Motor no disponible');
+  const engineCollapsed = await button.innerText();
+  assert.ok(!engineCollapsed.includes('Sin conexión con la app local'));
+  assert.ok(engineCollapsed.includes('Motor no disponible'));
+
+  healthBody = { ...healthy, capture: { status: 'failed' } };
+  await waitForText(page, 'Fallo del registrador');
+  const captureCollapsed = await button.innerText();
+  assert.ok(!captureCollapsed.includes('Sin conexión con la app local'));
+  assert.ok(captureCollapsed.includes('Fallo del registrador'));
+
+  healthBody = { ...healthy, index: { status: 'review-required' } };
+  await waitForText(page, 'Índice: revisión requerida');
+  const indexCollapsed = await button.innerText();
+  assert.ok(!indexCollapsed.includes('Sin conexión con la app local'));
+  assert.ok(indexCollapsed.includes('Índice: revisión requerida'));
+
+  negotiate.health = () => null;
+  await waitForText(page, 'Sin conexión con la app local');
+  assert.ok((await button.innerText()).includes('Sin conexión con la app local'));
+});
+
+test('UI /next: aviso proactivo de índice, project-busy sin ejecución, epistemología y hash malformado', { timeout: 120000 }, async t => {
+  const unconfirmed = execution('11111111-aaaa-1111-1111-111111111111', {
+    requestedAgent: 'generalist',
+    requestedModel: 'synthetic/model-req',
+  });
+  const diverged = execution('22222222-bbbb-2222-2222-222222222222', {
+    requestedAgent: 'generalist',
+    knownAgent: 'build',
+    requestedModel: 'synthetic/model-req',
+    knownModel: { value: 'synthetic/model-real', providerID: 'synthetic', modelID: 'model-real', variant: null },
+  });
+  const byId = new Map([[unconfirmed.id, unconfirmed], [diverged.id, diverged]]);
+  const { page, posts } = await openUi(t, {
+    health: () => jsonResponse({ ...healthy, index: { status: 'review-required' } }),
+    list: () => jsonResponse({ executions: [unconfirmed, diverged] }),
+    detail: id => jsonResponse({ ...detail(id), execution: byId.get(id) ?? execution(id) }),
+    post: () => jsonResponse({ error: 'project-busy', execution: null }, 409),
+  });
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(error));
+
+  await page.getByRole('heading', { name: 'Nuevo encargo' }).waitFor();
+  await waitForText(page, 'El índice persistente requiere revisión');
+  assert.equal(posts.length, 0);
+
+  await page.getByLabel('Encargo', { exact: true }).fill('Encargo con proyecto ocupado sin detalle.');
+  await page.getByRole('button', { name: 'Enviar' }).click();
+  await waitForText(page, 'El proyecto de ejecución está ocupado por otra ejecución en marcha');
+  assert.equal(await page.getByRole('link', { name: 'Ver la ejecución activa' }).count(), 0);
+  assert.equal((await page.locator('main').innerText()).includes('No se pudo lanzar la ejecución'), false);
+
+  const unconfirmedItem = await page.locator(`[data-id="${unconfirmed.id}"]`).innerText();
+  assert.ok(unconfirmedItem.includes('generalist (solicitado)'));
+  assert.ok(unconfirmedItem.includes('synthetic/model-req (solicitado)'));
+  const divergedItem = await page.locator(`[data-id="${diverged.id}"]`).innerText();
+  assert.ok(divergedItem.includes('build'));
+  assert.ok(!divergedItem.includes('build (solicitado)'));
+  assert.ok(divergedItem.includes('synthetic/model-real'));
+
+  await page.locator(`[data-id="${unconfirmed.id}"]`).click();
+  await waitForText(page, 'Agente: generalist (solicitado, sin confirmar)');
+  await waitForText(page, 'Modelo: synthetic/model-req (solicitado, sin confirmar)');
+
+  await page.locator(`[data-id="${diverged.id}"]`).click();
+  await waitForText(page, 'Agente: build (solicitado: generalist)');
+  await waitForText(page, 'Modelo: synthetic/model-real (solicitado: synthetic/model-req)');
+
+  await page.evaluate(() => { location.hash = '#/executions/%E0%A4%A/conversation'; });
+  await page.getByRole('heading', { name: 'Nuevo encargo' }).waitFor();
+  assert.equal(pageErrors.length, 0);
+});

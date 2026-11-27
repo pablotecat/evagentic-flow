@@ -10,8 +10,12 @@ type ComposerAlert =
   | { kind: 'engine-unreachable' }
   | { kind: 'selection-unavailable'; optionKind: string; option: string }
   | { kind: 'index-review-required' }
-  | { kind: 'project-busy'; activeId: string }
+  | { kind: 'project-busy'; activeId: string | null }
   | { kind: 'transient' };
+
+type ComposerProps = {
+  indexStatus?: 'available' | 'review-required' | null;
+};
 
 type SubmitPayload = {
   requestKey: string;
@@ -21,7 +25,7 @@ type SubmitPayload = {
   model?: string;
 };
 
-export function Composer() {
+export function Composer({ indexStatus = null }: ComposerProps) {
   const [draft, setDraft] = useState('');
   const [agent, setAgent] = useState('');
   const [model, setModel] = useState('');
@@ -68,10 +72,8 @@ export function Composer() {
         }
         if (error.status === 409 && error.body?.error === 'project-busy') {
           const busy = error.body.execution as Execution | null | undefined;
-          if (busy && typeof busy.id === 'string') {
-            setAlert({ kind: 'project-busy', activeId: busy.id });
-            return;
-          }
+          setAlert({ kind: 'project-busy', activeId: busy && typeof busy.id === 'string' ? busy.id : null });
+          return;
         }
       }
       setAlert({ kind: 'transient' });
@@ -89,6 +91,7 @@ export function Composer() {
 
   const loaded = options.kind === 'loaded' ? options.data : null;
   const engineAlert = loaded?.state === 'engine-unreachable';
+  const indexReviewRequired = indexStatus === 'review-required' || alert?.kind === 'index-review-required';
 
   return (
     <section aria-label="Nuevo encargo" className="mx-auto max-w-2xl pt-10 lg:pt-20">
@@ -179,7 +182,7 @@ export function Composer() {
             La opción elegida ({alert.optionKind}: {alert.option}) ya no está disponible para este proyecto. No se ha lanzado nada; las opciones se han vuelto a consultar.
           </p>
         )}
-        {alert?.kind === 'index-review-required' && (
+        {indexReviewRequired && (
           <p role="alert" className={alertClass}>
             El índice persistente requiere revisión: no se aceptan nuevos lanzamientos hasta revisar índice y marcador con la app detenida. La ejecución no se ha creado.
           </p>
@@ -187,12 +190,14 @@ export function Composer() {
         {alert?.kind === 'project-busy' && (
           <div role="alert" className={alertClass}>
             <p>El proyecto de ejecución está ocupado por otra ejecución en marcha; no se ha creado ninguna ejecución nueva.</p>
-            <a
-              href={`#/executions/${alert.activeId}/conversation`}
-              className="mt-1 inline-block font-medium underline underline-offset-2"
-            >
-              Ver la ejecución activa
-            </a>
+            {alert.activeId && (
+              <a
+                href={`#/executions/${encodeURIComponent(alert.activeId)}/conversation`}
+                className="mt-1 inline-block font-medium underline underline-offset-2"
+              >
+                Ver la ejecución activa
+              </a>
+            )}
           </div>
         )}
         {alert?.kind === 'transient' && (

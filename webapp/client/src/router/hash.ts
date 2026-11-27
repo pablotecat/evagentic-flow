@@ -15,10 +15,13 @@ export function parseHash(hash: string): Route {
   const segments = path.split('/').filter(Boolean);
   if (segments[0] === 'rubrics') return { view: 'rubrics' };
   if (segments[0] === 'executions' && typeof segments[1] === 'string' && segments[1]) {
+    let id: string;
+    try { id = decodeURIComponent(segments[1]); }
+    catch { return { view: 'new' }; }
     const tab = EXECUTION_TABS.find(candidate => candidate === segments[2]) ?? 'conversation';
     return {
       view: 'execution',
-      id: decodeURIComponent(segments[1]),
+      id,
       tab,
       session: new URLSearchParams(query).get('session'),
     };

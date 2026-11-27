@@ -45,7 +45,7 @@ export default function App() {
           <span className="text-sm font-medium">Flujo en Proyecto</span>
         </header>
         <main className="mx-auto max-w-3xl px-4 pb-16 sm:px-6">
-          {route.view === 'new' && <Composer />}
+          {route.view === 'new' && <Composer indexStatus={health.health?.index?.status ?? null} />}
           {route.view === 'rubrics' && <RubricsView />}
           {route.view === 'execution'
             && <ExecutionView key={route.id} id={route.id} tab={route.tab} session={route.session} />}

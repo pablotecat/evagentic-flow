@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createEngine } from './engine.mjs';
@@ -420,18 +420,21 @@ export async function startApp({ configPath, port: requestedPort, evaluationFixt
     let decoded;
     try { decoded = decodeURIComponent(rawPath); }
     catch { return notFound(); }
-    if (decoded.includes('\0')) return notFound();
-    const relative = decoded.slice('/next/'.length);
-    const segments = relative.split('/');
-    if (relative !== '' && segments.some(segment => segment === '' || segment === '.' || segment === '..')) {
+    if (decoded.includes('\0') || decoded.includes('\\')) return notFound();
+    const subpath = decoded.slice('/next/'.length);
+    const segments = subpath.split('/');
+    if (subpath !== '' && segments.some(segment => segment === '' || segment === '.' || segment === '..')) {
       return notFound();
     }
-    const resolved = relative === '' ? join(distRoot, 'index.html') : resolve(distRoot, relative);
+    const resolved = subpath === '' ? join(distRoot, 'index.html') : resolve(distRoot, subpath);
     if (resolved !== distRoot && !resolved.startsWith(distRoot + sep)) return notFound();
     const type = NEXT_MIME.get(extname(resolved));
     if (!type) return notFound();
     try {
-      const content = await readFile(resolved);
+      const [realDistRoot, realTarget] = await Promise.all([realpath(distRoot), realpath(resolved)]);
+      const rel = relative(realDistRoot, realTarget);
+      if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return notFound();
+      const content = await readFile(realTarget);
       response.writeHead(200, { 'content-type': type, 'x-content-type-options': 'nosniff' });
       response.end(content);
     } catch {

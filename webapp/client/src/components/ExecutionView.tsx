@@ -1,6 +1,5 @@
 import { useExecutionDetail } from '../hooks/useExecutionDetail';
-import { navigate } from '../router/hash';
-import { EXECUTION_TABS, type ExecutionTab, type Route } from '../router/hash';
+import { EXECUTION_TABS, navigate, type ExecutionTab } from '../router/hash';
 import { StatusBadge } from './StatusBadge';
 import { chipClass, noticeClass } from '../lib/ui';
 
@@ -43,8 +42,7 @@ export function ExecutionView({ id, tab, session }: Props) {
     );
   }
   const execution = detail.execution;
-  const agent = execution.knownAgent ?? execution.requestedAgent;
-  const model = execution.knownModel?.value ?? execution.requestedModel;
+  const knownModel = execution.knownModel?.value ?? null;
   const selectTab = (next: ExecutionTab) =>
     navigate({ view: 'execution', id, tab: next, session });
   return (
@@ -56,8 +54,26 @@ export function ExecutionView({ id, tab, session }: Props) {
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {execution.requestedCommand && <span className={chipClass}>Comando: {execution.requestedCommand.name}</span>}
-          {agent && <span className={chipClass}>Agente: {agent}</span>}
-          {model && <span className={chipClass}>Modelo: <span className="font-mono">{model}</span></span>}
+          {execution.knownAgent ? (
+            <span className={chipClass}>
+              Agente: {execution.knownAgent}
+              {execution.requestedAgent && execution.requestedAgent !== execution.knownAgent
+                ? ` (solicitado: ${execution.requestedAgent})` : ''}
+            </span>
+          ) : execution.requestedAgent ? (
+            <span className={chipClass}>Agente: {execution.requestedAgent} (solicitado, sin confirmar)</span>
+          ) : null}
+          {knownModel ? (
+            <span className={chipClass}>
+              Modelo: <span className="font-mono">{knownModel}</span>
+              {execution.requestedModel && execution.requestedModel !== knownModel
+                ? <> (solicitado: <span className="font-mono">{execution.requestedModel}</span>)</> : null}
+            </span>
+          ) : execution.requestedModel ? (
+            <span className={chipClass}>
+              Modelo: <span className="font-mono">{execution.requestedModel}</span> (solicitado, sin confirmar)
+            </span>
+          ) : null}
           {execution.sessionID && (
             <span className={chipClass}>Sesión raíz: <span className="font-mono">{execution.sessionID}</span></span>
           )}
