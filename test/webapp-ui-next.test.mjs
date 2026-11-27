@@ -130,6 +130,13 @@ async function openUi(t, overrides = {}) {
       replyCalls.push({ id: decodeURIComponent(interaction[1]), body: JSON.parse(request.postData() ?? '{}') });
       return respond(negotiate.interaction(decodeURIComponent(interaction[1])));
     }
+    const trace = url.pathname.match(/^\/api\/executions\/([^/]+)\/trace$/);
+    if (trace && request.method() === 'GET') {
+      const traceId = decodeURIComponent(trace[1]);
+      return negotiate.trace
+        ? respond(negotiate.trace(traceId, url))
+        : route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not-mocked"}' });
+    }
     const match = url.pathname.match(/^\/api\/executions\/([^/]+)$/);
     if (match && request.method() === 'GET') return respond(negotiate.detail(decodeURIComponent(match[1])));
     if (url.pathname === '/api/executions' && request.method() === 'POST') {
@@ -1149,4 +1156,455 @@ test('UI /next: sondeo lento de detalle (>1,5 s) no solapa peticiones ni deja de
   await waitForText(page, 'Respuesta lenta 2.');
   assert.equal(maxInFlight, 1);
   assert.ok(completed >= 2);
+});
+
+const sessions = {
+  root: 'ses_root_t',
+  childA: 'ses_child_a',
+  childB: 'ses_child_b',
+  grandchild: 'ses_grandchild',
+  orphan: 'ses_orphan_x',
+};
+
+const evRef = (arrival, eventID, type) => ({ captureID: 'cap-t', arrival, eventID, type });
+
+const traceNode = (sessionID, overrides = {}) => ({
+  sessionID,
+  isViewRoot: false,
+  agentIDs: [],
+  observedParents: [],
+  delegations: [],
+  relation: 'unknown',
+  ...overrides,
+});
+
+const fullNodes = () => [
+  traceNode(sessions.root, { isViewRoot: true, relation: 'view-root', agentIDs: ['general-prime'] }),
+  traceNode(sessions.childA, { agentIDs: ['build'], relation: 'delegation-call-observed',
+    delegations: [{ parentSessionID: sessions.root, callID: 'call-a', evidence: evRef(1, 'evt-1', 'session.tool.success') }] }),
+  traceNode(sessions.childB, { relation: 'parent-observed-call-unknown', observedParents: [sessions.root] }),
+  traceNode(sessions.grandchild, { relation: 'delegation-call-observed',
+    delegations: [{ parentSessionID: sessions.childB, callID: 'call-g', evidence: evRef(9, 'evt-9', 'session.tool.success') }] }),
+  traceNode(sessions.orphan),
+];
+
+const traceInterval = (sessionID, startedAt, endedAt, state, evidence) => ({
+  diagnosticVersion: 1,
+  type: 'diagnostic.execution-interval',
+  projectID: 'prj-t',
+  sessionID,
+  executionID: null,
+  messageID: null,
+  callID: null,
+  intervalRef: evidence[0] ?? null,
+  startedAt,
+  endedAt,
+  elapsedMs: startedAt !== null && endedAt !== null ? endedAt - startedAt : null,
+  durationSource: 'opencode.event.sourceTime',
+  outcome: endedAt === null ? 'not-observed' : 'succeeded',
+  state,
+  reason: null,
+  error: null,
+  pendingWork: null,
+  evidence,
+  omissions: [],
+});
+
+const traceWait = (sessionID, kind, requestID, startedAt, endedAt, state, evidence) => ({
+  diagnosticVersion: 1,
+  type: 'diagnostic.wait',
+  projectID: 'prj-t',
+  sessionID,
+  executionID: null,
+  messageID: null,
+  callID: null,
+  kind,
+  requestID,
+  startedAt,
+  endedAt,
+  outcome: endedAt === null ? 'not-observed' : 'replied',
+  elapsedMs: startedAt !== null && endedAt !== null ? endedAt - startedAt : null,
+  durationSource: 'opencode.event.sourceTime',
+  state,
+  evidence,
+  omissions: ['external-actor-not-exposed', 'wait-is-not-proof-that-all-work-stopped'],
+});
+
+const fullTrace = executionID => ({
+  executionID,
+  rootSessionID: sessions.root,
+  readable: true,
+  selectedSessionID: sessions.root,
+  tree: { nodes: fullNodes(), sessionIDs: Object.values(sessions) },
+  timeline: {
+    intervals: [
+      traceInterval(sessions.root, 1000, 3000, 'concluded',
+        [evRef(2, 'evt-2', 'session.execution.started'), evRef(3, 'evt-3', 'session.execution.ended')]),
+      traceInterval(sessions.childA, 1500, 2500, 'concluded',
+        [evRef(4, 'evt-4', 'session.execution.started'), evRef(5, 'evt-5', 'session.execution.ended')]),
+      traceInterval(sessions.childB, 1200, 3600, 'concluded',
+        [evRef(6, 'evt-6', 'session.execution.started'), evRef(7, 'evt-7', 'session.execution.ended')]),
+      traceInterval(sessions.childB, 3700, null, 'unknown', [evRef(8, 'evt-8', 'session.execution.started')]),
+      traceInterval(sessions.grandchild, 2000, 2200, 'concluded',
+        [evRef(10, 'evt-10', 'session.execution.started'), evRef(11, 'evt-11', 'session.execution.ended')]),
+    ],
+    waits: [
+      traceWait(sessions.root, 'permission', 'perm-1', 3000, 5000, 'not-waiting-or-unknown',
+        [evRef(12, 'evt-12', 'permission.asked'), evRef(13, 'evt-13', 'permission.replied')]),
+      traceWait(sessions.childB, 'form', 'form-1', 3800, null, 'waiting-external-decision',
+        [evRef(14, 'evt-14', 'form.created')]),
+    ],
+  },
+  tools: { attempts: [] },
+  metrics: { steps: [], measurements: [], pendingInbox: [],
+    coverage: { diagnosticVersion: 1, type: 'diagnostic.metric-coverage', flowElapsedMs: null,
+      omissions: ['no-concurrent-duration-sum'], recorderDiagnostics: [] } },
+  captureDiagnostics: { diagnosticVersion: 1, type: 'diagnostic.capture-coverage', readiness: 'not-assessed',
+    scope: 'capture', sessionID: null, sessions: Object.values(sessions), declarations: [], observed: [],
+    omissions: [], diagnostics: [], horizons: [{ captureID: 'cap-t', arrival: 20, observedAt: 1770000000000 }] },
+  skills: { observed: [], admitted: [], available: [], definitions: [], environment: [] },
+  horizon: '2026-11-27T12:00:00.000Z',
+});
+
+const scopedTrace = (executionID, sessionID, nodes, intervals, waits) => ({
+  ...fullTrace(executionID),
+  selectedSessionID: sessionID,
+  tree: { nodes, sessionIDs: nodes.map(node => node.sessionID) },
+  timeline: { intervals, waits },
+});
+
+const scopedFor = url => {
+  const session = url.searchParams.get('session');
+  if (session === sessions.childA) {
+    return scopedTrace(null, sessions.childA,
+      [traceNode(sessions.childA, { isViewRoot: true, relation: 'view-root', agentIDs: ['build'] })],
+      fullTrace(null).timeline.intervals.filter(interval => interval.sessionID === sessions.childA), []);
+  }
+  if (session === sessions.childB) {
+    return scopedTrace(null, sessions.childB,
+      [traceNode(sessions.childB, { isViewRoot: true, relation: 'view-root' }), traceNode(sessions.grandchild)],
+      fullTrace(null).timeline.intervals.filter(interval =>
+        [sessions.childB, sessions.grandchild].includes(interval.sessionID)),
+      fullTrace(null).timeline.waits.filter(wait => wait.sessionID === sessions.childB));
+  }
+  if (session === sessions.root) {
+    return scopedTrace(null, sessions.root,
+      [traceNode(sessions.root, { isViewRoot: true, relation: 'view-root' })],
+      fullTrace(null).timeline.intervals.filter(interval => interval.sessionID === sessions.root),
+      fullTrace(null).timeline.waits.filter(wait => wait.sessionID === sessions.root));
+  }
+  return jsonResponse({ error: 'session-not-in-execution' }, 404);
+};
+
+const traceNegotiator = executionID => (traceId, url) => {
+  const session = url.searchParams.get('session');
+  if (session === null) return jsonResponse(fullTrace(traceId));
+  return jsonResponse({ ...scopedFor(url), executionID: traceId });
+};
+
+const traceExecutionOverrides = executionID => ({
+  list: () => jsonResponse({ executions: [execution(executionID, { status: 'succeeded', sessionID: sessions.root })] }),
+  detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: sessions.root }) }),
+  trace: traceNegotiator(executionID),
+});
+
+const openTraceTab = async (t, overrides, executionID) => {
+  const opened = await openUi(t, overrides);
+  await opened.page.locator(`[data-id="${executionID}"]`).click();
+  await opened.page.getByRole('heading', { name: `Ejecución ${executionID.slice(0, 8)}` }).waitFor();
+  await opened.page.getByRole('tab', { name: 'Traza' }).click();
+  await opened.page.waitForFunction(() =>
+    document.querySelector('[aria-selected="true"]')?.textContent === 'Traza');
+  return opened;
+};
+
+test('UI /next: traza con barra de alcance, árbol acreditado, selección reversible y árbol raíz conservado', { timeout: 120000 }, async t => {
+  const traced = 'aaaa1111-0101-4101-8101-010101010101';
+  const { app, page } = await openTraceTab(t, traceExecutionOverrides(traced), traced);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+
+  await waitForText(page, 'Alcance: toda la ejecución · 5 sesiones conocidas');
+  await page.getByRole('tree').waitFor();
+  assert.equal(await page.getByRole('tree').getAttribute('aria-label'), 'Árbol de subejecuciones de la ejecución');
+  assert.equal(await page.locator('[role="tree"] > [role="treeitem"]').count(), 2);
+  assert.equal(await page.locator('[data-relation="delegation-call-observed"]').count(), 2);
+  assert.equal(await page.locator('[data-relation="parent-observed-call-unknown"]').count(), 1);
+  assert.equal(await page.locator('[data-relation="unknown"]').count(), 1);
+  assert.equal(await page.locator('[data-tree-node="ses_child_b"] [data-tree-node="ses_grandchild"]').count(), 1);
+  assert.ok((await page.locator('[data-select-session="ses_root_t"]').innerText()).includes('Sesión raíz'));
+  assert.ok((await page.locator('[data-select-session="ses_child_a"]').innerText()).includes('Subejecución ses_child_a'));
+  assert.ok((await page.locator('[data-tree-node="ses_child_a"] > div').innerText()).includes('agente: build'));
+  assert.ok((await page.locator('[data-tree-node="ses_root_t"] > div').innerText()).includes('agente: general-prime'));
+
+  await page.locator('[data-tree-node="ses_child_a"] summary').click();
+  await waitForText(page, 'Padre ses_root_t · llamada call-a · evidencia: cap-t · fila 1 · evento evt-1 (session.tool.success)');
+  await page.locator('[data-tree-node="ses_child_b"] > details > summary').click();
+  await waitForText(page, 'Padre observado ses_root_t; llamada creadora no observada.');
+  await page.locator('[data-tree-node="ses_orphan_x"] summary').click();
+  await waitForText(page, 'Relación no observada o excluida; no se deduce ninguna asociación.');
+
+  const scopeBar = page.locator('[data-trace-scope-bar]');
+  const before = await scopeBar.boundingBox();
+  await page.evaluate(() => window.scrollTo(0, 600));
+  await waitForText(page, 'Árbol de subejecuciones');
+  const scrolled = await page.evaluate(() => window.scrollY);
+  assert.ok(scrolled > 200, `page must scroll for the sticky check, got ${scrolled}`);
+  const after = await scopeBar.boundingBox();
+  assert.ok(after !== null && before !== null && after.y <= before.y + 1,
+    `scope bar must stay sticky, before=${before?.y} after=${after?.y}`);
+  await page.evaluate(() => window.scrollTo(0, 0));
+
+  await page.locator('[data-select-session="ses_child_a"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_a'));
+  await waitForText(page, 'Alcance: subejecución');
+  await waitForText(page, 'ses_child_a');
+  assert.equal(await page.locator('[data-scope-session="ses_child_a"]').count(), 1);
+  const timelineText = await page.locator('section[aria-label="Línea temporal"]').innerText();
+  assert.ok(timelineText.includes('Subejecución ses_child_a'));
+  assert.ok(!timelineText.includes('ses_child_b'));
+  assert.ok(!timelineText.includes('ses_root_t'));
+  await page.getByRole('button', { name: 'Copiar subejecución' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'ses_child_a');
+
+  assert.equal(await page.locator('[data-tree-node="ses_root_t"]').count(), 1);
+  assert.equal(await page.locator('[data-tree-node="ses_child_b"]').count(), 1);
+  assert.equal(await page.locator('[data-tree-node="ses_grandchild"]').count(), 1);
+
+  await page.getByRole('button', { name: 'Ver toda la ejecución' }).click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace')
+    && !location.hash.includes('session'));
+  await waitForText(page, 'Alcance: toda la ejecución · 5 sesiones conocidas');
+  const fullTimelineText = await page.locator('section[aria-label="Línea temporal"]').innerText();
+  assert.ok(fullTimelineText.includes('ses_child_b'));
+  assert.ok(fullTimelineText.includes('Sesión raíz'));
+});
+
+test('UI /next: traza tras recarga directa con subejecución mantiene el árbol raíz y acota los datos', { timeout: 120000 }, async t => {
+  const traced = 'bbbb2222-0202-4202-8202-020202020202';
+  const overrides = traceExecutionOverrides(traced);
+  const { app, page } = await openUi(t, overrides);
+  await page.goto(`${app.url}/next/#/executions/${traced}/trace?session=ses_child_b`);
+  await page.getByRole('heading', { name: 'Ejecución bbbb2222' }).waitFor();
+  await page.reload();
+  await page.getByRole('heading', { name: 'Ejecución bbbb2222' }).waitFor();
+  await waitForText(page, 'Alcance: subejecución');
+  assert.equal(await page.evaluate(() => location.hash),
+    `#/executions/${traced}/trace?session=ses_child_b`);
+
+  assert.equal(await page.locator('[data-tree-node="ses_root_t"]').count(), 1);
+  assert.equal(await page.locator('[data-tree-node="ses_child_a"]').count(), 1);
+  assert.equal(await page.locator('[data-tree-node="ses_orphan_x"]').count(), 1);
+  assert.equal(await page.locator('[role="tree"] > [role="treeitem"]').count(), 2);
+
+  const scopedTimeline = await page.locator('section[aria-label="Línea temporal"]').innerText();
+  assert.ok(scopedTimeline.includes('Subejecución ses_child_b'));
+  assert.ok(scopedTimeline.includes('Subejecución ses_grandchild'));
+  assert.ok(!scopedTimeline.includes('ses_child_a'));
+  assert.ok(!scopedTimeline.includes('Sesión raíz ses_root_t'));
+  const scaleText = await page.locator('[data-timeline-scale]').innerText();
+  assert.ok(scaleText.includes('0 ms'));
+  assert.ok(scaleText.includes('1950 ms'));
+  assert.ok(scaleText.includes('2600 ms'));
+  assert.ok(!scaleText.includes('2800 ms'));
+
+  await page.getByRole('button', { name: 'Ver toda la ejecución' }).click();
+  await page.waitForFunction(value => location.hash === value, `#/executions/${traced}/trace`);
+  await waitForText(page, 'Alcance: toda la ejecución · 5 sesiones conocidas');
+  const fullTimeline = await page.locator('section[aria-label="Línea temporal"]').innerText();
+  assert.ok(fullTimeline.includes('ses_child_a'));
+  assert.ok(fullTimeline.includes('Sesión raíz'));
+  const fullScale = await page.locator('[data-timeline-scale]').innerText();
+  assert.ok(fullScale.includes('0 ms'));
+  assert.ok(fullScale.includes('2000 ms'));
+  assert.ok(fullScale.includes('4000 ms'));
+});
+
+test('UI /next: línea temporal con escala relativa, leyenda, tooltips exactos y aviso único de solapamiento', { timeout: 120000 }, async t => {
+  const traced = 'cccc3333-0303-4303-8303-030303030303';
+  const page = (await openTraceTab(t, traceExecutionOverrides(traced), traced)).page;
+
+  const legend = page.getByRole('list', { name: 'Leyenda de la línea temporal' });
+  await legend.waitFor();
+  const legendText = await legend.innerText();
+  assert.ok(legendText.includes('Intervalo concluido'));
+  assert.ok(legendText.includes('Intervalo abierto (sin cierre observado)'));
+  assert.ok(legendText.includes('Espera externa'));
+  assert.equal(await page.locator('[data-timeline-session]').count(), 4);
+  const scaleText = await page.locator('[data-timeline-scale]').innerText();
+  assert.ok(scaleText.includes('0 ms'));
+  assert.ok(scaleText.includes('2000 ms'));
+  assert.ok(scaleText.includes('4000 ms'));
+
+  const concluded = page.locator('[data-kind="interval"]').first();
+  await concluded.hover();
+  const concludedTip = page.locator('[role="tooltip"]:visible');
+  await concludedTip.waitFor({ state: 'visible' });
+  const concludedText = await concludedTip.innerText();
+  assert.ok(concludedText.includes('Intervalo · concluida'));
+  assert.ok(concludedText.includes('Inicio: 1970-01-01T00:00:01.000Z'));
+  assert.ok(concludedText.includes('Fin: 1970-01-01T00:00:03.000Z'));
+  assert.ok(concludedText.includes('Duración: 2000 ms'));
+  assert.ok(concludedText.includes('Fuente: opencode.event.sourceTime'));
+  assert.ok(concludedText.includes('Evidencia: cap-t · fila 2 · evento evt-2 (session.execution.started) | cap-t · fila 3 · evento evt-3 (session.execution.ended)'));
+  await page.mouse.move(0, 0);
+  await concludedTip.waitFor({ state: 'hidden' });
+
+  await concluded.focus();
+  await concludedTip.waitFor({ state: 'visible' });
+  assert.ok((await concludedTip.innerText()).includes('Duración: 2000 ms'));
+  await concluded.blur();
+
+  const openInterval = page.locator('[data-kind="interval-open"]').first();
+  await openInterval.hover();
+  await concludedTip.waitFor({ state: 'visible' });
+  const openText = await concludedTip.innerText();
+  assert.ok(openText.includes('Fin: no observado'));
+  assert.ok(openText.includes('Duración: abierto / sin cierre observado'));
+  await page.mouse.move(0, 0);
+
+  const wait = page.locator('[data-kind="wait"]').first();
+  await wait.hover();
+  await concludedTip.waitFor({ state: 'visible' });
+  const waitText = await concludedTip.innerText();
+  assert.ok(waitText.includes('Espera externa · permiso'));
+  assert.ok(waitText.includes('Estado: no esperando o desconocido'));
+  assert.ok(waitText.includes('Duración: 2000 ms'));
+  assert.ok(waitText.includes('Evidencia: cap-t · fila 12 · evento evt-12 (permission.asked) | cap-t · fila 13 · evento evt-13 (permission.replied)'));
+  await page.mouse.move(0, 0);
+
+  const openWait = page.locator('[data-kind="wait-open"]').first();
+  await openWait.hover();
+  await concludedTip.waitFor({ state: 'visible' });
+  const openWaitText = await concludedTip.innerText();
+  assert.ok(openWaitText.includes('Espera externa · pregunta'));
+  assert.ok(openWaitText.includes('Estado: esperando decisión externa'));
+  assert.ok(openWaitText.includes('Duración: abierto / sin cierre observado'));
+  await page.mouse.move(0, 0);
+
+  const bodyText = await page.evaluate(() => document.body.innerText);
+  assert.equal((bodyText.match(/orden causal global/g) ?? []).length, 1);
+  assert.equal((bodyText.match(/duración total/g) ?? []).length, 1);
+  assert.equal((bodyText.match(/Duración total/g) ?? []).length, 0);
+  assert.equal((bodyText.match(/Tiempo total/g) ?? []).length, 0);
+
+  const emptyId = 'dddd4444-0404-4404-8404-040404040404';
+  const emptyOverrides = {
+    list: () => jsonResponse({ executions: [
+      execution(traced, { status: 'succeeded', sessionID: sessions.root }),
+      execution(emptyId, { status: 'succeeded', sessionID: 'ses_empty_z' }),
+    ] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: 'ses_empty_z' }) }),
+    trace: (traceId, url) => (url.searchParams.get('session') === null && traceId === emptyId
+      ? jsonResponse({ ...fullTrace(traceId), selectedSessionID: 'ses_empty_z',
+        rootSessionID: 'ses_empty_z', timeline: { intervals: [], waits: [] },
+        tree: { nodes: [traceNode('ses_empty_z', { isViewRoot: true, relation: 'view-root' })], sessionIDs: ['ses_empty_z'] } })
+      : traceNegotiator(traceId)(traceId, url)),
+  };
+  const { page: emptyPage } = await openTraceTab(t, emptyOverrides, emptyId);
+  await waitForText(emptyPage, 'Sin intervalos ni esperas observados en el alcance actual de la evidencia.');
+});
+
+test('UI /next: subnavegación de la traza entre sus cuatro dimensiones diagnósticas', { timeout: 120000 }, async t => {
+  const traced = 'eeee5555-0505-4505-8505-050505050505';
+  const page = (await openTraceTab(t, traceExecutionOverrides(traced), traced)).page;
+  const subTabs = ['Árbol y línea temporal', 'Herramientas e intentos', 'Métricas', 'Skills y cobertura'];
+  assert.deepEqual(await page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab').allInnerTexts(), subTabs);
+
+  const subTab = name => page.getByRole('tablist', { name: 'Dimensiones diagnósticas de la traza' })
+    .getByRole('tab', { name });
+  await subTab('Herramientas e intentos').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-tools')?.getAttribute('aria-selected') === 'true');
+  await waitForText(page, 'Alcance activo: toda la ejecución · 5 sesiones conocidas');
+  await subTab('Métricas').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-metrics')?.getAttribute('aria-selected') === 'true');
+  assert.ok((await page.locator('#traza-panel-metrics').innerText()).includes('Alcance activo: toda la ejecución'));
+  await subTab('Skills y cobertura').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-skills-coverage')?.getAttribute('aria-selected') === 'true');
+  await subTab('Árbol y línea temporal').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-tree')?.getAttribute('aria-selected') === 'true');
+  await page.getByRole('tree').waitFor();
+
+  await page.locator('[data-select-session="ses_child_a"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_a'));
+  await subTab('Métricas').click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-metrics')?.getAttribute('aria-selected') === 'true');
+  await waitForText(page, 'Alcance activo: subejecución ses_child_a');
+});
+
+test('UI /next: alcance sincronizado con Entregables y reinicio desde su barra', { timeout: 120000 }, async t => {
+  const traced = 'ffff6666-0606-4606-8606-060606060606';
+  const page = (await openTraceTab(t, traceExecutionOverrides(traced), traced)).page;
+  await page.locator('[data-select-session="ses_child_a"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_a'));
+
+  await page.getByRole('tab', { name: 'Entregables' }).click();
+  await page.waitForFunction(value => location.hash === value,
+    `#/executions/${traced}/deliverables?session=ses_child_a`);
+  const scope = page.getByRole('region', { name: 'Alcance de los entregables' });
+  await scope.waitFor();
+  const scopeText = await scope.innerText();
+  assert.ok(scopeText.includes('Alcance: subejecución'));
+  assert.ok(scopeText.includes('ses_child_a'));
+  assert.ok(scopeText.includes('Los entregables conservados en la captura se mostrarán en una vista dedicada'));
+
+  await page.getByRole('button', { name: 'Ver toda la ejecución' }).click();
+  await page.waitForFunction(value => location.hash === value, `#/executions/${traced}/deliverables`);
+  await waitForText(page, 'Alcance: toda la ejecución');
+  assert.equal(await page.getByRole('button', { name: 'Ver toda la ejecución' }).count(), 0);
+
+  await page.getByRole('tab', { name: 'Traza' }).click();
+  await page.waitForFunction(value => location.hash === value, `#/executions/${traced}/trace`);
+  await waitForText(page, 'Alcance: toda la ejecución · 5 sesiones conocidas');
+});
+
+test('UI /next: respuestas obsoletas de traza no sobrescriben el alcance activo', { timeout: 120000 }, async t => {
+  const traced = '11117777-0707-4707-8707-070707070707';
+  const overrides = {
+    ...traceExecutionOverrides(traced),
+    trace: async (traceId, url) => {
+      const session = url.searchParams.get('session');
+      if (session === sessions.childA) {
+        await new Promise(resolve => setTimeout(resolve, 750));
+        return jsonResponse({ ...scopedFor(url), executionID: traceId });
+      }
+      return traceNegotiator(traceId)(traceId, url);
+    },
+  };
+  const page = (await openTraceTab(t, overrides, traced)).page;
+  await page.getByRole('tree').waitFor();
+  await page.locator('[data-select-session="ses_child_a"]').click();
+  await page.locator('[data-select-session="ses_child_b"]').click();
+  await page.waitForFunction(() => location.hash.endsWith('/trace?session=ses_child_b'));
+  await waitForText(page, '2600 ms');
+  assert.equal(await page.locator('[data-scope-session="ses_child_b"]').count(), 1);
+  await page.waitForTimeout(1600);
+  await waitForText(page, '2600 ms');
+  assert.equal(await page.locator('[data-scope-session="ses_child_b"]').count(), 1);
+  assert.equal(await page.evaluate(() => location.hash.endsWith('/trace?session=ses_child_b')), true);
+  const bodyText = await page.evaluate(() => document.body.innerText);
+  assert.ok(!bodyText.includes('750 ms'));
+  const timelineText = await page.locator('section[aria-label="Línea temporal"]').innerText();
+  assert.ok(!timelineText.includes('ses_child_a'));
+  assert.ok(timelineText.includes('Subejecución ses_child_b'));
+});
+
+test('UI /next: traza ilegible manejada con honestidad en alcance, árbol y línea temporal', { timeout: 120000 }, async t => {
+  const traced = '22228888-0808-4808-8808-080808080808';
+  const overrides = {
+    list: () => jsonResponse({ executions: [execution(traced, { status: 'succeeded', sessionID: 'ses_root_t' })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: 'ses_root_t' }) }),
+    trace: traceId => jsonResponse({ executionID: traceId, rootSessionID: 'ses_root_t',
+      readable: false, reason: 'reader-timeout' }),
+  };
+  const page = (await openTraceTab(t, overrides, traced)).page;
+  await waitForText(page, 'La traza no está consultable (reader-timeout); no se reconstruye contenido no capturado.');
+  await waitForText(page, 'El árbol completo de la ejecución no está consultable (reader-timeout); no se deducen relaciones.');
+  await waitForText(page, 'Alcance: toda la ejecución · sesiones conocidas: no observadas');
+  assert.equal(await page.getByRole('tree').count(), 0);
+  assert.equal(await page.locator('[data-timeline-session]').count(), 0);
+
+  await page.getByRole('tab', { name: 'Métricas' }).click();
+  await page.waitForFunction(() => document.querySelector('#traza-tab-metrics')?.getAttribute('aria-selected') === 'true');
+  await waitForText(page, 'Alcance activo: toda la ejecución');
 });

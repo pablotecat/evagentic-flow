@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { PendingInteraction, StopResponseBody } from '../api/types';
 import { api, isApiFailure } from '../api/client';
 import { useExecutionDetail } from '../hooks/useExecutionDetail';
+import { useTrace } from '../hooks/useTrace';
 import { InteractionStateProvider } from '../hooks/useInteractionState';
 import { EXECUTION_TABS, navigate, type ExecutionTab } from '../router/hash';
 import { noticeClass } from '../lib/ui';
@@ -9,6 +10,9 @@ import { STOP_ERRORS } from '../lib/labels';
 import { ExecutionHeader } from './ExecutionHeader';
 import { PriorityBanner } from './PriorityBanner';
 import { ConversationTab, type FocusRequest } from './ConversationTab';
+import { DeliverablesTab } from './DeliverablesTab';
+import { TraceTab, type TraceDimension } from './TraceTab';
+import { TraceScopeBar } from './TraceScopeBar';
 
 const TAB_LABELS: Record<ExecutionTab, string> = {
   conversation: 'Conversación',
@@ -17,12 +21,7 @@ const TAB_LABELS: Record<ExecutionTab, string> = {
   evaluation: 'Evaluación',
 };
 
-const TAB_PLACEHOLDERS: Record<ExecutionTab, string> = {
-  conversation: 'Sin contenido observado todavía en la captura.',
-  deliverables: 'Los entregables conservados en la captura se mostrarán en una vista dedicada.',
-  trace: 'La traza y el diagnóstico técnico se mostrarán en una vista dedicada.',
-  evaluation: 'Sin evaluación en este corte: el desenlace técnico no equivale a una aceptación.',
-};
+const EVALUATION_PLACEHOLDER = 'Sin evaluación en este corte: el desenlace técnico no equivale a una aceptación.';
 
 type Props = {
   id: string;
@@ -33,10 +32,12 @@ type Props = {
 
 export function ExecutionView({ id, tab, session, engineReachable }: Props) {
   const { detail, missing, reload } = useExecutionDetail(id);
+  const trace = useTrace(id, session, { enabled: tab === 'trace' });
   const [stopping, setStopping] = useState(false);
   const [stopRequest, setStopRequest] = useState<StopResponseBody | null>(null);
   const [stopError, setStopError] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
+  const [traceDimension, setTraceDimension] = useState<TraceDimension>('tree');
   if (missing && detail === null) {
     return (
       <section aria-label={`Ejecución ${id}`} className="pt-10 lg:pt-20">
@@ -56,6 +57,10 @@ export function ExecutionView({ id, tab, session, engineReachable }: Props) {
   const execution = detail.execution;
   const selectTab = (next: ExecutionTab) =>
     navigate({ view: 'execution', id, tab: next, session });
+  const selectSession = (next: string | null) => {
+    if (next === session) return;
+    navigate({ view: 'execution', id, tab, session: next });
+  };
   const requestStop = async () => {
     if (stopping) return;
     setStopping(true);
@@ -95,6 +100,14 @@ export function ExecutionView({ id, tab, session, engineReachable }: Props) {
             stopError={stopError}
             onJump={jumpToRequest}
           />
+          {tab === 'trace' && (
+            <TraceScopeBar
+              session={session}
+              rootSessionID={execution.sessionID}
+              knownSessions={trace.rootTree?.sessionIDs ?? null}
+              onSelectSession={selectSession}
+            />
+          )}
         </div>
         <div role="tablist" aria-label="Secciones de la ejecución" className="mt-4 flex gap-1 border-b border-slate-200 dark:border-slate-700">
           {EXECUTION_TABS.map(candidate => {
@@ -125,7 +138,24 @@ export function ExecutionView({ id, tab, session, engineReachable }: Props) {
         >
           {tab === 'conversation'
             ? <ConversationTab detail={detail} focusRequest={focusRequest} />
-            : <p className={noticeClass}>{TAB_PLACEHOLDERS[tab]}</p>}
+            : tab === 'deliverables'
+              ? <DeliverablesTab
+                session={session}
+                rootSessionID={execution.sessionID}
+                onSelectSession={selectSession}
+              />
+              : tab === 'trace'
+                ? <TraceTab
+                  session={session}
+                  trace={trace.trace}
+                  rootTree={trace.rootTree}
+                  rootReason={trace.rootReason}
+                  rootSessionID={execution.sessionID}
+                  dimension={traceDimension}
+                  onDimensionChange={setTraceDimension}
+                  onSelectSession={selectSession}
+                />
+                : <p className={noticeClass}>{EVALUATION_PLACEHOLDER}</p>}
         </div>
       </InteractionStateProvider>
     </section>
