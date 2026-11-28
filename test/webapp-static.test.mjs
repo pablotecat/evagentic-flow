@@ -48,17 +48,19 @@ const assertBuilt = async () => {
   catch { assert.fail('webapp/dist/index.html does not exist: run npm run build before this test'); }
 };
 
-test('la app sirve la interfaz compilada bajo /next con redirección, MIME exacto y nosniff', async t => {
+test('la app sirve la interfaz compilada en / con MIME exacto y nosniff', async t => {
   await assertBuilt();
   const app = await startStaticApp(t);
-  const redirect = await request(app.port, 'GET', '/next');
-  assert.equal(redirect.status, 301);
-  assert.equal(redirect.headers.location, '/next/');
-  const index = await request(app.port, 'GET', '/next/');
+  const index = await request(app.port, 'GET', '/');
   assert.equal(index.status, 200);
   assert.equal(index.headers['content-type'], 'text/html; charset=utf-8');
   assert.equal(index.headers['x-content-type-options'], 'nosniff');
   assert.match(index.body, /<div id="root">/);
+  const byName = await request(app.port, 'GET', '/index.html');
+  assert.equal(byName.status, 200);
+  assert.equal(byName.headers['content-type'], 'text/html; charset=utf-8');
+  assert.equal(byName.headers['x-content-type-options'], 'nosniff');
+  assert.equal(byName.body, index.body);
   const fixtures = [
     ['app.js', 'text/javascript; charset=utf-8'],
     ['module.mjs', 'text/javascript; charset=utf-8'],
@@ -76,59 +78,76 @@ test('la app sirve la interfaz compilada bajo /next con redirección, MIME exact
     for (const [name] of fixtures) await rm(join(dist, name), { force: true });
   });
   for (const [name, type] of fixtures) {
-    const response = await request(app.port, 'GET', `/next/${name}`);
+    const response = await request(app.port, 'GET', `/${name}`);
     assert.equal(response.status, 200, name);
     assert.equal(response.headers['content-type'], type, name);
     assert.equal(response.headers['x-content-type-options'], 'nosniff', name);
     assert.equal(response.body, 'synthetic-static-fixture', name);
   }
-  const assets = await request(app.port, 'GET', '/next/assets/');
+  await mkdir(join(dist, 'assets'), { recursive: true });
+  await writeFile(join(dist, 'assets', 'compiled.js'), 'synthetic-asset-fixture');
+  t.after(async () => { await rm(join(dist, 'assets', 'compiled.js'), { force: true }); });
+  const asset = await request(app.port, 'GET', '/assets/compiled.js');
+  assert.equal(asset.status, 200);
+  assert.equal(asset.headers['content-type'], 'text/javascript; charset=utf-8');
+  assert.equal(asset.headers['x-content-type-options'], 'nosniff');
+  assert.equal(asset.body, 'synthetic-asset-fixture');
+  const assets = await request(app.port, 'GET', '/assets/');
   assert.equal(assets.status, 404);
 });
 
 test('la app rechaza recorridos fuera del directorio compilado y rutas o métodos desconocidos', async t => {
   await assertBuilt();
   const app = await startStaticApp(t);
-  const traversals = ['/next/../server.mjs', '/next/../../package.json',
-    '/next/%2e%2e/public/app.js', '/next/..%2fserver.mjs', '/next/%2e%2e%2f%2e%2e%2fpackage.json',
-    '/next/%2e%2e%5cserver.mjs', '/next/..%5cserver.mjs', '/next/assets%5c..%5cindex.html',
-    '/next/index.html%5c..', '/next/%00server.mjs', '/next/%ff%fe'];
+  const traversals = ['/../server.mjs', '/../../package.json',
+    '/%2e%2e/server.mjs', '/..%2fserver.mjs', '/%2e%2e%2f%2e%2e%2fpackage.json',
+    '/%2e%2e%5cserver.mjs', '/..%5cserver.mjs', '/assets%5c..%5cindex.html',
+    '/index.html%5c..', '/%00server.mjs', '/%ff%fe', '//server.mjs', '/%2f%2fserver.mjs'];
   for (const path of traversals) {
     const response = await request(app.port, 'GET', path);
     assert.equal(response.status, 404, path);
     assert.ok(!response.body.includes('import'), path);
     assert.ok(!response.body.includes('dependencies'), path);
   }
-  const unknown = await request(app.port, 'GET', '/next/does-not-exist.js');
+  const unknown = await request(app.port, 'GET', '/does-not-exist.js');
   assert.equal(unknown.status, 404);
-  const noExtension = await request(app.port, 'GET', '/next/unknown');
+  const noExtension = await request(app.port, 'GET', '/unknown');
   assert.equal(noExtension.status, 404);
-  const post = await request(app.port, 'POST', '/next/', { 'content-type': 'application/json' });
+  const retired = [
+    ['/app.js', 'the legacy client script is still served'],
+    ['/styles.css', 'the legacy client stylesheet is still served'],
+    ['/next', 'the retired parallel route still answers'],
+    ['/next/', 'the retired parallel route still answers'],
+    ['/next/index.html', 'the retired parallel route still answers'],
+  ];
+  for (const [path, message] of retired) {
+    const response = await request(app.port, 'GET', path);
+    assert.equal(response.status, 404, message);
+  }
+  const legacyGone = await request(app.port, 'GET', '/index.html');
+  assert.ok(legacyGone.body.includes('<div id="root">'), 'the compiled React app root disappeared from /index.html');
+  assert.ok(!legacyGone.body.includes('/styles.css'), 'the legacy stylesheet reference appeared in /index.html');
+  const post = await request(app.port, 'POST', '/', { 'content-type': 'application/json' });
   assert.equal(post.status, 405);
-  const put = await request(app.port, 'PUT', '/next/app.js');
+  const put = await request(app.port, 'PUT', '/app.js');
   assert.equal(put.status, 405);
+  const apiUntouched = await request(app.port, 'GET', '/api/health');
+  assert.equal(apiUntouched.status, 200);
 });
 
-test('el guard de Host y Origin también protege /next y el cliente legado sigue intacto', async t => {
+test('el guard de Host y Origin también protege la interfaz compilada', async t => {
   await assertBuilt();
   const app = await startStaticApp(t);
-  const foreignOrigin = await request(app.port, 'GET', '/next/', { origin: 'http://evil.example' });
+  const foreignOrigin = await request(app.port, 'GET', '/', { origin: 'http://evil.example' });
   assert.equal(foreignOrigin.status, 403);
   assert.equal(JSON.parse(foreignOrigin.body).error, 'origin-not-allowed');
-  const foreignHost = await request(app.port, 'GET', '/next/', { host: 'evil.example:8080' });
+  const foreignHost = await request(app.port, 'GET', '/', { host: 'evil.example:8080' });
   assert.equal(foreignHost.status, 403);
-  const legacy = await request(app.port, 'GET', '/');
-  assert.equal(legacy.status, 200);
-  assert.equal(legacy.headers['content-type'], 'text/html; charset=utf-8');
-  assert.match(legacy.body, /Flujo en Proyecto/);
-  const legacyScript = await request(app.port, 'GET', '/app.js');
-  assert.equal(legacyScript.status, 200);
-  assert.equal(legacyScript.headers['content-type'], 'text/javascript; charset=utf-8');
-  const foreignLegacy = await request(app.port, 'GET', '/', { origin: 'http://evil.example' });
-  assert.equal(foreignLegacy.status, 403);
+  const foreignAsset = await request(app.port, 'GET', '/assets/missing.js', { origin: 'http://evil.example' });
+  assert.equal(foreignAsset.status, 403);
 });
 
-test('el servido estático /next rechaza enlaces simbólicos que escapen de webapp/dist', async t => {
+test('el servido estático rechaza enlaces simbólicos que escapen de webapp/dist', async t => {
   await assertBuilt();
   const app = await startStaticApp(t);
   const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
@@ -141,7 +160,7 @@ test('el servido estático /next rechaza enlaces simbólicos que escapen de weba
     await rm(linkDir, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   });
-  const escaped = await request(app.port, 'GET', '/next/__test-escape-link/secret.js');
+  const escaped = await request(app.port, 'GET', '/__test-escape-link/secret.js');
   assert.equal(escaped.status, 404);
   assert.ok(!escaped.body.includes('synthetic-escaped-secret'));
 });

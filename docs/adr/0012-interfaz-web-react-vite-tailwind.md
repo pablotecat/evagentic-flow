@@ -4,7 +4,9 @@ Reabre una única decisión del
 [ADR 0010](0010-webapp-local-ejecucion-simple.md): la restricción de interfaz
 sin framework. El resto queda intacto y reafirmado. Implementa el primer corte
 vertical de [#37](https://github.com/pablotecat/evagentic-flow/issues/37)
-([#42](https://github.com/pablotecat/evagentic-flow/issues/42)).
+([#42](https://github.com/pablotecat/evagentic-flow/issues/42)) y su fase de
+contracción
+([#41](https://github.com/pablotecat/evagentic-flow/issues/41)).
 
 ## Decisiones
 
@@ -19,21 +21,22 @@ vertical de [#37](https://github.com/pablotecat/evagentic-flow/issues/37)
   [ADR 0008](0008-lector-independiente-y-semantica-de-evidencia.md) con su
   semántica conservadora (nada se rellena, toda ausencia es desconocida y
   nunca cero, el desenlace técnico no es aceptación).
-- **Servido en paralelo bajo `/next`.** El servidor publica la interfaz
-  compilada en `/next/` (redirección de `/next` a `/next/`), con normalización
-  estricta de ruta decodificada frente a recorridos (`..`, `%2e%2e`, barras
-  invertidas, byte nulo y codificaciones inválidas rechazados con `404`),
-  contención comprobada contra el directorio de salida, MIME exacto por
-  extensión, `X-Content-Type-Options: nosniff` y el mismo guard de
-  `Host`/`Origin` que el resto de la app. El cliente actual de
-  `webapp/public/` sigue servido en `/` sin cambios. Ningún endpoint
-  `/api/*`, esquema, código de estado, candado, reconciliación o regla de
-  persistencia del índice se modifica.
-- **Salida compilada fuera de Git, build y desarollo integrados.** El cliente
+- **Servido por defecto en `/` y retiro del cliente legado.** El servidor publica la
+  interfaz compilada en `/` (y en `/index.html`), con normalización estricta de ruta
+  decodificada frente a recorridos (`..`, `%2e%2e`, `%5c`, barras invertidas,
+  byte nulo y codificaciones inválidas rechazados con `404`), contención comprobada
+  contra el directorio de salida con `realpath`, MIME exacto por extensión,
+  `X-Content-Type-Options: nosniff`, `405` para métodos distintos de GET y el mismo
+  guard de `Host`/`Origin` que el resto de la app. El prefijo paralelo temporal
+  `/next` y el cliente legado de `webapp/public/` quedaron retirados: `/next`,
+  `/next/`, `/app.js` y `/styles.css` devuelven `404` y el directorio legado se
+  eliminó. Ningún endpoint `/api/*`, esquema, código de estado, candado,
+  reconciliación o regla de persistencia del índice se modifica.
+- **Salida compilada fuera de Git, build y desarrollo integrados.** El cliente
   vive en `webapp/client/` con su propia configuración TypeScript, se compila a
   `webapp/dist/` (ignorado por Git y, por tanto, ajeno al lint de comentarios
   por diseño del inventario) con `base: './'` para que los recursos resuelvan
-  bajo `/next/` y, más adelante, en `/`. El comando `build` del repositorio
+  directamente bajo `/`. El comando `build` del repositorio
   compila también la interfaz; `typecheck` comprueba `src/` y el cliente;
   `dev:webapp` ejecuta Vite con un proxy HTTP de `/api/*` hacia el servidor
   local (puerto `WEBAPP_PORT` 4173 por defecto o destino `WEBAPP_TARGET`).
@@ -70,13 +73,13 @@ vertical de [#37](https://github.com/pablotecat/evagentic-flow/issues/37)
 
 ## Frontera de pruebas
 
-- `test/webapp-static.test.mjs`: servido paralelo seguro de la interfaz
-  compilada — redirección de `/next`, MIME exacto por extensión, `nosniff`,
-  rechazo de recorridos y rutas desconocidas con `404`, métodos distintos de
-  GET con `405`, guard de `Host`/`Origin` sobre `/next/` y cliente legado
-  intacto en `/`.
-- `test/webapp-ui-next.test.mjs`: navegador Playwright real contra la interfaz
-  compilada servida por HTTP real, interceptando únicamente `/api/*` con
+- `test/webapp-static.test.mjs`: servido seguro de la interfaz compilada en `/` —
+  index HTML con React, MIME exacto por extensión, `nosniff`, rechazo de
+  recorridos y rutas desconocidas o retiradas (`/app.js`, `/next`, `/next/`)
+  con `404`, métodos distintos de GET con `405`, guard de `Host`/`Origin` y
+  enlaces simbólicos que no pueden escapar de `webapp/dist`.
+- `test/browser-ui.test.mjs`: navegador Playwright real contra la interfaz
+  compilada servida por HTTP real en `/`, interceptando únicamente `/api/*` con
   `page.route`. Cubre navegación por barra lateral y cajón adaptable,
   conmutación y persistencia de tema, salud compacta y expandible (sana,
   revisión del índice, fallo del registrador, desconexión local), histórico en
@@ -84,23 +87,39 @@ vertical de [#37](https://github.com/pablotecat/evagentic-flow/issues/37)
   compositor (estados de catálogo, recarga manual, envío por `Ctrl+Enter`,
   carga con comando y sin él, conservación de la clave de solicitud al
   reintentar con rotación tras un encargo nuevo o una creación, y avisos
-  `422`/`503`/`409` con enlace a la ejecución activa) y persistencia del
-  enrutado por hash con subejecución y navegación atrás/adelante.
-- Las fronteras existentes —`test/webapp.test.mjs`, `test/browser.test.mjs`,
-  `test/browser-ui.test.mjs`— siguen en verde sin cambios: los contratos
-  `/api/*` no se tocan y el cliente legado se sigue sirviendo.
+  `422`/`503`/`409` con enlace a la ejecución activa), cabecera de ejecución con
+  detención y metadatos forenses copiables, banda prioritaria, conversación en
+  Markdown seguro con conmutador a texto plano, preguntas y permisos nativos con
+  borradores aislados y respuestas registradas, sondeo no destructivo,
+  protección contra respuestas obsoletas, las cuatro dimensiones de la traza
+  (árbol, línea temporal, herramientas, métricas y skills y cobertura),
+  entregables con procedencia plegada, evaluaciones agrupadas con
+  reevaluaciones y contradicciones, y vista dedicada de rúbricas con
+  maestro-detalle y anomalías. Sin inyección de scripts ni acceso a estado
+  interno: sólo la frontera pública `/api/*`.
+- `test/browser.test.mjs`: la suite E2E completa contra la instancia real de
+  OpenCode 2.1.2 aislada, el registrador real y el proveedor HTTP sintético,
+  operando sobre la nueva interfaz en `/` (barra lateral, compositor, cabecera
+  de ejecución, banda prioritaria, las cuatro pestañas y la vista dedicada de
+  rúbricas) y conservando todas las garantías previas: disponibilidad, envío
+  único idempotente, carrera simultánea, recarga sin relanzar, exclusión entre
+  pestañas, reinicio del servidor, caída del motor, intervenciones humanas de
+  raíz y subejecución, pérdida HTTP en intervención, detención confirmada y no
+  confirmada, fallo del registrador con bloqueo durable, exploración de árbol y
+  traza, entregables con modificación y borrado del archivo original y consulta
+  sin motor, y vistas de evaluación y rúbricas sin despachar trabajo adicional.
+- Las fronteras existentes —`test/webapp.test.mjs`, `test/comments.test.mjs` y
+  el resto de suites del registrador— siguen en verde sin cambios: los
+  contratos `/api/*` no se tocan.
 
 ## Límites
 
-- Este corte no puebla las pestañas de la vista de ejecución ni la vista de
-  rúbricas: sólo el armazón con identidad y estado básicos. Conversación,
-  entregables, traza, evaluación y rúbricas llegan en cortes posteriores
-  (#39, #40, #44, #38, #43).
+- Las pestañas de la vista de ejecución y la vista de rúbricas llegaron en cortes
+  posteriores (#39, #40, #44, #38, #43); la fase de contracción (#41) las activó
+  por defecto en `/` y retiró el cliente legado, el prefijo `/next` y la suite de
+  pruebas puras ligada a variables globales del cliente anterior.
 - El enlace de tema se persiste en el navegador (`localStorage`), como el
   resto de preferencias locales de la app; no añade estado en el servidor.
 - `dev:webapp` delega `/api/*` al servidor local real mediante proxy HTTP de
   Vite; las credenciales y la configuración de producción siguen residiendo
   sólo en la configuración local no versionada.
-- El servido bajo `/next` es deliberadamente fase de transición hacia la
-  interfaz única de #41; retirar el cliente legado de `webapp/public/` y el
-  prefijo `/next` exige actualizar las pruebas que hoy dependen de `/`.

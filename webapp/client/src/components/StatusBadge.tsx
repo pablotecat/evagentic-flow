@@ -11,7 +11,7 @@ const STATUS_CLASSES: Record<ExecutionStatus, string> = {
 
 export function StatusBadge({ status }: { status: ExecutionStatus }) {
   return (
-    <span className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${STATUS_CLASSES[status]}`}>
+    <span data-execution-status={status} className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${STATUS_CLASSES[status]}`}>
       {STATUS_LABELS[status] ?? status}
     </span>
   );

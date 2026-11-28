@@ -11,12 +11,7 @@ import { createEvaluationReader } from './evaluation.mjs';
 
 const TERMINAL_PHASES = ['succeeded', 'failed', 'interrupted'];
 const CONFIG_KEYS = ['version', 'opencodeURL', 'opencodePassword', 'projectDirectory', 'captureDirectory', 'dataDirectory'];
-const STATIC = new Map([
-  ['/', ['index.html', 'text/html; charset=utf-8']],
-  ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
-  ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
-]);
-const NEXT_MIME = new Map([
+const STATIC_MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
   ['.mjs', 'text/javascript; charset=utf-8'],
@@ -413,22 +408,22 @@ export async function startApp({ configPath, port: requestedPort, evaluationFixt
     return origin === undefined || origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
   };
 
-  const servesNext = rawPath => rawPath === '/next' || rawPath.startsWith('/next/');
+  const servesStatic = rawPath => rawPath !== '/api' && !rawPath.startsWith('/api/');
 
-  const serveNext = async (response, rawPath) => {
+  const serveStatic = async (response, rawPath) => {
     const notFound = () => json(response, 404, { error: 'not-found' });
     let decoded;
     try { decoded = decodeURIComponent(rawPath); }
     catch { return notFound(); }
     if (decoded.includes('\0') || decoded.includes('\\')) return notFound();
-    const subpath = decoded.slice('/next/'.length);
+    const subpath = decoded.slice(1);
     const segments = subpath.split('/');
     if (subpath !== '' && segments.some(segment => segment === '' || segment === '.' || segment === '..')) {
       return notFound();
     }
     const resolved = subpath === '' ? join(distRoot, 'index.html') : resolve(distRoot, subpath);
     if (resolved !== distRoot && !resolved.startsWith(distRoot + sep)) return notFound();
-    const type = NEXT_MIME.get(extname(resolved));
+    const type = STATIC_MIME.get(extname(resolved));
     if (!type) return notFound();
     try {
       const [realDistRoot, realTarget] = await Promise.all([realpath(distRoot), realpath(resolved)]);
@@ -446,20 +441,9 @@ export async function startApp({ configPath, port: requestedPort, evaluationFixt
     const url = new URL(request.url, `http://127.0.0.1:${port}`);
     if (!allowed(request)) return json(response, 403, { error: 'origin-not-allowed' });
     const rawPath = request.url.split('?')[0];
-    if (servesNext(rawPath)) {
+    if (servesStatic(rawPath)) {
       if (request.method !== 'GET') return json(response, 405, { error: 'method-not-allowed' });
-      if (rawPath === '/next') {
-        response.writeHead(301, { location: '/next/' });
-        response.end();
-        return;
-      }
-      return serveNext(response, rawPath);
-    }
-    if (request.method === 'GET' && STATIC.has(url.pathname)) {
-      const [file, type] = STATIC.get(url.pathname);
-      response.writeHead(200, { 'content-type': type, 'x-content-type-options': 'nosniff' });
-      response.end(await readFile(join(root, 'public', file)));
-      return;
+      return serveStatic(response, rawPath);
     }
     if (url.pathname === '/api/health' && request.method === 'GET') {
       const read = await readRows(config.captureDirectory, null).catch(error => ({ ok: false, reason: error.message }));
