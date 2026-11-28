@@ -1,4 +1,4 @@
-# Interfaz web cliente en React con Vite, Tailwind CSS y servido paralelo seguro
+# Interfaz web cliente en React con Vite y Tailwind CSS
 
 Reabre una única decisión del
 [ADR 0010](0010-webapp-local-ejecucion-simple.md): la restricción de interfaz

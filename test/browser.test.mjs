@@ -27,9 +27,10 @@ const awaitHealth = (page, fragment, timeout = 60000) =>
   page.waitForFunction(value => document.querySelector('aside')?.textContent?.includes(value) ?? false,
     fragment, { timeout });
 
-const awaitMainAlert = (page, fragment, timeout = 60000) =>
-  page.waitForFunction(value => [...document.querySelectorAll('main [role="alert"]')]
-    .some(alert => alert.textContent?.includes(value) ?? false), fragment, { timeout });
+const awaitMainAlert = (page, fragment, { present = true, timeout = 60000 } = {}) =>
+  page.waitForFunction(({ value, expected }) => [...document.querySelectorAll('main [role="alert"]')]
+    .some(alert => alert.textContent?.includes(value) ?? false) === expected,
+  { value: fragment, expected: present }, { timeout });
 
 const assertCapturePreparedWhileEngineDown = async page => {
   await awaitHealth(page, 'Motor no disponible');
@@ -328,9 +329,7 @@ test('la caída del motor se muestra como pendiente de comprobar y reconectar no
   await instance.stop();
   await assertCapturePreparedWhileEngineDown(page);
   await awaitStatus(page, 'En ejecución');
-  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')]
-    .some(alert => alert.textContent?.includes('desenlace pendiente de comprobar')),
-  undefined, { timeout: 60000 });
+  await awaitMainAlert(page, 'desenlace pendiente de comprobar');
   const offlinePanel = await conversationPanel(page).innerText();
   assert.ok(offlinePanel.includes('Encargo largo desconectado.'));
   assert.ok(offlinePanel.includes('Sin respuesta observada todavía'));
@@ -354,18 +353,14 @@ test('la caída del motor se muestra como pendiente de comprobar y reconectar no
   await awaitHealth(page, 'Motor no disponible');
   await openHistoryItem(page, 0);
   await awaitStatus(page, 'En ejecución');
-  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')]
-    .some(alert => alert.textContent?.includes('desenlace pendiente de comprobar')),
-  undefined, { timeout: 60000 });
+  await awaitMainAlert(page, 'desenlace pendiente de comprobar');
   assert.equal(await hashCapture(instance.captureDirectory), digest,
     'reloading without an engine altered the original capture bytes');
 
   await instance.restart();
   await awaitHealth(page, 'Motor disponible');
   await awaitStatus(page, 'En ejecución');
-  await page.waitForFunction(() => ![...document.querySelectorAll('[role="alert"]')]
-    .some(alert => alert.textContent?.includes('desenlace pendiente de comprobar')),
-  undefined, { timeout: 60000 });
+  await awaitMainAlert(page, 'desenlace pendiente de comprobar', { present: false });
   assert.equal(await admittedCount(instance), 1, 'a reconnection re-sent the assignment');
   assert.equal(await hashCapture(instance.captureDirectory), digest,
     'reconnecting altered the original capture bytes');
@@ -555,9 +550,7 @@ test('la detención con el motor caído se muestra no confirmada y recargar no c
   assert.ok(unconfirmed.includes('Solicitud: fallo de la solicitud'));
   assert.ok(!unconfirmed.includes('Detención: confirmada'),
     'an engine failure was displayed as a confirmed stop');
-  await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')]
-    .some(alert => alert.textContent?.includes('desenlace pendiente de comprobar')),
-  undefined, { timeout: 60000 });
+  await awaitMainAlert(page, 'desenlace pendiente de comprobar');
   assert.equal((await appFetch(app, `/api/executions/${executionId}`)).body.execution.status, 'running',
     'a failed stop request released the execution');
   assert.equal(await admittedCount(instance), 1, 'a failed stop dispatched work again');
@@ -715,9 +708,7 @@ test('el navegador responde preguntas y permisos nativos y reconstruye las pendi
       await route.abort('failed');
     }, { times: 1 });
     await page.locator('[data-kind="permission"] button[data-decision="once"]').click();
-    await page.waitForFunction(() => [...document.querySelectorAll('[role="alert"]')]
-      .some(alert => alert.textContent?.includes('Respuesta posiblemente enviada')),
-    undefined, { timeout: 60000 });
+    await awaitMainAlert(page, 'Respuesta posiblemente enviada');
     assert.ok(!(await page.getByRole('alert').allTextContents()).join(' ').includes('no se ha concedido'));
     await page.waitForFunction(() => !document.querySelector('[data-kind="permission"]'),
       undefined, { timeout: 60000 });
@@ -1131,20 +1122,23 @@ test('las vistas de rúbricas y evaluaciones muestran ausencia real sin despacha
     await awaitStatus(page, 'Finalizada', 300000);
 
     await selectTab(page, 'Evaluación');
+    await page.locator('#panel-evaluation').waitFor({ state: 'visible' });
     const evaluation = await page.locator('#panel-evaluation').innerText();
     assert.ok(evaluation.includes('Sin evaluación'),
       'a succeeded execution with no results showed something else than an explicit absence');
     assert.ok(evaluation.includes('no equivale a una aceptación'));
     assert.ok(evaluation.includes('no se generan puntuaciones, versiones ni aceptaciones de ejemplo'));
     assert.ok(!evaluation.includes('Puntuación'));
+    assert.equal(await page.locator('#panel-evaluation').isVisible(), true,
+      'the absent evaluation panel was not visible before checking read-only actions');
+    assert.equal(await page.locator('#panel-evaluation button').count(), 0,
+      'the absent evaluation view offered actions');
     await page.getByRole('link', { name: 'Rúbricas' }).click();
     await page.locator('[data-rubrics-view]').waitFor();
     const rubrics = await page.locator('[data-rubrics-view]').innerText();
     assert.ok(rubrics.includes('Sin rúbricas versionadas'));
     assert.ok(rubrics.includes('no es una rúbrica aprobada'));
     assert.ok(rubrics.includes('agente juez'), 'the absent judge was not explained as later work');
-    assert.equal(await page.locator('#panel-evaluation button').count(), 0,
-      'the absent evaluation view offered actions');
     assert.equal(await page.locator('main [data-rubrics-view] button').count(), 0,
       'the absent rubrics view offered evaluation or editing actions');
 

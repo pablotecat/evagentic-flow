@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -410,7 +410,7 @@ export async function startApp({ configPath, port: requestedPort, evaluationFixt
 
   const servesStatic = rawPath => rawPath !== '/api' && !rawPath.startsWith('/api/');
 
-  const serveStatic = async (response, rawPath) => {
+  const serveStatic = async (request, response, rawPath) => {
     const notFound = () => json(response, 404, { error: 'not-found' });
     let decoded;
     try { decoded = decodeURIComponent(rawPath); }
@@ -429,6 +429,9 @@ export async function startApp({ configPath, port: requestedPort, evaluationFixt
       const [realDistRoot, realTarget] = await Promise.all([realpath(distRoot), realpath(resolved)]);
       const rel = relative(realDistRoot, realTarget);
       if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return notFound();
+      const info = await stat(realTarget);
+      if (!info.isFile()) return notFound();
+      if (request.method !== 'GET') return json(response, 405, { error: 'method-not-allowed' });
       const content = await readFile(realTarget);
       response.writeHead(200, { 'content-type': type, 'x-content-type-options': 'nosniff' });
       response.end(content);
@@ -442,8 +445,7 @@ export async function startApp({ configPath, port: requestedPort, evaluationFixt
     if (!allowed(request)) return json(response, 403, { error: 'origin-not-allowed' });
     const rawPath = request.url.split('?')[0];
     if (servesStatic(rawPath)) {
-      if (request.method !== 'GET') return json(response, 405, { error: 'method-not-allowed' });
-      return serveStatic(response, rawPath);
+      return serveStatic(request, response, rawPath);
     }
     if (url.pathname === '/api/health' && request.method === 'GET') {
       const read = await readRows(config.captureDirectory, null).catch(error => ({ ok: false, reason: error.message }));

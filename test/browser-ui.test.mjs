@@ -68,7 +68,7 @@ async function startUiApp(t) {
   catch { assert.fail('webapp/dist/index.html does not exist: run npm run build before this test'); }
   const temporary = process.env.OPENCODE_TEST_TMP ?? (process.platform === 'win32'
     ? join(process.env.LOCALAPPDATA, 'Temp/opencode') : tmpdir());
-  const root = await mkdtemp(join(temporary, 'webapp-ui-next-'));
+  const root = await mkdtemp(join(temporary, 'browser-ui-'));
   const directories = ['project', 'capture', 'data'].map(name => join(root, name));
   await Promise.all(directories.map(directory => mkdir(directory, { recursive: true })));
   const configPath = join(root, 'app.local.json');
