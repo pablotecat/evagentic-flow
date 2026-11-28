@@ -4,6 +4,10 @@ export const linkClass = (active: boolean) => `flex-1 rounded-lg px-3 py-1.5 tex
 
 export const chipClass = 'inline-block rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-700 dark:bg-slate-800 dark:text-slate-300';
 
+export const badgeClass = 'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset';
+
+export const mandatoryBadgeClass = 'inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-900 dark:bg-amber-950 dark:text-amber-200';
+
 export const noticeClass = 'text-xs leading-relaxed text-slate-500 dark:text-slate-400';
 
 export const alertClass = 'rounded-xl border border-red-300 bg-red-50 p-3 text-sm leading-relaxed text-red-800 dark:border-red-800 dark:bg-red-950/60 dark:text-red-200';

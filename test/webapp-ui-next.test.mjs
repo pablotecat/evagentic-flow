@@ -3302,11 +3302,14 @@ test('UI /next: evaluaciones agrupadas con reevaluaciones, contradicciones, cobe
   await page.locator('[data-evaluation="eval-a"]').waitFor();
 
   assert.equal(await page.locator('[data-evaluation]').count(), 6);
-  assert.equal(await page.locator('[data-evaluation-group]').count(), 4);
+  assert.equal(await page.locator('[data-evaluation-group]').count(), 5);
   assert.equal(await page.locator('[data-evaluation-group="eval-a"] [data-evaluation="eval-a"]').count(), 1);
   assert.equal(await page.locator('[data-evaluation-group="eval-a"] [data-evaluation="eval-b"]').count(), 1);
-  assert.equal(await page.locator('[data-evaluation-group="eval-a"] [data-evaluation="eval-c"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-a"] [data-evaluation="eval-c"]').count(), 0);
+  assert.equal(await page.locator('[data-evaluation-group="eval-c"] [data-evaluation="eval-c"]').count(), 1);
   assert.equal(await page.locator('[data-evaluation-group="eval-d"] [data-evaluation="eval-d"]').count(), 1);
+  assert.equal(await page.locator('[data-score-bar]').count(), 0);
+  assert.equal(await page.locator('[data-evaluation="eval-a"] [data-coverage-bar]').count(), 1);
   const duplicateAlert = page.locator('[data-anomaly="evaluacion-duplicada"]');
   await duplicateAlert.waitFor();
   assert.equal(await duplicateAlert.getAttribute('role'), 'alert');
@@ -3346,16 +3349,27 @@ test('UI /next: evaluaciones agrupadas con reevaluaciones, contradicciones, cobe
   const textC = await cardC.innerText();
   assert.equal(await cardC.locator('[data-contradiction]').count(), 1);
   assert.equal(await cardC.locator('[data-contradiction]').getAttribute('role'), 'alert');
+  const acceptanceBadgeC = cardC.locator('[data-acceptance="contradiction"]');
+  assert.equal(await acceptanceBadgeC.count(), 1);
+  const badgeClassC = await acceptanceBadgeC.getAttribute('class') ?? '';
+  assert.ok(!badgeClassC.includes('emerald'));
+  assert.ok(badgeClassC.includes('rose'));
   assert.ok(textC.includes('Decisión pendiente por falta de evidencia obligatoria'));
   assert.ok(textC.includes('Aceptación: aceptada'));
   assert.ok(textC.includes('Puntuación sin base declarada como criterios evaluados: 0.9'));
   assert.ok(textC.includes('base: otra-base'));
+  assert.equal(await cardC.locator('[data-coverage-coherence="incoherent"]').getAttribute('role'), 'alert');
+  assert.equal(await cardC.locator('[data-reevaluation="different-capture"]').getAttribute('role'), 'alert');
   assert.ok(textC.includes('Cobertura incoherente: el peso evaluado declarado no coincide con la suma de pesos de los criterios evaluados.'));
   assert.ok(textC.includes('la captura no coincide'));
   assert.ok(textC.includes('no evaluable: sin evidencia'));
 
   const cardD = page.locator('[data-evaluation="eval-d"]');
   const textD = await cardD.innerText();
+  assert.equal(await cardD.locator('[data-reevaluation="missing-target"]').getAttribute('role'), 'alert');
+  assert.equal(await cardD.locator('[data-rubric-status="read-error"]').count(), 1);
+  assert.ok(textD.includes('Error de lectura de rúbricas'));
+  assert.ok(!textD.includes('Aprobada: versión aprobada'));
   assert.ok(textD.includes('que no existe entre las evaluaciones de esta ejecución'));
   assert.ok(textD.includes('referencia no resoluble'));
   assert.ok(textD.includes('No se pudo leer la vista de rúbricas (boom)'));
@@ -3366,8 +3380,10 @@ test('UI /next: evaluaciones agrupadas con reevaluaciones, contradicciones, cobe
   assert.ok(textE.includes('Aceptación: rechazada'));
   assert.ok(textE.includes('Borrador: no es una versión aprobada'));
   assert.ok(textE.includes('Coherencia de la cobertura no verificada: faltan datos para comprobarla.'));
-  assert.ok(textE.includes('incumplido (puntuación 0)'));
-  assert.ok(textE.includes('cumplido (puntuación 1)'));
+  assert.ok(textE.includes('Evaluado · puntuación 0'));
+  assert.ok(textE.includes('Evaluado · puntuación 1'));
+  assert.ok(!textE.includes('cumplido'));
+  assert.ok(!textE.includes('incumplido'));
   assert.ok(textE.includes('base: no declarada'));
   assert.equal(await cardE.locator('tr[data-criterion="estilo"] td').nth(3).innerText(), 'desconocido');
 
@@ -3555,4 +3571,128 @@ test('UI /next: respuestas obsoletas de evaluación no cruzan ejecuciones', { ti
   const panelText = await page.getByRole('tabpanel').innerText();
   assert.ok(panelText.includes('eval-rapida-b'));
   assert.ok(!panelText.includes('eval-lenta-a'));
+});
+
+test('UI /next: regresiones #50 en puntuaciones sin escala, rúbrica ambigua/duplicada, orden y ciclos de reevaluación', { timeout: 180000 }, async t => {
+  const execId = 'ffffEEEE-9d9d-49d9-89d9-9d9d9d9d9d9d';
+  const regressionEvaluations = {
+    executionID: execId,
+    source: 'synthetic-fixtures',
+    state: 'ready',
+    evaluations: [
+      evaluationRecord(execId, 'eval-re-first', {
+        captureID: 'cap-order',
+        reevaluationOf: 'eval-target-later',
+        reevaluation: 'same-capture',
+        rubric: { rubricID: 'rubrica-ambigua', version: 'v1', status: 'approved', versionAvailable: true,
+          versionAmbiguous: true, readError: null },
+        criteria: [
+          evaluationCriterion('escala-cinco', 'Criterio en escala de cinco', {
+            weight: 2, status: 'evaluated', score: 2, evidence: ['cap-order · fila 1'] }),
+          evaluationCriterion('sin-puntuacion', 'Criterio evaluado sin puntuación', {
+            weight: 1, status: 'evaluated', score: null, evidence: ['cap-order · fila 2'] }),
+        ],
+        score: { value: 2, basis: 'criterios-evaluados' },
+        coverage: { evaluatedWeight: 3, applicableWeight: 4 },
+      }),
+      evaluationRecord(execId, 'eval-target-later', {
+        captureID: 'cap-order',
+        reevaluationOf: null,
+        reevaluation: null,
+      }),
+      evaluationRecord(execId, 'eval-diff-cap', {
+        captureID: 'cap-distinta',
+        reevaluationOf: 'eval-target-later',
+        reevaluation: 'different-capture',
+      }),
+      evaluationRecord(execId, 'eval-cyc-a', {
+        captureID: 'cap-cyc',
+        reevaluationOf: 'eval-cyc-b',
+        reevaluation: 'same-capture',
+      }),
+      evaluationRecord(execId, 'eval-cyc-b', {
+        captureID: 'cap-cyc',
+        reevaluationOf: 'eval-cyc-a',
+        reevaluation: 'same-capture',
+      }),
+      evaluationRecord(execId, 'eval-self', {
+        captureID: 'cap-self',
+        reevaluationOf: 'eval-self',
+        reevaluation: 'same-capture',
+      }),
+    ],
+  };
+  const duplicateRubrics = {
+    source: 'synthetic-fixtures',
+    state: 'ready',
+    rubrics: [
+      { rubricID: 'rubrica-vacia', title: 'Rúbrica sin versiones', versions: [] },
+      {
+        rubricID: 'rubrica-duplicada',
+        title: 'Rúbrica con copias',
+        versions: [
+          { version: 'v1', status: 'approved', observedAt: 1764000000000, criteria: [], content: 'Contenido copia uno.' },
+          { version: 'v1', status: 'draft', observedAt: 1764100000000, criteria: [], content: 'Contenido copia dos.' },
+        ],
+      },
+    ],
+    anomalies: { withoutRubricID: 0, duplicateVersions: [{ rubricID: 'rubrica-duplicada', version: 'v1' }] },
+  };
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(execId, { status: 'succeeded', sessionID: 'ses_root_50' })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: 'ses_root_50' }) }),
+    evaluations: () => jsonResponse(regressionEvaluations),
+    rubrics: () => jsonResponse(duplicateRubrics),
+  });
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(error));
+
+  await page.locator(`[data-id="${execId}"]`).click();
+  await page.getByRole('tab', { name: 'Evaluación' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Evaluación');
+  await page.locator('[data-evaluation="eval-re-first"]').waitFor();
+
+  assert.equal(pageErrors.length, 0);
+  assert.equal(await page.locator('[data-evaluation]').count(), 6);
+  assert.equal(await page.locator('[data-evaluation-group="eval-target-later"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-target-later"] [data-evaluation="eval-re-first"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-target-later"] [data-evaluation="eval-target-later"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-target-later"] [data-evaluation="eval-diff-cap"]').count(), 0);
+  assert.equal(await page.locator('[data-evaluation-group="eval-diff-cap"] [data-evaluation="eval-diff-cap"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-diff-cap"] [data-evaluation-group-count]').count(), 0);
+  assert.equal(await page.locator('[data-evaluation="eval-cyc-a"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation="eval-cyc-b"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation="eval-self"]').count(), 1);
+  assert.equal(await page.locator('[data-score-bar]').count(), 0);
+
+  const firstCard = page.locator('[data-evaluation="eval-re-first"]');
+  const firstText = await firstCard.innerText();
+  assert.ok(firstText.includes('Evaluado · puntuación 2'));
+  assert.ok(firstText.includes('Evaluado · puntuación desconocida'));
+  assert.ok(!firstText.includes('cumplido'));
+  assert.ok(!firstText.includes('incumplido'));
+  const ambiguousBadge = firstCard.locator('[data-rubric-status="ambiguous"]');
+  assert.equal(await ambiguousBadge.count(), 1);
+  assert.ok((await ambiguousBadge.innerText()).includes('Versión duplicada / ambigua'));
+  assert.ok(!((await ambiguousBadge.getAttribute('class')) ?? '').includes('emerald'));
+  assert.ok(!firstText.includes('Aprobada: versión aprobada'));
+  assert.equal(await firstCard.locator('[data-rubric-ambiguous]').getAttribute('role'), 'alert');
+
+  await page.getByRole('link', { name: 'Rúbricas' }).click();
+  await page.locator('[data-rubric-master="rubrica-vacia"] [data-rubric-no-versions]').waitFor();
+  const detailPane = page.locator('[data-rubric-detail="rubrica-duplicada"]');
+  await detailPane.waitFor();
+  assert.equal(await detailPane.getAttribute('data-rubric-detail-occurrence'), '1');
+  assert.ok((await detailPane.innerText()).includes('(copia #1)'));
+  assert.ok((await detailPane.innerText()).includes('Aprobada: versión aprobada explícitamente identificada'));
+  await detailPane.locator('details[data-disclosure="rubric-content"] summary').click();
+  assert.ok((await detailPane.locator('pre').innerText()).includes('Contenido copia uno.'));
+
+  await page.locator('[data-version-select="v1"][data-version-occurrence="2"]').click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-rubric-detail]')?.getAttribute('data-rubric-detail-occurrence') === '2');
+  assert.ok((await detailPane.innerText()).includes('(copia #2)'));
+  assert.ok((await detailPane.innerText()).includes('Borrador: no es una versión aprobada'));
+  assert.ok((await detailPane.locator('pre').innerText()).includes('Contenido copia dos.'));
+  assert.equal(pageErrors.length, 0);
 });

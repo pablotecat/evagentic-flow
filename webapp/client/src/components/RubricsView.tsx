@@ -1,16 +1,48 @@
 import { useMemo, useState } from 'react';
-import type { RubricGroup, RubricVersion } from '../api/types';
+import type { RubricAnomalies, RubricGroup, RubricVersion } from '../api/types';
 import { useRubrics } from '../hooks/useRubrics';
-import { RUBRIC_VERSION_STATUS, versionStatusOf } from '../lib/evaluation';
+import { RUBRIC_STATUS_BADGES, rubricVersionStatus } from '../lib/evaluation';
 import { isoOrUnobserved } from '../lib/trace';
-import { chipClass, noticeClass, alertClass } from '../lib/ui';
+import { alertClass, badgeClass, chipClass, mandatoryBadgeClass, noticeClass } from '../lib/ui';
 import { CopyButton } from './CopyButton';
 import { JsonDisclosure } from './JsonDisclosure';
 
-const badgeClass = 'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset';
+type VersionEntry = {
+  key: string;
+  version: RubricVersion;
+  occurrence: number;
+  duplicated: boolean;
+};
 
-const versionKey = (rubric: RubricGroup, version: RubricVersion): string =>
-  `${rubric.rubricID}\u0000${version.version ?? ''}`;
+type IndexedRubric = {
+  rubric: RubricGroup;
+  entries: VersionEntry[];
+};
+
+const versionEntryKey = (rubricID: string, version: string | null, occurrence: number): string =>
+  `${rubricID}\u0000${version ?? ''}\u0000${occurrence}`;
+
+const indexRubrics = (rubrics: RubricGroup[]): IndexedRubric[] =>
+  rubrics.map(rubric => {
+    const totals = new Map<string, number>();
+    for (const version of rubric.versions) {
+      const token = version.version ?? '';
+      totals.set(token, (totals.get(token) ?? 0) + 1);
+    }
+    const seen = new Map<string, number>();
+    const entries: VersionEntry[] = rubric.versions.map(version => {
+      const token = version.version ?? '';
+      const occurrence = (seen.get(token) ?? 0) + 1;
+      seen.set(token, occurrence);
+      return {
+        key: versionEntryKey(rubric.rubricID, version.version, occurrence),
+        version,
+        occurrence,
+        duplicated: (totals.get(token) ?? 0) > 1,
+      };
+    });
+    return { rubric, entries };
+  });
 
 export function RubricsView() {
   const { body } = useRubrics();
@@ -49,14 +81,13 @@ export function RubricsView() {
             <RubricsMasterDetail rubrics={body.rubrics} />
           </>
         )}
-        {body !== null && body.state === 'ready' ? <RubricAnomalies body={body} /> : null}
+        {body !== null && body.state === 'ready' ? <RubricAnomaliesAlerts anomalies={body.anomalies} /> : null}
       </div>
     </section>
   );
 }
 
-function RubricAnomalies({ body }: { body: { anomalies?: { withoutRubricID: number; duplicateVersions: Array<{ rubricID: string; version: string | null }> } } }) {
-  const anomalies = body.anomalies;
+function RubricAnomaliesAlerts({ anomalies }: { anomalies?: RubricAnomalies }) {
   if (anomalies === undefined) return null;
   return (
     <>
@@ -65,8 +96,8 @@ function RubricAnomalies({ body }: { body: { anomalies?: { withoutRubricID: numb
           {anomalies.withoutRubricID} fila(s) de rúbricas sin identificador no se muestran como rúbrica.
         </p>
       ) : null}
-      {anomalies.duplicateVersions.map(duplicate => (
-        <p key={`${duplicate.rubricID}-${duplicate.version ?? ''}`} role="alert" data-anomaly="version-duplicada" className={alertClass}>
+      {anomalies.duplicateVersions.map((duplicate, index) => (
+        <p key={`${duplicate.rubricID}-${duplicate.version ?? ''}-${index}`} role="alert" data-anomaly="version-duplicada" className={alertClass}>
           Versión duplicada: {duplicate.rubricID} · {duplicate.version ?? 'no identificada'}; su estado no se
           resuelve.
         </p>
@@ -77,76 +108,88 @@ function RubricAnomalies({ body }: { body: { anomalies?: { withoutRubricID: numb
 
 function RubricsMasterDetail({ rubrics }: { rubrics: RubricGroup[] }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const indexed = useMemo(() => indexRubrics(rubrics), [rubrics]);
   const effective = useMemo(() => {
-    for (const rubric of rubrics) {
-      for (const version of rubric.versions) {
-        if (versionKey(rubric, version) === selectedKey) return { rubric, version };
+    for (const item of indexed) {
+      for (const entry of item.entries) {
+        if (entry.key === selectedKey) return { rubric: item.rubric, entry };
       }
     }
-    const first = rubrics[0];
-    const version = first.versions[0];
-    return version === undefined ? null : { rubric: first, version };
-  }, [rubrics, selectedKey]);
+    for (const item of indexed) {
+      if (item.entries.length > 0) return { rubric: item.rubric, entry: item.entries[0] };
+    }
+    return null;
+  }, [indexed, selectedKey]);
   return (
     <div className="grid gap-4 md:grid-cols-[minmax(220px,1fr)_2fr]">
       <nav aria-label="Rúbricas versionadas" className="space-y-3 rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-slate-800 dark:bg-slate-900/70">
-        {rubrics.map(rubric => {
+        {indexed.map(({ rubric, entries }) => {
           const selectedHere = effective !== null && effective.rubric.rubricID === rubric.rubricID;
+          const firstEntry = entries[0];
           return (
             <div key={rubric.rubricID} data-rubric-master={rubric.rubricID} className="space-y-1">
               <button
                 type="button"
                 data-rubric-select={rubric.rubricID}
                 aria-current={selectedHere ? 'true' : undefined}
-                onClick={() => setSelectedKey(versionKey(rubric, rubric.versions[0]))}
-                className={`flex w-full flex-col gap-0.5 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${selectedHere
+                disabled={firstEntry === undefined}
+                onClick={() => { if (firstEntry !== undefined) setSelectedKey(firstEntry.key); }}
+                className={`flex w-full flex-col gap-0.5 rounded-lg border px-2.5 py-1.5 text-left transition-colors disabled:cursor-default disabled:opacity-60 ${selectedHere
                   ? 'border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/50'
                   : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800'}`}
               >
                 <span className="font-mono text-xs break-all text-slate-800 dark:text-slate-100">{rubric.rubricID}</span>
                 <span className={noticeClass}>{rubric.title ?? 'título no disponible'}</span>
               </button>
-              <ul className="space-y-1">
-                {rubric.versions.map((version, index) => {
-                  const active = effective !== null
-                    && effective.rubric.rubricID === rubric.rubricID
-                    && effective.version === version;
-                  const status = versionStatusOf(version);
-                  return (
-                    <li key={`${version.version ?? ''}-${index}`}>
-                      <button
-                        type="button"
-                        data-version-select={version.version ?? ''}
-                        aria-current={active ? 'true' : undefined}
-                        onClick={() => setSelectedKey(versionKey(rubric, version))}
-                        className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1 text-left text-xs transition-colors ${active
-                          ? 'bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200'
-                          : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
-                      >
-                        <span className="truncate">Versión {version.version ?? 'no identificada'}</span>
-                        <span className={`${badgeClass} shrink-0 ${RUBRIC_VERSION_STATUS[status].tone}`}>
-                          {RUBRIC_VERSION_STATUS[status].label}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
+              {entries.length > 0 ? (
+                <ul className="space-y-1">
+                  {entries.map(entry => {
+                    const active = effective !== null && effective.entry.key === entry.key;
+                    const status = rubricVersionStatus(entry.version.status);
+                    return (
+                      <li key={entry.key}>
+                        <button
+                          type="button"
+                          data-version-select={entry.version.version ?? ''}
+                          data-version-occurrence={entry.occurrence}
+                          aria-current={active ? 'true' : undefined}
+                          onClick={() => setSelectedKey(entry.key)}
+                          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1 text-left text-xs transition-colors ${active
+                            ? 'bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200'
+                            : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}
+                        >
+                          <span className="truncate">
+                            Versión {entry.version.version ?? 'no identificada'}
+                            {entry.duplicated ? ` (copia #${entry.occurrence})` : ''}
+                          </span>
+                          <span className={`${badgeClass} text-[11px] ${RUBRIC_STATUS_BADGES[status].tone}`}>
+                            {RUBRIC_STATUS_BADGES[status].label}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p data-rubric-no-versions className={`${noticeClass} px-2.5`}>Sin versiones declaradas.</p>
+              )}
             </div>
           );
         })}
       </nav>
-      {effective !== null ? <RubricDetail rubric={effective.rubric} version={effective.version} /> : null}
+      {effective !== null ? <RubricDetail rubric={effective.rubric} entry={effective.entry} /> : null}
     </div>
   );
 }
 
-function RubricDetail({ rubric, version }: { rubric: RubricGroup; version: RubricVersion }) {
-  const status = versionStatusOf(version);
+function RubricDetail({ rubric, entry }: { rubric: RubricGroup; entry: VersionEntry }) {
+  const { version, occurrence, duplicated } = entry;
+  const status = rubricVersionStatus(version.status);
   return (
     <section
       data-rubric-detail={rubric.rubricID}
       data-rubric-detail-version={version.version ?? ''}
+      data-rubric-detail-occurrence={occurrence}
       aria-label="Detalle de la versión de rúbrica"
       className="space-y-3 rounded-xl border border-slate-200 bg-white/70 p-4 dark:border-slate-800 dark:bg-slate-900/70"
     >
@@ -165,9 +208,10 @@ function RubricDetail({ rubric, version }: { rubric: RubricGroup; version: Rubri
               <CopyButton label="Copiar versión" value={version.version} className="ml-1" />
             </>
           ) : 'no identificada'}
+          {duplicated ? ` (copia #${occurrence})` : ''}
         </span>
-        <span data-rubric-status={status} className={`${badgeClass} ${RUBRIC_VERSION_STATUS[status].tone}`}>
-          {RUBRIC_VERSION_STATUS[status].label}
+        <span data-rubric-status={status} className={`${badgeClass} text-[11px] ${RUBRIC_STATUS_BADGES[status].tone}`}>
+          {RUBRIC_STATUS_BADGES[status].label}
         </span>
       </div>
       <p className={noticeClass}>Observada: {isoOrUnobserved(version.observedAt)}</p>
@@ -177,7 +221,7 @@ function RubricDetail({ rubric, version }: { rubric: RubricGroup; version: Rubri
             <li key={`${criterion.id ?? ''}-${index}`} data-rubric-criterion={criterion.id ?? ''}>
               Criterio {criterion.id ?? 'desconocido'} — {criterion.title ?? 'título no disponible'}{' '}
               {criterion.mandatory ? (
-                <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-900 dark:bg-amber-950 dark:text-amber-200">Obligatorio</span>
+                <span className={mandatoryBadgeClass}>Obligatorio</span>
               ) : (
                 <span className={noticeClass}>no obligatorio</span>
               )}

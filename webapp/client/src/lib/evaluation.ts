@@ -4,7 +4,6 @@ import type {
   EvaluationRecord,
   EvaluationRubricRef,
   ReevaluationState,
-  RubricVersion,
 } from '../api/types';
 import { uniqueKeys } from './trace';
 
@@ -25,7 +24,9 @@ export const acceptanceContradiction = (record: Pick<EvaluationRecord, 'acceptan
 
 export type RubricVersionStatusKind = 'approved' | 'draft' | 'unknown';
 
-export const RUBRIC_VERSION_STATUS: Record<RubricVersionStatusKind, { tone: string; label: string }> = {
+export type RubricReferenceStatusKind = RubricVersionStatusKind | 'read-error' | 'ambiguous';
+
+export const RUBRIC_STATUS_BADGES: Record<RubricReferenceStatusKind, { tone: string; label: string }> = {
   approved: {
     tone: 'bg-emerald-100 text-emerald-900 ring-emerald-600/30 dark:bg-emerald-950 dark:text-emerald-200 dark:ring-emerald-400/30',
     label: 'Aprobada: versión aprobada explícitamente identificada',
@@ -38,13 +39,25 @@ export const RUBRIC_VERSION_STATUS: Record<RubricVersionStatusKind, { tone: stri
     tone: 'bg-slate-100 text-slate-700 ring-slate-500/30 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-400/30',
     label: 'Desconocida: no se presenta como aprobada',
   },
+  'read-error': {
+    tone: 'bg-rose-100 text-rose-900 ring-rose-600/30 dark:bg-rose-950 dark:text-rose-200 dark:ring-rose-400/30',
+    label: 'Error de lectura de rúbricas',
+  },
+  ambiguous: {
+    tone: 'bg-amber-100 text-amber-900 ring-amber-600/30 dark:bg-amber-950 dark:text-amber-200 dark:ring-amber-400/30',
+    label: 'Versión duplicada / ambigua',
+  },
 };
 
 export const rubricVersionStatus = (status: string | null): RubricVersionStatusKind =>
   status === 'approved' ? 'approved' : status === 'draft' ? 'draft' : 'unknown';
 
-export const versionStatusOf = (version: RubricVersion): RubricVersionStatusKind =>
-  rubricVersionStatus(version.status);
+export const resolveRubricReferenceStatus = (rubric: EvaluationRubricRef): RubricReferenceStatusKind => {
+  if (rubric.readError) return 'read-error';
+  if (rubric.versionAmbiguous) return 'ambiguous';
+  if (rubric.versionAvailable === false) return 'unknown';
+  return rubricVersionStatus(rubric.status);
+};
 
 export type CoverageCoherenceKind = 'coherent' | 'incoherent' | 'unverified';
 
@@ -96,32 +109,44 @@ export type EvaluationGroup = {
   items: EvaluationRecord[];
 };
 
+const resolveGroupRoot = (
+  record: EvaluationRecord,
+  byID: Map<string, EvaluationRecord>,
+): EvaluationRecord => {
+  const visited = new Set<EvaluationRecord>([record]);
+  let current = record;
+  while (current.reevaluationOf !== null) {
+    if (resolveReevaluation(current, byID) !== 'same-capture') break;
+    const target = byID.get(current.reevaluationOf);
+    if (target === undefined) break;
+    if (visited.has(target)) return record;
+    visited.add(target);
+    current = target;
+  }
+  return current;
+};
+
 export const groupEvaluations = (evaluations: EvaluationRecord[]): EvaluationGroup[] => {
   const byID = new Map<string, EvaluationRecord>();
   for (const record of evaluations) {
     if (record.evaluationID !== null && !byID.has(record.evaluationID)) byID.set(record.evaluationID, record);
   }
   const groups: EvaluationGroup[] = [];
-  const groupByID = new Map<string, EvaluationGroup>();
-  const groupFor = (record: EvaluationRecord): EvaluationGroup => {
-    if (record.reevaluationOf !== null) {
-      const existing = groupByID.get(record.reevaluationOf);
-      if (existing !== undefined) return existing;
-      const target = byID.get(record.reevaluationOf);
-      if (target !== undefined) return groupFor(target);
+  const groupByRoot = new Map<EvaluationRecord, EvaluationGroup>();
+  for (const record of evaluations) {
+    const root = resolveGroupRoot(record, byID);
+    let group = groupByRoot.get(root);
+    if (group === undefined) {
+      group = {
+        key: root.evaluationID ?? `sin-identidad-${groups.length}`,
+        original: root,
+        items: [],
+      };
+      groups.push(group);
+      groupByRoot.set(root, group);
     }
-    const group: EvaluationGroup = {
-      key: record.evaluationID ?? `sin-identidad-${groups.length}`,
-      original: record,
-      items: [],
-    };
-    groups.push(group);
-    if (record.evaluationID !== null && !groupByID.has(record.evaluationID)) {
-      groupByID.set(record.evaluationID, group);
-    }
-    return group;
-  };
-  for (const record of evaluations) groupFor(record).items.push(record);
+    group.items.push(record);
+  }
   const keys = uniqueKeys(groups, group => group.key);
   return groups.map((group, index) => ({ ...group, key: keys[index] }));
 };
@@ -137,24 +162,20 @@ export const duplicateEvaluationIDs = (evaluations: EvaluationRecord[]): string[
   return [...repeated];
 };
 
-export type CriterionResultKind = 'satisfied' | 'unsatisfied' | 'partial' | 'not-evaluable' | 'unknown';
+export type CriterionResultKind = 'evaluated' | 'not-evaluable' | 'unknown';
 
 export const criterionResult = (criterion: EvaluationCriterionResult): { kind: CriterionResultKind; label: string } => {
   if (criterion.status === 'not-evaluable') {
     return { kind: 'not-evaluable', label: `no evaluable: ${criterion.reason ?? 'motivo no declarado'}` };
   }
   if (criterion.status === 'evaluated') {
-    if (criterion.score !== null && criterion.score >= 1) {
-      return { kind: 'satisfied', label: `cumplido (puntuación ${criterion.score})` };
+    if (criterion.score !== null) {
+      return { kind: 'evaluated', label: `Evaluado · puntuación ${criterion.score}` };
     }
-    if (criterion.score !== null && criterion.score <= 0) {
-      return { kind: 'unsatisfied', label: `incumplido (puntuación ${criterion.score})` };
-    }
-    if (criterion.score !== null) return { kind: 'partial', label: `puntuación ${criterion.score}` };
-    return { kind: 'unknown', label: 'resultado desconocido: no se interpreta como cero' };
+    return { kind: 'evaluated', label: 'Evaluado · puntuación desconocida' };
   }
-  return { kind: 'unknown', label: 'desconocido' };
+  if (criterion.score !== null) {
+    return { kind: 'evaluated', label: `Puntuación ${criterion.score}` };
+  }
+  return { kind: 'unknown', label: 'Desconocido' };
 };
-
-export const rubricReferenceStatus = (rubric: EvaluationRubricRef): RubricVersionStatusKind =>
-  rubricVersionStatus(rubric.status);

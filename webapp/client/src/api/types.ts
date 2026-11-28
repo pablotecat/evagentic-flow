@@ -629,16 +629,7 @@ export type RubricsReadError = {
 
 export type RubricsResponse = RubricsReady | RubricsReadError;
 
-export type EvaluationCriterionResult = {
-  id: string | null;
-  title: string | null;
-  weight: number | null;
-  mandatory: boolean;
-  status: string | null;
-  score: number | null;
-  reason: string | null;
-  evidence: string[];
-};
+export type EvaluationCriterionResult = RubricCriterion;
 
 export type EvaluationScore = { value: number; basis: string | null };
 

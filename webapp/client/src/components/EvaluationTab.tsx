@@ -3,7 +3,7 @@ import type { Execution, EvaluationRecord } from '../api/types';
 import { useEvaluations } from '../hooks/useEvaluations';
 import {
   COVERAGE_COHERENCE_LABELS,
-  RUBRIC_VERSION_STATUS,
+  RUBRIC_STATUS_BADGES,
   REEVALUATION_TEXT,
   acceptanceContradiction,
   acceptanceLabel,
@@ -12,30 +12,27 @@ import {
   duplicateEvaluationIDs,
   groupEvaluations,
   resolveReevaluation,
-  rubricReferenceStatus,
-  type CoverageCoherenceKind,
+  resolveRubricReferenceStatus,
+  type CriterionResultKind,
   type EvaluationGroup,
 } from '../lib/evaluation';
 import { isoOrUnobserved } from '../lib/trace';
-import { alertClass, chipClass, noticeClass } from '../lib/ui';
+import { alertClass, badgeClass, chipClass, mandatoryBadgeClass, noticeClass } from '../lib/ui';
 import { CopyButton } from './CopyButton';
 
-const criterionResultTone: Record<string, string> = {
-  satisfied: 'bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200',
-  unsatisfied: 'bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200',
-  partial: 'bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200',
+const criterionResultTone: Record<CriterionResultKind, string> = {
+  evaluated: 'bg-sky-100 text-sky-900 dark:bg-sky-950 dark:text-sky-200',
   'not-evaluable': 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200',
   unknown: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
 };
 
 const acceptanceTone: Record<string, string> = {
   accepted: 'bg-emerald-100 text-emerald-900 ring-emerald-600/30 dark:bg-emerald-950 dark:text-emerald-200 dark:ring-emerald-400/30',
+  contradiction: 'bg-rose-100 text-rose-900 ring-rose-600/30 dark:bg-rose-950 dark:text-rose-200 dark:ring-rose-400/30',
   rejected: 'bg-red-100 text-red-900 ring-red-600/30 dark:bg-red-950 dark:text-red-200 dark:ring-red-400/30',
   pending: 'bg-amber-100 text-amber-900 ring-amber-600/30 dark:bg-amber-950 dark:text-amber-200 dark:ring-amber-400/30',
   unknown: 'bg-slate-100 text-slate-700 ring-slate-500/30 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-400/30',
 };
-
-const badgeClass = 'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset';
 
 type Props = { execution: Execution };
 
@@ -128,6 +125,14 @@ function EvaluationCard({ record, byID }: { record: EvaluationRecord; byID: Map<
   const reevaluation = resolveReevaluation(record, byID);
   const contradiction = acceptanceContradiction(record);
   const coherence = coverageCoherence(record);
+  const acceptanceKey = contradiction ? 'contradiction' : (record.acceptance ?? 'unknown');
+  const coverageRatio = record.coverage !== null
+    && record.coverage.evaluatedWeight !== null
+    && record.coverage.applicableWeight !== null
+    && record.coverage.applicableWeight > 0
+    && record.coverage.evaluatedWeight >= 0
+    ? Math.max(0, Math.min(record.coverage.evaluatedWeight / record.coverage.applicableWeight, 1))
+    : null;
   return (
     <article data-evaluation={record.evaluationID ?? ''} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -138,8 +143,10 @@ function EvaluationCard({ record, byID }: { record: EvaluationRecord; byID: Map<
         {record.reevaluationOf !== null ? (
           <span data-reevaluation className={chipClass}>Reevaluación de {record.reevaluationOf}</span>
         ) : null}
-        <span data-acceptance={record.acceptance ?? 'unknown'} className={`${badgeClass} ${acceptanceTone[record.acceptance ?? 'unknown']}`}>
-          Aceptación: {acceptanceLabel(record.acceptance)}
+        <span data-acceptance={acceptanceKey} className={`${badgeClass} ${acceptanceTone[acceptanceKey]}`}>
+          {contradiction
+            ? 'Aceptación: aceptada (en contradicción · pendiente por evidencia obligatoria)'
+            : `Aceptación: ${acceptanceLabel(record.acceptance)}`}
         </span>
       </header>
       {contradiction ? (
@@ -158,11 +165,6 @@ function EvaluationCard({ record, byID }: { record: EvaluationRecord; byID: Map<
         ) : (
           <p data-score className={noticeClass}>Puntuación: desconocida; no se transforma en cero</p>
         )}
-        {record.score !== null && record.score.value >= 0 && record.score.value <= 1 ? (
-          <div data-score-bar className="h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-            <div className="h-full rounded-full bg-sky-500" style={{ width: `${record.score.value * 100}%` }} />
-          </div>
-        ) : null}
         {record.coverage !== null ? (
           <p data-coverage>
             Cobertura de evaluación: {record.coverage.evaluatedWeight ?? 'desconocido'} de {record.coverage.applicableWeight ?? 'desconocido'} de peso de criterios aplicables
@@ -170,16 +172,17 @@ function EvaluationCard({ record, byID }: { record: EvaluationRecord; byID: Map<
         ) : (
           <p data-coverage className={noticeClass}>Cobertura de evaluación: desconocida</p>
         )}
-        {record.coverage !== null
-          && record.coverage.evaluatedWeight !== null
-          && record.coverage.applicableWeight !== null
-          && record.coverage.applicableWeight > 0 ? (
+        {coverageRatio !== null ? (
           <div data-coverage-bar className="h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-            <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.min(record.coverage.evaluatedWeight / record.coverage.applicableWeight, 1) * 100}%` }} />
+            <div className="h-full rounded-full bg-emerald-500" style={{ width: `${coverageRatio * 100}%` }} />
           </div>
         ) : null}
         {coherence !== null ? (
-          <p data-coverage-coherence={coherence} className={coherence === 'incoherent' ? alertClass : noticeClass}>
+          <p
+            data-coverage-coherence={coherence}
+            role={coherence === 'incoherent' ? 'alert' : undefined}
+            className={coherence === 'incoherent' ? alertClass : noticeClass}
+          >
             {COVERAGE_COHERENCE_LABELS[coherence]}
           </p>
         ) : null}
@@ -206,7 +209,11 @@ function EvaluationCard({ record, byID }: { record: EvaluationRecord; byID: Map<
       </div>
       <CriteriaTable record={record} />
       {reevaluation !== null ? (
-        <p data-reevaluation={reevaluation} className={reevaluation === 'same-capture' ? noticeClass : alertClass}>
+        <p
+          data-reevaluation={reevaluation}
+          role={reevaluation === 'same-capture' ? undefined : 'alert'}
+          className={reevaluation === 'same-capture' ? noticeClass : alertClass}
+        >
           {REEVALUATION_TEXT[reevaluation](record.reevaluationOf ?? 'referencia no declarada')}
         </p>
       ) : null}
@@ -216,7 +223,7 @@ function EvaluationCard({ record, byID }: { record: EvaluationRecord; byID: Map<
 
 function RubricReference({ record }: { record: EvaluationRecord }) {
   const rubric = record.rubric;
-  const status = rubricReferenceStatus(rubric);
+  const status = resolveRubricReferenceStatus(rubric);
   return (
     <div data-rubric-reference className="space-y-1">
       <p>
@@ -230,8 +237,8 @@ function RubricReference({ record }: { record: EvaluationRecord }) {
           </>
         ) : 'desconocida'}
       </p>
-      <span data-rubric-status={status} className={`${badgeClass} ${RUBRIC_VERSION_STATUS[status].tone}`}>
-        {RUBRIC_VERSION_STATUS[status].label}
+      <span data-rubric-status={status} className={`${badgeClass} ${RUBRIC_STATUS_BADGES[status].tone}`}>
+        {RUBRIC_STATUS_BADGES[status].label}
       </span>
       {rubric.readError ? (
         <p role="alert" data-rubric-read-error={rubric.readError} className={alertClass}>
@@ -239,7 +246,7 @@ function RubricReference({ record }: { record: EvaluationRecord }) {
           desconocida y no se confunde con una versión ausente.
         </p>
       ) : rubric.versionAmbiguous ? (
-        <p className={noticeClass}>
+        <p role="alert" data-rubric-ambiguous className={alertClass}>
           La versión de rúbrica aparece duplicada en la vista de rúbricas: su estado no se resuelve.
         </p>
       ) : rubric.versionAvailable === false ? (
@@ -278,7 +285,7 @@ function CriteriaTable({ record }: { record: EvaluationRecord }) {
                 <td className="py-1.5 pr-3">{criterion.id ?? 'desconocido'} — {criterion.title ?? 'título no disponible'}</td>
                 <td className="py-1.5 pr-3">
                   {criterion.mandatory ? (
-                    <span data-mandatory-badge className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-900 dark:bg-amber-950 dark:text-amber-200">Obligatorio</span>
+                    <span data-mandatory-badge className={mandatoryBadgeClass}>Obligatorio</span>
                   ) : (
                     <span className={noticeClass}>no obligatorio</span>
                   )}
