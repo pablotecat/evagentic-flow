@@ -580,3 +580,123 @@ export type DeliverablesUnreadable = {
 };
 
 export type DeliverablesBody = DeliverablesResponse | DeliverablesUnreadable;
+
+export type RubricCriterion = {
+  id: string | null;
+  title: string | null;
+  weight: number | null;
+  mandatory: boolean;
+  status: string | null;
+  score: number | null;
+  reason: string | null;
+  evidence: string[];
+};
+
+export type RubricVersion = {
+  version: string | null;
+  status: string | null;
+  observedAt: number | null;
+  criteria: RubricCriterion[];
+  content: string | null;
+};
+
+export type RubricGroup = {
+  rubricID: string;
+  title: string | null;
+  versions: RubricVersion[];
+};
+
+export type RubricAnomaly = { rubricID: string; version: string | null };
+
+export type RubricAnomalies = {
+  withoutRubricID: number;
+  duplicateVersions: RubricAnomaly[];
+};
+
+export type RubricsReady = {
+  source: string;
+  state: 'ready';
+  rubrics: RubricGroup[];
+  anomalies?: RubricAnomalies;
+};
+
+export type RubricsReadError = {
+  source: string | null;
+  state: 'read-error';
+  reason?: string | null;
+  rubrics: null;
+};
+
+export type RubricsResponse = RubricsReady | RubricsReadError;
+
+export type EvaluationCriterionResult = {
+  id: string | null;
+  title: string | null;
+  weight: number | null;
+  mandatory: boolean;
+  status: string | null;
+  score: number | null;
+  reason: string | null;
+  evidence: string[];
+};
+
+export type EvaluationScore = { value: number; basis: string | null };
+
+export type EvaluationCoverage = {
+  evaluatedWeight: number | null;
+  applicableWeight: number | null;
+  evaluatedWeightMatches?: boolean | null;
+};
+
+export type EvaluationRubricRef = {
+  rubricID: string | null;
+  version: string | null;
+  status: string | null;
+  versionAvailable: boolean | null;
+  versionAmbiguous?: boolean;
+  readError?: string | null;
+};
+
+export type EvaluationVersions = {
+  component: string | null;
+  case: string | null;
+  rubric: string | null;
+  evaluator: string | null;
+};
+
+export type ReevaluationState = 'same-capture' | 'different-capture' | 'missing-target' | 'unknown-capture';
+
+export type Acceptance = 'accepted' | 'rejected' | 'pending';
+
+export type EvaluationRecord = {
+  evaluationID: string | null;
+  executionID: string;
+  captureID: string | null;
+  captureReference: string | null;
+  reevaluationOf: string | null;
+  evaluatedAt: number | null;
+  rubric: EvaluationRubricRef;
+  versions: EvaluationVersions;
+  criteria: EvaluationCriterionResult[];
+  score: EvaluationScore | null;
+  coverage: EvaluationCoverage | null;
+  acceptance: Acceptance | null;
+  reevaluation?: ReevaluationState | null;
+};
+
+export type EvaluationsReady = {
+  executionID: string;
+  source: string;
+  state: 'ready';
+  evaluations: EvaluationRecord[];
+};
+
+export type EvaluationsReadError = {
+  executionID: string;
+  source: string | null;
+  state: 'read-error';
+  reason?: string | null;
+  evaluations: null;
+};
+
+export type EvaluationsResponse = EvaluationsReady | EvaluationsReadError;

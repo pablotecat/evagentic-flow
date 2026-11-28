@@ -105,6 +105,8 @@ async function openUi(t, overrides = {}) {
     post: () => jsonResponse({ execution: execution('created-synthetic-1') }, 201),
     stop: () => jsonResponse({ stop: { requested: true, requestedAt: Date.now(), sessions: [] } }),
     interaction: () => jsonResponse({ interaction: { kind: 'form', sessionID: 'ses_root_exec', requestID: 'form-synthetic', phase: 'replied' } }),
+    rubrics: () => jsonResponse({ source: 'none', state: 'ready', rubrics: [] }),
+    evaluations: id => jsonResponse({ executionID: id, source: 'none', state: 'ready', evaluations: [] }),
     ...overrides,
   };
   await page.route('**/api/**', async route => {
@@ -135,6 +137,18 @@ async function openUi(t, overrides = {}) {
       const traceId = decodeURIComponent(trace[1]);
       return negotiate.trace
         ? respond(negotiate.trace(traceId, url))
+        : route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not-mocked"}' });
+    }
+    if (url.pathname === '/api/rubrics' && request.method() === 'GET') {
+      return negotiate.rubrics
+        ? respond(negotiate.rubrics())
+        : route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not-mocked"}' });
+    }
+    const evaluations = url.pathname.match(/^\/api\/executions\/([^/]+)\/evaluations$/);
+    if (evaluations && request.method() === 'GET') {
+      const evaluationsId = decodeURIComponent(evaluations[1]);
+      return negotiate.evaluations
+        ? respond(negotiate.evaluations(evaluationsId, url))
         : route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not-mocked"}' });
     }
     const deliverables = url.pathname.match(/^\/api\/executions\/([^/]+)\/deliverables$/);
@@ -169,7 +183,7 @@ test('UI /next: barra lateral, navegación e histórico, y cajón adaptable en p
 
   await page.getByRole('link', { name: 'Rúbricas' }).click();
   assert.equal(await page.evaluate(() => location.hash), '#/rubrics');
-  await page.getByRole('heading', { name: 'Rúbricas' }).waitFor();
+  await page.getByRole('heading', { name: 'Rúbricas', exact: true }).waitFor();
 
   await page.getByRole('link', { name: 'Nuevo encargo' }).click();
   await page.getByRole('heading', { name: 'Nuevo encargo' }).waitFor();
@@ -314,7 +328,7 @@ test('UI /next: compositor con estados de opciones, envío idempotente y avisos 
 
   optionsPayload = readyOptions;
   await page.getByRole('link', { name: 'Rúbricas' }).click();
-  await page.getByRole('heading', { name: 'Rúbricas' }).waitFor();
+  await page.getByRole('heading', { name: 'Rúbricas', exact: true }).waitFor();
   await page.getByRole('link', { name: 'Nuevo encargo' }).click();
   await page.waitForFunction(() => document.querySelectorAll('select[aria-label="Agente"] option').length > 1);
   assert.equal(await page.getByLabel('Agente').isDisabled(), false);
@@ -3138,4 +3152,407 @@ test('UI /next: regresiones #49 en value-null, identificadores copiables, query.
   await waitForText(page, 'invalid-session');
   assert.ok((await page.locator('[data-deliverables-unreadable]').innerText()).includes('invalid-session'));
   assert.equal(await page.locator('[data-query-mode]').count(), 0);
+});
+
+const evaluationCriterion = (id, title, overrides = {}) => ({
+  id,
+  title,
+  weight: null,
+  mandatory: false,
+  status: 'evaluated',
+  score: null,
+  reason: null,
+  evidence: [],
+  ...overrides,
+});
+
+const evaluationRecord = (executionID, id, overrides = {}) => ({
+  evaluationID: id,
+  executionID,
+  captureID: 'cap-eval',
+  captureReference: 'captura sintética de evaluación',
+  reevaluationOf: null,
+  evaluatedAt: 1764000001000,
+  rubric: { rubricID: 'rubrica-e', version: 'v1', status: 'approved', versionAvailable: true,
+    versionAmbiguous: false, readError: null },
+  versions: { component: 'componente@1', case: 'caso@1', rubric: 'v1', evaluator: 'evaluador@1' },
+  criteria: [],
+  score: null,
+  coverage: null,
+  acceptance: null,
+  reevaluation: null,
+  ...overrides,
+});
+
+test('UI /next: pestaña de evaluación con carga, vacío sobrio en éxito y error de lectura honesto', { timeout: 120000 }, async t => {
+  const succeeded = 'aaaa9999-8e8e-49e8-89e8-8e8e8e8e8e8e';
+  let releaseEvaluations;
+  const gate = new Promise(resolve => { releaseEvaluations = resolve; });
+  let evaluationsMode = 'gate';
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(succeeded, { status: 'succeeded', sessionID: 'ses_root_eval' })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: 'ses_root_eval' }) }),
+    evaluations: async id => {
+      if (evaluationsMode === 'gate') await gate;
+      if (evaluationsMode === 'error') {
+        return jsonResponse({ executionID: id, source: 'synthetic-fixtures', state: 'read-error',
+          reason: 'synthetic read failure', evaluations: null });
+      }
+      return jsonResponse({ executionID: id, source: 'none', state: 'ready', evaluations: [] });
+    },
+  });
+  await page.locator(`[data-id="${succeeded}"]`).click();
+  await page.getByRole('tab', { name: 'Evaluación' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Evaluación');
+  await waitForText(page, 'Consultando si existen resultados de evaluación de esta captura…');
+
+  evaluationsMode = 'none';
+  releaseEvaluations();
+  await waitForText(page, 'Sin evaluación');
+  const emptyText = await page.getByRole('tabpanel').innerText();
+  assert.ok(emptyText.includes('la finalización técnica no equivale a una aceptación'));
+  assert.ok(emptyText.includes('no se generan puntuaciones, versiones ni aceptaciones de ejemplo'));
+  assert.equal(await page.getByRole('tabpanel').getByRole('button').count(), 0);
+  assert.equal(await page.getByRole('tabpanel').getByRole('alert').count(), 0);
+  assert.ok(!emptyText.includes('Puntuación'));
+
+  evaluationsMode = 'error';
+  const unreadable = page.locator('[data-evaluations-unreadable]');
+  await unreadable.waitFor();
+  assert.equal(await unreadable.getAttribute('role'), 'alert');
+  const unreadableText = await unreadable.innerText();
+  assert.ok(unreadableText.includes('no están consultables (synthetic read failure)'));
+  assert.ok(unreadableText.includes('no se muestran puntuaciones ni aceptación inventadas'));
+  assert.equal(await page.getByRole('tabpanel').getByRole('button').count(), 0);
+  assert.ok(!(await page.getByRole('tabpanel').innerText()).includes('Sin evaluación'));
+});
+
+const richEvaluations = executionID => ({ executionID, source: 'synthetic-fixtures', state: 'ready', evaluations: [
+  evaluationRecord(executionID, 'eval-a', {
+    acceptance: 'pending',
+    criteria: [
+      evaluationCriterion('cobertura', 'Cobertura del encargo', {
+        weight: 2, status: 'evaluated', score: 0.5, evidence: ['cap-eval · fila 3 (session.text.ended)'] }),
+      evaluationCriterion('fidelidad', 'Fidelidad a las decisiones', {
+        weight: 1, mandatory: true, status: 'not-evaluable', reason: 'sin evidencia suficiente' }),
+    ],
+    score: { value: 0.5, basis: 'criterios-evaluados' },
+    coverage: { evaluatedWeight: 2, applicableWeight: 3 },
+  }),
+  evaluationRecord(executionID, 'eval-b', {
+    evaluatedAt: null,
+    reevaluationOf: 'eval-a',
+    reevaluation: 'same-capture',
+    rubric: { rubricID: 'rubrica-e', version: '2027-01-01', status: null, versionAvailable: false,
+      versionAmbiguous: false, readError: null },
+    versions: { component: null, case: null, rubric: '2027-01-01', evaluator: null },
+  }),
+  evaluationRecord(executionID, 'eval-c', {
+    captureID: 'cap-otra',
+    reevaluationOf: 'eval-a',
+    reevaluation: 'different-capture',
+    acceptance: 'accepted',
+    criteria: [
+      evaluationCriterion('seguridad', 'Seguridad del resultado', {
+        weight: 1, mandatory: true, status: 'not-evaluable', reason: 'sin evidencia' }),
+    ],
+    score: { value: 0.9, basis: 'otra-base' },
+    coverage: { evaluatedWeight: 5, applicableWeight: 5, evaluatedWeightMatches: false },
+  }),
+  evaluationRecord(executionID, 'eval-d', {
+    captureID: 'cap-huerfana',
+    captureReference: null,
+    reevaluationOf: 'no-existe',
+    reevaluation: 'missing-target',
+    rubric: { rubricID: 'rubrica-e', version: 'v9', status: 'approved', versionAvailable: null,
+      versionAmbiguous: false, readError: 'boom' },
+  }),
+  evaluationRecord(executionID, 'eval-e', {
+    acceptance: 'rejected',
+    rubric: { rubricID: 'rubrica-e', version: 'v2', status: 'draft', versionAvailable: true,
+      versionAmbiguous: false, readError: null },
+    criteria: [
+      evaluationCriterion('estilo', 'Estilo del entregable', {
+        weight: null, status: 'evaluated', score: 0, reason: 'redacción fuera de tono',
+        evidence: ['cap-eval · fila 9 (session.text.ended)'] }),
+      evaluationCriterion('cierre', 'Cierre del encargo', {
+        weight: 1, status: 'evaluated', score: 1, reason: 'cierre observado con evidencia',
+        evidence: ['cap-eval · fila 12 (session.text.ended)'] }),
+    ],
+    score: { value: 0.4, basis: null },
+    coverage: { evaluatedWeight: 1, applicableWeight: 2, evaluatedWeightMatches: null },
+  }),
+  evaluationRecord(executionID, 'eval-e', {
+    rubric: { rubricID: 'rubrica-e', version: 'v3', status: 'draft', versionAvailable: true,
+      versionAmbiguous: false, readError: null },
+  }),
+] });
+
+test('UI /next: evaluaciones agrupadas con reevaluaciones, contradicciones, cobertura y rúbrica resuelta', { timeout: 180000 }, async t => {
+  const rich = 'bbbbAAAA-9f9f-49f9-89f9-9f9f9f9f9f9f';
+  const { app, page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(rich, { status: 'succeeded', sessionID: 'ses_root_eval' })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: 'ses_root_eval' }) }),
+    evaluations: id => jsonResponse(richEvaluations(id)),
+  });
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+  await page.locator(`[data-id="${rich}"]`).click();
+  await page.getByRole('tab', { name: 'Evaluación' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Evaluación');
+  await page.locator('[data-evaluation="eval-a"]').waitFor();
+
+  assert.equal(await page.locator('[data-evaluation]').count(), 6);
+  assert.equal(await page.locator('[data-evaluation-group]').count(), 4);
+  assert.equal(await page.locator('[data-evaluation-group="eval-a"] [data-evaluation="eval-a"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-a"] [data-evaluation="eval-b"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-a"] [data-evaluation="eval-c"]').count(), 1);
+  assert.equal(await page.locator('[data-evaluation-group="eval-d"] [data-evaluation="eval-d"]').count(), 1);
+  const duplicateAlert = page.locator('[data-anomaly="evaluacion-duplicada"]');
+  await duplicateAlert.waitFor();
+  assert.equal(await duplicateAlert.getAttribute('role'), 'alert');
+  assert.ok((await duplicateAlert.innerText()).includes('Identidad de evaluación repetida: eval-e'));
+
+  const cardA = page.locator('[data-evaluation="eval-a"]');
+  const textA = await cardA.innerText();
+  assert.ok(textA.includes('Aceptación: pendiente'));
+  assert.ok(textA.includes('Puntuación sobre los criterios evaluados: 0.5'));
+  assert.ok(textA.includes('Cobertura de evaluación: 2 de 3 de peso de criterios aplicables'));
+  assert.ok(textA.includes('El peso evaluado coincide con la suma de pesos de los criterios evaluados.'));
+  assert.ok(textA.includes('Aprobada: versión aprobada explícitamente identificada'));
+  assert.ok(textA.includes('componente@1'));
+  assert.ok(textA.includes('Versión de evaluador: evaluador@1'));
+  assert.ok(textA.includes('no evaluable: sin evidencia suficiente'));
+  assert.ok(textA.includes('Obligatorio'));
+  assert.ok(textA.includes('cap-eval · fila 3 (session.text.ended)'));
+  assert.ok(textA.includes('sin evidencia'));
+  assert.equal(await cardA.locator('[data-contradiction]').count(), 0);
+  assert.equal(await cardA.locator('table[data-criteria-table] tbody tr').count(), 2);
+
+  const cardB = page.locator('[data-evaluation="eval-b"]');
+  const textB = await cardB.innerText();
+  assert.ok(textB.includes('Reevaluación de eval-a'));
+  assert.ok(textB.includes('Es una reevaluación de eval-a sobre la misma captura'));
+  assert.ok(textB.includes('no es otra ejecución del flujo'));
+  assert.ok(textB.includes('Puntuación: desconocida'));
+  assert.ok(textB.includes('no se transforma en cero'));
+  assert.ok(textB.includes('Cobertura de evaluación: desconocida'));
+  assert.ok(textB.includes('Desconocida: no se presenta como aprobada'));
+  assert.ok(textB.includes('no está disponible en la vista de rúbricas'));
+  assert.ok(textB.includes('Versión de evaluador: desconocida'));
+  assert.ok(textB.includes('Aceptación: no declarada'));
+  assert.ok(!textB.includes('Aceptación: aceptada'));
+
+  const cardC = page.locator('[data-evaluation="eval-c"]');
+  const textC = await cardC.innerText();
+  assert.equal(await cardC.locator('[data-contradiction]').count(), 1);
+  assert.equal(await cardC.locator('[data-contradiction]').getAttribute('role'), 'alert');
+  assert.ok(textC.includes('Decisión pendiente por falta de evidencia obligatoria'));
+  assert.ok(textC.includes('Aceptación: aceptada'));
+  assert.ok(textC.includes('Puntuación sin base declarada como criterios evaluados: 0.9'));
+  assert.ok(textC.includes('base: otra-base'));
+  assert.ok(textC.includes('Cobertura incoherente: el peso evaluado declarado no coincide con la suma de pesos de los criterios evaluados.'));
+  assert.ok(textC.includes('la captura no coincide'));
+  assert.ok(textC.includes('no evaluable: sin evidencia'));
+
+  const cardD = page.locator('[data-evaluation="eval-d"]');
+  const textD = await cardD.innerText();
+  assert.ok(textD.includes('que no existe entre las evaluaciones de esta ejecución'));
+  assert.ok(textD.includes('referencia no resoluble'));
+  assert.ok(textD.includes('No se pudo leer la vista de rúbricas (boom)'));
+  assert.ok(!textD.includes('no está disponible en la vista de rúbricas'));
+
+  const cardE = page.locator('[data-evaluation="eval-e"]').first();
+  const textE = await cardE.innerText();
+  assert.ok(textE.includes('Aceptación: rechazada'));
+  assert.ok(textE.includes('Borrador: no es una versión aprobada'));
+  assert.ok(textE.includes('Coherencia de la cobertura no verificada: faltan datos para comprobarla.'));
+  assert.ok(textE.includes('incumplido (puntuación 0)'));
+  assert.ok(textE.includes('cumplido (puntuación 1)'));
+  assert.ok(textE.includes('base: no declarada'));
+  assert.equal(await cardE.locator('tr[data-criterion="estilo"] td').nth(3).innerText(), 'desconocido');
+
+  const panelText = await page.getByRole('tabpanel').innerText();
+  assert.ok(panelText.includes('no es otra ejecución del flujo'));
+  assert.ok(panelText.includes('No existen acciones de evaluar, reevaluar o editar rúbricas'));
+  const buttonLabels = await page.getByRole('tabpanel').getByRole('button').allInnerTexts();
+  assert.ok(buttonLabels.length > 0);
+  for (const label of buttonLabels) {
+    assert.ok(['Copiar', 'Copiado'].includes(label.trim()), `unexpected action button ${label}`);
+  }
+
+  await cardA.getByRole('button', { name: 'Copiar evaluación' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'eval-a');
+  await cardA.getByRole('button', { name: 'Copiar captura' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'cap-eval');
+});
+
+const richRubrics = {
+  source: 'synthetic-fixtures',
+  state: 'ready',
+  rubrics: [
+    { rubricID: 'rubrica-sintetica', title: 'Rúbrica sintética', versions: [
+      { version: '2026-10-31', status: 'approved', observedAt: 1764000000000,
+        criteria: [{ id: 'cobertura', title: 'Cobertura del encargo', weight: 2, mandatory: false,
+          status: null, score: null, reason: null, evidence: [] }],
+        content: 'Contenido sintético de la versión aprobada.' },
+      { version: '2026-11-12', status: 'draft', observedAt: 1764300000000, criteria: [],
+        content: 'Contenido sintético del borrador.' },
+    ] },
+    { rubricID: 'rubrica-huerfana', title: null, versions: [
+      { version: null, status: 'unknown', observedAt: null, criteria: [], content: null },
+    ] },
+  ],
+  anomalies: { withoutRubricID: 2, duplicateVersions: [{ rubricID: 'r-dup', version: '1' }] },
+};
+
+test('UI /next: vista de rúbricas con maestro-detalle, anomalías y sólo lectura', { timeout: 180000 }, async t => {
+  const solo = 'ccccBBBB-9a9a-49a9-89a9-9a9a9a9a9a9a';
+  let releaseRubrics;
+  const gate = new Promise(resolve => { releaseRubrics = resolve; });
+  let rubricsMode = 'gate';
+  const { app, page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [execution(solo, { status: 'succeeded', sessionID: 'ses_root_rub' })] }),
+    detail: id => jsonResponse({ ...detail(id), execution: execution(id, { status: 'succeeded', sessionID: 'ses_root_rub' }) }),
+    rubrics: async () => {
+      if (rubricsMode === 'gate') await gate;
+      if (rubricsMode === 'empty') return jsonResponse({ source: 'none', state: 'ready', rubrics: [] });
+      if (rubricsMode === 'error') {
+        return jsonResponse({ source: 'synthetic-fixtures', state: 'read-error',
+          reason: 'synthetic read failure', rubrics: null });
+      }
+      if (rubricsMode === 'updated') {
+        return jsonResponse({ ...richRubrics, rubrics: [...richRubrics.rubrics,
+          { rubricID: 'rubrica-nueva', title: 'Rúbrica tardía', versions: [
+            { version: 'v1', status: 'unknown', observedAt: null, criteria: [], content: 'Contenido tardío.' }] }] });
+      }
+      return jsonResponse(richRubrics);
+    },
+  });
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: app.url });
+  await page.getByRole('heading', { name: 'Nuevo encargo' }).waitFor();
+  assert.equal(await page.evaluate(() => location.hash), '#/');
+
+  await page.getByRole('link', { name: 'Rúbricas' }).click();
+  await page.getByRole('heading', { name: 'Rúbricas', exact: true }).waitFor();
+  await waitForText(page, 'Consultando las rúbricas conocidas…');
+
+  rubricsMode = 'rich';
+  releaseRubrics();
+  const detailPane = page.locator('[data-rubric-detail]');
+  await waitForText(page, 'Criterio cobertura — Cobertura del encargo');
+  assert.equal(await detailPane.getAttribute('data-rubric-detail'), 'rubrica-sintetica');
+  assert.equal(await detailPane.getAttribute('data-rubric-detail-version'), '2026-10-31');
+  const approvedText = await detailPane.innerText();
+  assert.ok(approvedText.includes('Rúbrica sintética'));
+  assert.ok(approvedText.includes('Aprobada: versión aprobada explícitamente identificada'));
+  assert.ok(approvedText.includes(`Observada: ${new Date(1764000000000).toISOString()}`));
+  assert.ok(approvedText.includes('Criterio cobertura — Cobertura del encargo'));
+  assert.equal(approvedText.includes('Obligatorio'), false);
+  assert.ok(approvedText.includes('peso 2'));
+  assert.ok(approvedText.includes('no obligatorio'));
+  assert.ok(!(await page.locator('[data-rubrics-view]').innerText())
+    .includes('Ninguna rúbrica tiene una versión aprobada explícitamente identificada'));
+
+  const sinRubricID = page.locator('[data-anomaly="sin-rubricID"]');
+  assert.equal(await sinRubricID.getAttribute('role'), 'alert');
+  assert.ok((await sinRubricID.innerText()).includes('2 fila(s) de rúbricas sin identificador'));
+  const duplicated = page.locator('[data-anomaly="version-duplicada"]');
+  assert.equal(await duplicated.getAttribute('role'), 'alert');
+  assert.ok((await duplicated.innerText()).includes('Versión duplicada: r-dup · 1'));
+
+  await page.locator('[data-rubric-select="rubrica-huerfana"]').click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-rubric-detail]')?.getAttribute('data-rubric-detail') === 'rubrica-huerfana');
+  const orphanText = await detailPane.innerText();
+  assert.ok(orphanText.includes('Versión no identificada'));
+  assert.ok(orphanText.includes('Desconocida: no se presenta como aprobada'));
+  assert.ok(orphanText.includes('Sin criterios declarados en esta versión.'));
+  assert.ok(orphanText.includes('Contenido de la versión no disponible.'));
+
+  await page.locator('[data-rubric-select="rubrica-sintetica"]').click();
+  await page.locator('[data-version-select="2026-11-12"]').click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-rubric-detail]')?.getAttribute('data-rubric-detail-version') === '2026-11-12');
+  const draftText = await detailPane.innerText();
+  assert.ok(draftText.includes('Borrador: no es una versión aprobada'));
+  await detailPane.getByRole('button', { name: 'Copiar rúbrica' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'rubrica-sintetica');
+
+  const content = page.locator('details[data-disclosure="rubric-content"]');
+  assert.equal(await content.getAttribute('open'), null);
+  await content.locator('summary').click();
+  assert.ok((await content.locator('pre').innerText()).includes('Contenido sintético del borrador.'));
+  await content.getByRole('button', { name: 'Copiar contenido' }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'Contenido sintético del borrador.');
+
+  rubricsMode = 'updated';
+  await page.locator('[data-rubric-select="rubrica-nueva"]').waitFor();
+  await page.waitForTimeout(300);
+  assert.equal(await detailPane.getAttribute('data-rubric-detail'), 'rubrica-sintetica');
+  assert.equal(await detailPane.getAttribute('data-rubric-detail-version'), '2026-11-12');
+
+  rubricsMode = 'empty';
+  await waitForText(page, 'Sin rúbricas versionadas');
+  const emptyView = await page.locator('[data-rubrics-view]').innerText();
+  assert.ok(emptyView.includes('No existe ninguna rúbrica versionada'));
+  assert.ok(emptyView.includes('no es una rúbrica aprobada'));
+  assert.equal(await page.locator('[data-rubric-detail]').count(), 0);
+
+  rubricsMode = 'error';
+  const unreadable = page.locator('[data-rubrics-unreadable]');
+  await unreadable.waitFor();
+  assert.equal(await unreadable.getAttribute('role'), 'alert');
+  assert.ok((await unreadable.innerText()).includes('Las rúbricas no están consultables (synthetic read failure)'));
+  assert.equal(await page.locator('[data-rubric-detail]').count(), 0);
+
+  const actionButtons = await page.locator('main').getByRole('button').allInnerTexts();
+  for (const label of actionButtons) {
+    assert.ok(!/crear|editar|aprobar|evaluar|reevaluar|borrar|eliminar/i.test(label), `forbidden action ${label}`);
+  }
+
+  await page.getByRole('link', { name: 'Nuevo encargo' }).click();
+  await page.getByRole('heading', { name: 'Nuevo encargo' }).waitFor();
+  assert.equal(await page.locator('main [data-rubrics-view]').count(), 0);
+
+  await page.locator(`[data-id="${solo}"]`).click();
+  await page.getByRole('heading', { name: 'Ejecución ccccBBBB' }).waitFor();
+  for (const tab of ['Conversación', 'Entregables', 'Traza', 'Evaluación']) {
+    await page.getByRole('tab', { name: tab }).click();
+    await page.waitForFunction(value =>
+      document.querySelector('[aria-selected="true"]')?.textContent === value, tab);
+    assert.equal(await page.locator('main [data-rubrics-view]').count(), 0);
+    assert.equal(await page.locator('main [data-rubric-detail]').count(), 0);
+  }
+});
+
+test('UI /next: respuestas obsoletas de evaluación no cruzan ejecuciones', { timeout: 120000 }, async t => {
+  const execA = 'ddddCCCC-9b9b-49b9-89b9-9b9b9b9b9b9b';
+  const execB = 'eeeeDDDD-9c9c-49c9-89c9-9c9c9c9c9c9c';
+  const { page } = await openUi(t, {
+    list: () => jsonResponse({ executions: [
+      execution(execA, { status: 'succeeded', sessionID: 'ses_root_s1' }),
+      execution(execB, { status: 'succeeded', sessionID: 'ses_root_s2' }),
+    ] }),
+    evaluations: async id => {
+      if (id === execA) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        return jsonResponse({ executionID: id, source: 'synthetic-fixtures', state: 'ready',
+          evaluations: [evaluationRecord(id, 'eval-lenta-a')] });
+      }
+      return jsonResponse({ executionID: id, source: 'synthetic-fixtures', state: 'ready',
+        evaluations: [evaluationRecord(id, 'eval-rapida-b')] });
+    },
+  });
+  await page.locator(`[data-id="${execA}"]`).click();
+  await page.getByRole('tab', { name: 'Evaluación' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Evaluación');
+
+  await page.locator(`[data-id="${execB}"]`).click();
+  await page.getByRole('tab', { name: 'Evaluación' }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-selected="true"]')?.textContent === 'Evaluación');
+  await page.locator('[data-evaluation="eval-rapida-b"]').waitFor();
+  await page.waitForTimeout(2500);
+  const panelText = await page.getByRole('tabpanel').innerText();
+  assert.ok(panelText.includes('eval-rapida-b'));
+  assert.ok(!panelText.includes('eval-lenta-a'));
 });

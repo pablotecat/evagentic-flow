@@ -11,6 +11,7 @@ import { ExecutionHeader } from './ExecutionHeader';
 import { PriorityBanner } from './PriorityBanner';
 import { ConversationTab, type FocusRequest } from './ConversationTab';
 import { DeliverablesTab } from './DeliverablesTab';
+import { EvaluationTab } from './EvaluationTab';
 import { TraceTab, type TraceDimension } from './TraceTab';
 import { TraceScopeBar } from './TraceScopeBar';
 
@@ -20,8 +21,6 @@ const TAB_LABELS: Record<ExecutionTab, string> = {
   trace: 'Traza',
   evaluation: 'Evaluación',
 };
-
-const EVALUATION_PLACEHOLDER = 'Sin evaluación en este corte: el desenlace técnico no equivale a una aceptación.';
 
 type Props = {
   id: string;
@@ -159,7 +158,7 @@ export function ExecutionView({ id, tab, session, engineReachable }: Props) {
                   onDimensionChange={setTraceDimension}
                   onSelectSession={selectSession}
                 />
-                : <p className={noticeClass}>{EVALUATION_PLACEHOLDER}</p>}
+                : <EvaluationTab execution={execution} />}
         </div>
       </InteractionStateProvider>
     </section>
